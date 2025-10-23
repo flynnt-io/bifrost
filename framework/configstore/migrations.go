@@ -48,6 +48,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddVKMCPConfigsTable(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddApertusEndpointColumn(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -580,6 +583,37 @@ func migrationAddVKMCPConfigsTable(ctx context.Context, db *gorm.DB) error {
 			tx = tx.WithContext(ctx)
 			migrator := tx.Migrator()
 			if err := migrator.DropTable(&tables.TableVirtualKeyMCPConfig{}); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddApertusEndpointColumn adds the apertus_endpoint column to the key table
+func migrationAddApertusEndpointColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_apertus_endpoint_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			if !migrator.HasColumn(&tables.TableKey{}, "apertus_endpoint") {
+				if err := migrator.AddColumn(&tables.TableKey{}, "apertus_endpoint"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TableKey{}, "apertus_endpoint"); err != nil {
 				return err
 			}
 			return nil

@@ -33,6 +33,7 @@ type ModelProvider string
 
 const (
 	OpenAI     ModelProvider = "openai"
+	Apertus    ModelProvider = "apertus"
 	Azure      ModelProvider = "azure"
 	Anthropic  ModelProvider = "anthropic"
 	Bedrock    ModelProvider = "bedrock"
@@ -59,6 +60,7 @@ var SupportedBaseProviders = []ModelProvider{
 
 // StandardProviders is the list of all built-in (non-custom) providers.
 var StandardProviders = []ModelProvider{
+	Apertus,
 	Anthropic,
 	Azure,
 	Bedrock,
