@@ -45,11 +45,15 @@ type TableKey struct {
 	BedrockARN             *string `gorm:"type:text" json:"bedrock_arn,omitempty"`
 	BedrockDeploymentsJSON *string `gorm:"type:text" json:"-"` // JSON serialized map[string]string
 
+	// Apertus config fields (embedded)
+	ApertusEndpoint *string `gorm:"type:text" json:"apertus_endpoint,omitempty"`
+
 	// Virtual fields for runtime use (not stored in DB)
-	Models           []string                  `gorm:"-" json:"models"`
-	AzureKeyConfig   *schemas.AzureKeyConfig   `gorm:"-" json:"azure_key_config,omitempty"`
-	VertexKeyConfig  *schemas.VertexKeyConfig  `gorm:"-" json:"vertex_key_config,omitempty"`
-	BedrockKeyConfig *schemas.BedrockKeyConfig `gorm:"-" json:"bedrock_key_config,omitempty"`
+	Models            []string                   `gorm:"-" json:"models"`
+	AzureKeyConfig    *schemas.AzureKeyConfig    `gorm:"-" json:"azure_key_config,omitempty"`
+	VertexKeyConfig   *schemas.VertexKeyConfig   `gorm:"-" json:"vertex_key_config,omitempty"`
+	BedrockKeyConfig  *schemas.BedrockKeyConfig  `gorm:"-" json:"bedrock_key_config,omitempty"`
+	ApertusKeyConfig  *schemas.ApertusKeyConfig  `gorm:"-" json:"apertus_key_config,omitempty"`
 }
 
 // TableName sets the table name for each model
@@ -161,6 +165,17 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		k.BedrockARN = nil
 		k.BedrockDeploymentsJSON = nil
 	}
+
+	if k.ApertusKeyConfig != nil {
+		if k.ApertusKeyConfig.Endpoint != "" {
+			k.ApertusEndpoint = &k.ApertusKeyConfig.Endpoint
+		} else {
+			k.ApertusEndpoint = nil
+		}
+	} else {
+		k.ApertusEndpoint = nil
+	}
+
 	return nil
 }
 
@@ -253,6 +268,14 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		}
 
 		k.BedrockKeyConfig = bedrockConfig
+	}
+
+	// Reconstruct Apertus config if fields are present
+	if k.ApertusEndpoint != nil {
+		apertusConfig := &schemas.ApertusKeyConfig{
+			Endpoint: *k.ApertusEndpoint,
+		}
+		k.ApertusKeyConfig = apertusConfig
 	}
 
 	return nil

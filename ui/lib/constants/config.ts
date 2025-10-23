@@ -30,6 +30,7 @@ function parseTrialExpiry (dateStr: string | undefined): Date | null {
 // Model placeholders based on provider type
 export const ModelPlaceholders = {
 	default: "e.g. gpt-4, gpt-3.5-turbo. Leave blank for all models.",
+	apertus: "e.g. gpt-4, gpt-4o, gpt-4o-mini, gpt-3.5-turbo",
 	anthropic: "e.g. claude-3-haiku, claude-2.1",
 	azure: "e.g. gpt-4, gpt-35-turbo (must match deployment names)",
 	bedrock: "e.g. claude-v2, titan-text-express-v1, ai21-j2-mid",
@@ -49,6 +50,7 @@ export const ModelPlaceholders = {
 };
 
 export const isKeyRequiredByProvider: Record<ProviderName, boolean> = {
+	apertus: true,
 	anthropic: true,
 	azure: true,
 	bedrock: true,

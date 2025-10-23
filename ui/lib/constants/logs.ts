@@ -1,5 +1,6 @@
 // Known provider names array - centralized definition
 export const KnownProvidersNames = [
+	"apertus",
 	"anthropic",
 	"azure",
 	"bedrock",
@@ -40,6 +41,7 @@ export const RequestTypes = [
 ] as const;
 
 export const ProviderLabels: Record<ProviderName, string> = {
+	apertus: "Apertus",
 	openai: "OpenAI",
 	anthropic: "Anthropic",
 	azure: "Azure",

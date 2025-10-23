@@ -14,6 +14,7 @@ type Key struct {
 	AzureKeyConfig   *AzureKeyConfig   `json:"azure_key_config,omitempty"`   // Azure-specific key configuration
 	VertexKeyConfig  *VertexKeyConfig  `json:"vertex_key_config,omitempty"`  // Vertex-specific key configuration
 	BedrockKeyConfig *BedrockKeyConfig `json:"bedrock_key_config,omitempty"` // AWS Bedrock-specific key configuration
+	ApertusKeyConfig *ApertusKeyConfig `json:"apertus_key_config,omitempty"` // Apertus-specific key configuration
 }
 
 // AzureKeyConfig represents the Azure-specific configuration.
@@ -49,6 +50,12 @@ type BedrockKeyConfig struct {
 
 // NOTE: To use Bedrock IAM role authentication, set both AccessKey and SecretKey to empty strings.
 // To use Bedrock API Key authentication, set Value in Key struct instead.
+
+// ApertusKeyConfig represents the Apertus-specific configuration.
+// It contains Apertus-specific settings for custom endpoint URLs per key.
+type ApertusKeyConfig struct {
+	Endpoint string `json:"endpoint,omitempty"` // Custom endpoint URL for this key
+}
 
 // Account defines the interface for managing provider accounts and their configurations.
 // It provides methods to access provider-specific settings, API keys, and configurations.

@@ -12,6 +12,14 @@ export const customProviderNameSchema = z.string().min(1, "Custom provider name 
 // Model provider name schema (union of known and custom providers)
 export const modelProviderNameSchema = z.union([knownProviderSchema, customProviderNameSchema]);
 
+// Apertus key config schema
+export const apertusKeyConfigSchema = z.object({
+	endpoint: z.union([
+		z.url("Must be a valid URL"),
+		z.string().length(0)
+	]).optional(),
+});
+
 // Azure key config schema
 export const azureKeyConfigSchema = z
 	.object({
@@ -152,14 +160,15 @@ export const modelProviderKeySchema = z
 				})
 				.pipe(z.number().min(0.1, "Weight must be greater than 0.1").max(1, "Weight must be less than 1")),
 		]),
+		apertus_key_config: apertusKeyConfigSchema.optional(),
 		azure_key_config: azureKeyConfigSchema.optional(),
 		vertex_key_config: vertexKeyConfigSchema.optional(),
 		bedrock_key_config: bedrockKeyConfigSchema.optional(),
 	})
 	.refine(
 		(data) => {
-			// If bedrock_key_config or azure_key_config is present, value is not required
-			if (data.bedrock_key_config || data.azure_key_config || data.vertex_key_config) {
+			// If bedrock_key_config, azure_key_config, vertex_key_config, or apertus_key_config is present, value is not required
+			if (data.bedrock_key_config || data.azure_key_config || data.vertex_key_config || data.apertus_key_config) {
 				return true;
 			}
 			// Otherwise, value is required

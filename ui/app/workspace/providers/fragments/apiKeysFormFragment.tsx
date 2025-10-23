@@ -23,6 +23,8 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 	const isVertex = providerName === "vertex";
 	const isAzure = providerName === "azure";
 	const modelsPlaceholder = ModelPlaceholders[providerName as keyof typeof ModelPlaceholders] ?? ModelPlaceholders.default;
+	const isApertus = providerName === "apertus";
+
 	return (
 		<div data-tab="api-keys" className="space-y-4 overflow-hidden">
 			{isBedrock && (
@@ -341,6 +343,33 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 										}}
 										rows={3}
 										className="max-w-full font-mono text-sm wrap-anywhere"
+									/>
+								</FormControl>
+								<FormMessage />
+							</FormItem>
+						)}
+					/>
+				</div>
+			)}
+			{isApertus && (
+				<div className="space-y-4">
+					<FormField
+						control={control}
+						name={`key.apertus_key_config.endpoint`}
+						render={({ field }) => (
+							<FormItem>
+								<FormLabel>Custom Endpoint (Optional)</FormLabel>
+								<FormDescription>
+									Override the base URL for this specific key. Leave blank to use the provider's default base URL.
+								</FormDescription>
+								<FormControl>
+									<Input
+										placeholder="https://your-custom-endpoint.com or env.APERTUS_ENDPOINT"
+										value={field.value ?? ""}
+										onChange={field.onChange}
+										onBlur={field.onBlur}
+										name={field.name}
+										ref={field.ref}
 									/>
 								</FormControl>
 								<FormMessage />

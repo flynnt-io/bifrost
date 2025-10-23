@@ -1421,6 +1421,8 @@ func (bifrost *Bifrost) createBaseProvider(providerKey schemas.ModelProvider, co
 	switch targetProviderKey {
 	case schemas.OpenAI:
 		return openai.NewOpenAIProvider(config, bifrost.logger), nil
+	case schemas.Apertus:
+		return apertus.NewApertusProvider(config, bifrost.logger), nil
 	case schemas.Anthropic:
 		return anthropic.NewAnthropicProvider(config, bifrost.logger), nil
 	case schemas.Bedrock:
