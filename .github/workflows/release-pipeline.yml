@@ -1,9 +1,11 @@
 name: Release Pipeline
 
-# Triggers automatically on push to main when any version file changes
+# DISABLED: Only runs manually via workflow_dispatch
+# To enable automatic releases, uncomment the push trigger below
 on:
-  push:
-    branches: ["main"]
+  workflow_dispatch:
+  # push:
+  #   branches: ["main"]
 
 # Prevent concurrent runs
 concurrency:
