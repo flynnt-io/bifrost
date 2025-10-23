@@ -116,7 +116,7 @@ jobs:
             ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.git_sha }}
             ghcr.io/${{ github.repository }}:apertus-latest
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |

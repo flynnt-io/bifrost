@@ -1,0 +1,39 @@
+{
+  "name": "Bifrost Development",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.24.3"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "24"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+        "ms-python.python",
+        "ms-azuretools.vscode-docker",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": true,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "[go]": {
+          "editor.defaultFormatter": "golang.go"
+        }
+      }
+    }
+  },
+  "forwardPorts": [
+    8080
+  ],
+  "postCreateCommand": "make --version && go version && node --version && npm i -g @anthropic-ai/claude-code",
+  "remoteUser": "vscode"
+}
