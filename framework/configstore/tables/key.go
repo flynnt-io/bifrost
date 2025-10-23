@@ -77,6 +77,9 @@ type TableKey struct {
 
 	EncryptionStatus string `gorm:"type:varchar(20);default:'plain_text'" json:"-"`
 
+	// Apertus config fields (embedded)
+	ApertusEndpoint *string `gorm:"type:text" json:"apertus_endpoint,omitempty"`
+
 	// Virtual fields for runtime use (not stored in DB)
 	Models             schemas.WhiteList           `gorm:"-" json:"models"` // ["*"] allows all models; empty denies all (deny-by-default)
 	BlacklistedModels  schemas.BlackList           `gorm:"-" json:"blacklisted_models"`
@@ -88,6 +91,7 @@ type TableKey struct {
 	ReplicateKeyConfig *schemas.ReplicateKeyConfig `gorm:"-" json:"replicate_key_config,omitempty"`
 	OllamaKeyConfig    *schemas.OllamaKeyConfig    `gorm:"-" json:"ollama_key_config,omitempty"`
 	SGLKeyConfig       *schemas.SGLKeyConfig       `gorm:"-" json:"sgl_key_config,omitempty"`
+	ApertusKeyConfig   *schemas.ApertusKeyConfig   `gorm:"-" json:"apertus_key_config,omitempty"`
 }
 
 // TableName sets the table name for each model
@@ -405,6 +409,17 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		}
 		k.EncryptionStatus = EncryptionStatusEncrypted
 	}
+
+	if k.ApertusKeyConfig != nil {
+		if k.ApertusKeyConfig.Endpoint != "" {
+			k.ApertusEndpoint = &k.ApertusKeyConfig.Endpoint
+		} else {
+			k.ApertusEndpoint = nil
+		}
+	} else {
+		k.ApertusEndpoint = nil
+	}
+
 	return nil
 }
 
@@ -625,5 +640,14 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 	} else {
 		k.SGLKeyConfig = nil
 	}
+
+	// Reconstruct Apertus config if fields are present
+	if k.ApertusEndpoint != nil {
+		apertusConfig := &schemas.ApertusKeyConfig{
+			Endpoint: *k.ApertusEndpoint,
+		}
+		k.ApertusKeyConfig = apertusConfig
+	}
+
 	return nil
 }

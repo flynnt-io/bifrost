@@ -59,6 +59,7 @@ const (
 	VLLM        ModelProvider = "vllm"
 	Runway      ModelProvider = "runway"
 	Fireworks   ModelProvider = "fireworks"
+	Apertus     ModelProvider = "apertus"
 )
 
 // SupportedBaseProviders is the list of base providers allowed for custom providers.
@@ -74,6 +75,7 @@ var SupportedBaseProviders = []ModelProvider{
 
 // StandardProviders is the list of all built-in (non-custom) providers.
 var StandardProviders = []ModelProvider{
+	Apertus,
 	Anthropic,
 	Azure,
 	Bedrock,

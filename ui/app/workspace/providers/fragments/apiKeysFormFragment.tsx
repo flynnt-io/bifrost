@@ -75,6 +75,8 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 	const isBedrock = providerName === "bedrock";
 	const isVertex = providerName === "vertex";
 	const isAzure = providerName === "azure";
+
+	const isApertus = providerName === "apertus";
 	const isReplicate = providerName === "replicate";
 	const isVLLM = providerName === "vllm";
 	const isOllama = providerName === "ollama";
@@ -662,6 +664,33 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 							)}
 						/>
 					)}
+				</div>
+			)}
+			{isApertus && (
+				<div className="space-y-4">
+					<FormField
+						control={control}
+						name={`key.apertus_key_config.endpoint`}
+						render={({ field }) => (
+							<FormItem>
+								<FormLabel>Custom Endpoint (Optional)</FormLabel>
+								<FormDescription>
+									Override the base URL for this specific key. Leave blank to use the provider's default base URL.
+								</FormDescription>
+								<FormControl>
+									<Input
+										placeholder="https://your-custom-endpoint.com or env.APERTUS_ENDPOINT"
+										value={field.value ?? ""}
+										onChange={field.onChange}
+										onBlur={field.onBlur}
+										name={field.name}
+										ref={field.ref}
+									/>
+								</FormControl>
+								<FormMessage />
+							</FormItem>
+						)}
+					/>
 				</div>
 			)}
 			{isReplicate && (

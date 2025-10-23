@@ -139,6 +139,7 @@ type Key struct {
 	ConfigHash         string              `json:"config_hash,omitempty"`          // Hash of config.json version, used for change detection
 	Status             KeyStatusType       `json:"status,omitempty"`               // Status of key
 	Description        string              `json:"description,omitempty"`          // Description of key
+	ApertusKeyConfig   *ApertusKeyConfig   `json:"apertus_key_config,omitempty"`   // Apertus-specific key configuration
 }
 
 type KeyAliases map[string]string
@@ -270,6 +271,12 @@ type OllamaKeyConfig struct {
 // enabling per-key routing and round-robin load balancing across multiple SGLang instances.
 type SGLKeyConfig struct {
 	URL EnvVar `json:"url"` // SGLang server base URL (required, supports env. prefix)
+}
+
+// ApertusKeyConfig represents the Apertus-specific configuration.
+// It contains Apertus-specific settings for custom endpoint URLs per key.
+type ApertusKeyConfig struct {
+	Endpoint string `json:"endpoint,omitempty"` // Custom endpoint URL for this key
 }
 
 // Account defines the interface for managing provider accounts and their configurations.

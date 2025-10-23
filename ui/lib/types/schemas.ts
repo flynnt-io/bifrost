@@ -56,6 +56,13 @@ export const customProviderNameSchema = z.string().min(1, "Custom provider name 
 // Model provider name schema (union of known and custom providers)
 export const modelProviderNameSchema = z.union([knownProviderSchema, customProviderNameSchema]);
 
+// Apertus key config schema
+export const apertusKeyConfigSchema = z.object({
+  endpoint: z
+    .union([z.url("Must be a valid URL"), z.string().length(0)])
+    .optional(),
+});
+
 // EnvVar schema - matches the Go EnvVar type from schemas/env.go
 export const _envVarBase = z.object({
 	value: z.string().optional(),
