@@ -1,10 +1,12 @@
 name: NPX Package Publish
 
-# Triggers when npx package is tagged
+# DISABLED: Only runs manually via workflow_dispatch
+# To enable automatic publishing, uncomment the push trigger below
 on:
-  push:
-    tags:
-      - "npx/v*"
+  workflow_dispatch:
+  # push:
+  #   tags:
+  #     - "npx/v*"
 
 # Prevent concurrent runs for the same trigger
 concurrency:
