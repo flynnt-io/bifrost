@@ -1,0 +1,136 @@
+name: Build and Push Docker Image
+
+# Manual trigger only - run from Actions tab
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker image tag (leave empty to auto-detect from git tag)'
+        required: false
+        type: string
+
+# Prevent concurrent builds
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Determine version tag
+        id: version
+        run: |
+          # Use input tag if provided, otherwise try to detect from git
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+            echo "Using manually provided tag: $TAG"
+          else
+            # Try to get tag pointing to current commit
+            TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+
+            if [ -z "$TAG" ]; then
+              # No exact tag, try to get the most recent tag
+              TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+              if [ -z "$TAG" ]; then
+                # Still no tag, use branch name and short SHA
+                BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                SHORT_SHA=$(git rev-parse --short HEAD)
+                TAG="${BRANCH}-${SHORT_SHA}"
+                echo "No git tag found, using: $TAG"
+              else
+                echo "Using most recent tag: $TAG"
+              fi
+            else
+              echo "Using exact tag at HEAD: $TAG"
+            fi
+          fi
+
+          # Remove 'v' prefix for version if present
+          VERSION=${TAG#v}
+
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+          # Extract git SHA (short)
+          GIT_SHA=$(git rev-parse --short HEAD)
+          echo "git_sha=${GIT_SHA}" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "📌 Version Info:"
+          echo "  Tag: $TAG"
+          echo "  Version: $VERSION"
+          echo "  Git SHA: $GIT_SHA"
+
+      - name: Build UI
+        run: |
+          echo "Building UI..."
+          make build-ui
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./transports/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.git_sha }}
+            ghcr.io/${{ github.repository }}:apertus-latest
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+
+      - name: Build complete
+        run: |
+          echo "✅ Docker image built and pushed successfully!"
+          echo ""
+          echo "📦 Images pushed to GitHub Container Registry:"
+          echo "  • ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.tag }}"
+          echo "  • ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.version }}"
+          echo "  • ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.git_sha }}"
+          echo "  • ghcr.io/${{ github.repository }}:apertus-latest"
+          echo ""
+          echo "🚀 Pull the image:"
+          echo "  docker pull ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.tag }}"
