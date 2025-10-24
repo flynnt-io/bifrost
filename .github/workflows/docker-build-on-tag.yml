@@ -108,7 +108,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./transports/Dockerfile
+          file: ./transports/Dockerfile-apertus
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:apertus-${{ steps.version.outputs.tag }}
