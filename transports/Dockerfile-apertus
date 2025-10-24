@@ -1,0 +1,138 @@
+# --- UI Build Stage: Build the Next.js frontend ---
+FROM node:24-alpine3.22 AS ui-builder
+WORKDIR /app
+
+# Copy UI package files and install dependencies
+COPY ui/package*.json ./
+RUN npm ci
+
+# Copy UI source code
+COPY ui/ ./
+
+# Build UI (skip the copy-build step)
+RUN npx next build
+RUN node scripts/fix-paths.js
+# Skip the copy-build step since we'll copy the files in the Go build stage
+
+# --- Go Build Stage: Compile the Go binary with full workspace ---
+FROM golang:1.24-alpine3.22 AS builder
+WORKDIR /app
+
+# Install dependencies including gcc for CGO and sqlite
+RUN apk add --no-cache upx gcc musl-dev sqlite-dev
+
+# Set environment for CGO-enabled build (required for go-sqlite3)
+ENV CGO_ENABLED=1 GOOS=linux
+
+# Copy all module dependency files first (for better layer caching)
+COPY core/go.mod core/go.sum ./core/
+COPY framework/go.mod framework/go.sum ./framework/
+COPY transports/go.mod transports/go.sum ./transports/
+COPY plugins/governance/go.mod plugins/governance/go.sum ./plugins/governance/
+COPY plugins/jsonparser/go.mod plugins/jsonparser/go.sum ./plugins/jsonparser/
+COPY plugins/logging/go.mod plugins/logging/go.sum ./plugins/logging/
+COPY plugins/maxim/go.mod plugins/maxim/go.sum ./plugins/maxim/
+COPY plugins/mocker/go.mod plugins/mocker/go.sum ./plugins/mocker/
+COPY plugins/otel/go.mod plugins/otel/go.sum ./plugins/otel/
+COPY plugins/semanticcache/go.mod plugins/semanticcache/go.sum ./plugins/semanticcache/
+COPY plugins/telemetry/go.mod plugins/telemetry/go.sum ./plugins/telemetry/
+
+# Download dependencies for all modules
+WORKDIR /app/core
+RUN go mod download
+WORKDIR /app/framework
+RUN go mod download
+WORKDIR /app/transports
+RUN go mod download
+WORKDIR /app/plugins/governance
+RUN go mod download
+WORKDIR /app/plugins/jsonparser
+RUN go mod download
+WORKDIR /app/plugins/logging
+RUN go mod download
+WORKDIR /app/plugins/maxim
+RUN go mod download
+WORKDIR /app/plugins/mocker
+RUN go mod download
+WORKDIR /app/plugins/otel
+RUN go mod download
+WORKDIR /app/plugins/semanticcache
+RUN go mod download
+WORKDIR /app/plugins/telemetry
+RUN go mod download
+
+# Copy all source code
+WORKDIR /app
+COPY core/ ./core/
+COPY framework/ ./framework/
+COPY transports/ ./transports/
+COPY plugins/ ./plugins/
+
+# Set up Go workspace with all local modules (this enables using the local Apertus provider)
+RUN go work init ./core ./framework ./transports \
+    ./plugins/governance ./plugins/jsonparser ./plugins/logging \
+    ./plugins/maxim ./plugins/mocker ./plugins/otel \
+    ./plugins/semanticcache ./plugins/telemetry && \
+    go work sync
+
+# Copy UI build to the correct location
+COPY --from=ui-builder /app/out ./transports/bifrost-http/ui
+
+# Build the binary with CGO enabled and static SQLite linking
+# Note: GOWORK is NOT disabled, so the workspace will be used
+WORKDIR /app/transports
+ARG VERSION=unknown
+RUN go build \
+    -ldflags="-w -s -extldflags '-static' -X main.Version=v${VERSION}" \
+    -a -trimpath \
+    -tags "sqlite_static" \
+    -o /app/main \
+    ./bifrost-http
+
+# Compress binary with upx
+RUN upx --best --lzma /app/main
+
+# Verify build succeeded
+RUN test -f /app/main || (echo "Build failed" && exit 1)
+
+# --- Runtime Stage: Minimal runtime image ---
+FROM alpine:3.22
+WORKDIR /app
+
+# Create data directory and set up user
+COPY --from=builder /app/main .
+COPY --from=builder /app/transports/docker-entrypoint.sh .
+
+# Getting arguments
+ARG ARG_APP_PORT=8080
+ARG ARG_APP_HOST=0.0.0.0
+ARG ARG_LOG_LEVEL=info
+ARG ARG_LOG_STYLE=json
+ARG ARG_APP_DIR=/app/data
+
+# Environment variables with defaults (can be overridden at runtime)
+ENV APP_PORT=$ARG_APP_PORT \
+    APP_HOST=$ARG_APP_HOST \
+    LOG_LEVEL=$ARG_LOG_LEVEL \
+    LOG_STYLE=$ARG_LOG_STYLE \
+    APP_DIR=$ARG_APP_DIR
+
+
+RUN mkdir -p $APP_DIR/logs && \
+    adduser -D -s /bin/sh appuser && \
+    chown -R appuser:appuser /app && \
+    chmod +x /app/docker-entrypoint.sh
+USER appuser
+
+
+# Declare volume for data persistence
+VOLUME ["/app/data"]
+EXPOSE $APP_PORT
+
+# Health check for container status monitoring
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${APP_PORT}/metrics || exit 1
+
+# Use entrypoint script that handles volume permissions and argument processing
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["/app/main"]
