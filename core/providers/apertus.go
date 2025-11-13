@@ -99,11 +99,13 @@ func (provider *ApertusProvider) ListModels(ctx context.Context, keys []schemas.
 		models = append(models, model)
 	}
 
-	// Convert to Model format
+	// Convert to Model format with provider prefix
 	modelInfos := make([]schemas.Model, len(models))
+	ownedBy := "system"
 	for i, model := range models {
 		modelInfos[i] = schemas.Model{
-			ID: model,
+			ID:      string(providerName) + "/" + model,
+			OwnedBy: &ownedBy,
 		}
 	}
 
