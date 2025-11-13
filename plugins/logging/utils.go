@@ -12,6 +12,12 @@ import (
 	"github.com/maximhq/bifrost/framework/logstore"
 )
 
+// KeyPair represents an ID-Name pair for keys
+type KeyPair struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // LogManager defines the main interface that combines all logging functionality
 type LogManager interface {
 	// Search searches for log entries based on filters and pagination
@@ -22,6 +28,12 @@ type LogManager interface {
 
 	// GetAvailableModels returns all unique models from logs
 	GetAvailableModels(ctx context.Context) []string
+
+	// GetAvailableSelectedKeys returns all unique selected key ID-Name pairs from logs
+	GetAvailableSelectedKeys(ctx context.Context) []KeyPair
+
+	// GetAvailableVirtualKeys returns all unique virtual key ID-Name pairs from logs
+	GetAvailableVirtualKeys(ctx context.Context) []KeyPair
 }
 
 // PluginLogManager implements LogManager interface wrapping the plugin
@@ -43,6 +55,16 @@ func (p *PluginLogManager) GetDroppedRequests(ctx context.Context) int64 {
 // GetAvailableModels returns all unique models from logs
 func (p *PluginLogManager) GetAvailableModels(ctx context.Context) []string {
 	return p.plugin.GetAvailableModels(ctx)
+}
+
+// GetAvailableSelectedKeys returns all unique selected key ID-Name pairs from logs
+func (p *PluginLogManager) GetAvailableSelectedKeys(ctx context.Context) []KeyPair {
+	return p.plugin.GetAvailableSelectedKeys(ctx)
+}
+
+// GetAvailableVirtualKeys returns all unique virtual key ID-Name pairs from logs
+func (p *PluginLogManager) GetAvailableVirtualKeys(ctx context.Context) []KeyPair {
+	return p.plugin.GetAvailableVirtualKeys(ctx)
 }
 
 // GetPluginLogManager returns a LogManager interface for this plugin
@@ -86,15 +108,12 @@ func retryOnNotFound(ctx context.Context, operation func() error) error {
 }
 
 // extractInputHistory extracts input history from request input
-func (p *LoggerPlugin) extractInputHistory(request *schemas.BifrostRequest) []schemas.ChatMessage {
+func (p *LoggerPlugin) extractInputHistory(request *schemas.BifrostRequest) ([]schemas.ChatMessage, []schemas.ResponsesMessage) {
 	if request.ChatRequest != nil {
-		return request.ChatRequest.Input
+		return request.ChatRequest.Input, []schemas.ResponsesMessage{}
 	}
-	if request.ResponsesRequest != nil {
-		messages := schemas.ToChatMessages(request.ResponsesRequest.Input)
-		if len(messages) > 0 {
-			return messages
-		}
+	if request.ResponsesRequest != nil && len(request.ResponsesRequest.Input) > 0 {
+		return []schemas.ChatMessage{}, request.ResponsesRequest.Input
 	}
 	if request.TextCompletionRequest != nil {
 		var text string
@@ -114,7 +133,7 @@ func (p *LoggerPlugin) extractInputHistory(request *schemas.BifrostRequest) []sc
 					ContentStr: &text,
 				},
 			},
-		}
+		}, []schemas.ResponsesMessage{}
 	}
 	if request.EmbeddingRequest != nil {
 		texts := request.EmbeddingRequest.Input.Texts
@@ -139,7 +158,27 @@ func (p *LoggerPlugin) extractInputHistory(request *schemas.BifrostRequest) []sc
 					ContentBlocks: contentBlocks,
 				},
 			},
+		}, []schemas.ResponsesMessage{}
+	}
+	return []schemas.ChatMessage{}, []schemas.ResponsesMessage{}
+}
+
+// getStringFromContext safely extracts a string value from context
+func getStringFromContext(ctx context.Context, key any) string {
+	if value := ctx.Value(key); value != nil {
+		if str, ok := value.(string); ok {
+			return str
 		}
 	}
-	return []schemas.ChatMessage{}
+	return ""
+}
+
+// getIntFromContext safely extracts an int value from context
+func getIntFromContext(ctx context.Context, key any) int {
+	if value := ctx.Value(key); value != nil {
+		if intVal, ok := value.(int); ok {
+			return intVal
+		}
+	}
+	return 0
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,7 +23,7 @@ import (
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/logstore"
-	"github.com/maximhq/bifrost/framework/pricing"
+	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/vectorstore"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"gorm.io/gorm"
@@ -42,6 +43,7 @@ type HandlerStore interface {
 type ConfigData struct {
 	Client            *configstore.ClientConfig             `json:"client"`
 	EncryptionKey     string                                `json:"encryption_key"`
+	AuthConfig        *configstore.AuthConfig               `json:"auth_config,omitempty"`
 	Providers         map[string]configstore.ProviderConfig `json:"providers"`
 	FrameworkConfig   *framework.FrameworkConfig            `json:"framework,omitempty"`
 	MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
@@ -52,7 +54,7 @@ type ConfigData struct {
 	Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
 }
 
-// UnmarshalJSON unmarshals the ConfigData from JSON using internal unmarshallers
+// UnmarshalJSON umarshals the ConfigData from JSON using internal unmarshallers
 // for VectorStoreConfig, ConfigStoreConfig, and LogsStoreConfig to ensure proper
 // type safety and configuration parsing.
 func (cd *ConfigData) UnmarshalJSON(data []byte) error {
@@ -61,6 +63,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 		FrameworkConfig   json.RawMessage                       `json:"framework,omitempty"`
 		Client            *configstore.ClientConfig             `json:"client"`
 		EncryptionKey     string                                `json:"encryption_key"`
+		AuthConfig        *configstore.AuthConfig               `json:"auth_config,omitempty"`
 		Providers         map[string]configstore.ProviderConfig `json:"providers"`
 		MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
 		Governance        *configstore.GovernanceConfig         `json:"governance,omitempty"`
@@ -78,6 +81,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	// Set simple fields
 	cd.Client = temp.Client
 	cd.EncryptionKey = temp.EncryptionKey
+	cd.AuthConfig = temp.AuthConfig
 	cd.Providers = temp.Providers
 	cd.MCP = temp.MCP
 	cd.Governance = temp.Governance
@@ -161,7 +165,7 @@ type Config struct {
 	PluginConfigs []*schemas.PluginConfig
 
 	// Pricing manager
-	PricingManager *pricing.PricingManager
+	PricingManager *modelcatalog.ModelCatalog
 }
 
 var DefaultClientConfig = configstore.ClientConfig{
@@ -169,6 +173,7 @@ var DefaultClientConfig = configstore.ClientConfig{
 	PrometheusLabels:        []string{},
 	InitialPoolSize:         schemas.DefaultInitialPoolSize,
 	EnableLogging:           true,
+	DisableContentLogging:   false,
 	EnableGovernance:        true,
 	EnforceGovernanceHeader: false,
 	AllowDirectKeys:         false,
@@ -271,6 +276,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to get logs store config: %w", err)
 			}
+			// Still consider the back
 			if logStoreConfig == nil {
 				logStoreConfig = &logstore.Config{
 					Enabled: true,
@@ -280,11 +286,28 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 					},
 				}
 			}
-			logger.Info("config store initialized; initializing logs store.")
+			// Initializing logs store
 			config.LogsStore, err = logstore.NewLogStore(ctx, logStoreConfig, logger)
 			if err != nil {
-				return nil, fmt.Errorf("failed to initialize logs store: %v", err)
+				if logStoreConfig.Type == logstore.LogStoreTypeSQLite && os.IsNotExist(err) && logStoreConfig.Config.(*logstore.SQLiteConfig).Path != logsDBPath {
+					logger.Warn("failed to locate logstore file at path: %s: %v. Creating new one at path: %s", logStoreConfig.Config, err, logsDBPath)
+					// Then we will try to create a new one
+					logStoreConfig = &logstore.Config{
+						Enabled: true,
+						Type:    logstore.LogStoreTypeSQLite,
+						Config: &logstore.SQLiteConfig{
+							Path: logsDBPath,
+						},
+					}
+					config.LogsStore, err = logstore.NewLogStore(ctx, logStoreConfig, logger)
+					if err != nil {
+						return nil, fmt.Errorf("failed to initialize logs store: %v", err)
+					}
+				} else {
+					return nil, fmt.Errorf("failed to initialize logs store: %v", err)
+				}
 			}
+			// Checking if path is present and accessible or not
 			logger.Info("logs store initialized.")
 			err = config.ConfigStore.UpdateLogsStoreConfig(ctx, logStoreConfig)
 			if err != nil {
@@ -349,6 +372,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 			if governanceConfig != nil {
 				config.GovernanceConfig = governanceConfig
 			}
+			// Updating auth config if present in config
 			// Checking if MCP config already exists
 			mcpConfig, err := config.ConfigStore.GetMCPConfig(ctx)
 			if err != nil {
@@ -389,6 +413,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 						Name:    plugin.Name,
 						Enabled: plugin.Enabled,
 						Config:  plugin.Config,
+						Path:    plugin.Path,
 					}
 					if plugin.Name == semanticcache.PluginName {
 						if err := config.AddProviderKeysToSemanticCacheConfig(pluginConfig); err != nil {
@@ -424,29 +449,35 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 			if err != nil {
 				logger.Warn("failed to get framework config from store: %v", err)
 			}
-			pricingConfig := &pricing.Config{}
+			pricingConfig := &modelcatalog.Config{}
 			if frameworkConfig != nil && frameworkConfig.PricingURL != nil {
 				pricingConfig.PricingURL = frameworkConfig.PricingURL
 			} else {
-				pricingConfig.PricingURL = bifrost.Ptr(pricing.DefaultPricingURL)
+				pricingConfig.PricingURL = bifrost.Ptr(modelcatalog.DefaultPricingURL)
 			}
 			if frameworkConfig != nil && frameworkConfig.PricingSyncInterval != nil && *frameworkConfig.PricingSyncInterval > 0 {
 				syncDuration := time.Duration(*frameworkConfig.PricingSyncInterval) * time.Second
 				pricingConfig.PricingSyncInterval = &syncDuration
 			} else {
-				pricingConfig.PricingSyncInterval = bifrost.Ptr(pricing.DefaultPricingSyncInterval)
+				pricingConfig.PricingSyncInterval = bifrost.Ptr(modelcatalog.DefaultPricingSyncInterval)
 			}
 			// Updating DB with latest config
 			configID := uint(0)
 			if frameworkConfig != nil {
 				configID = frameworkConfig.ID
 			}
-			duration := pricingConfig.PricingSyncInterval.Seconds()
-			logger.Debug("updating framework config with duration: %d", duration)
+			var durationSec int64
+			if pricingConfig.PricingSyncInterval != nil {
+				durationSec = int64((*pricingConfig.PricingSyncInterval).Seconds())
+			} else {
+				d := modelcatalog.DefaultPricingSyncInterval
+				durationSec = int64(d.Seconds())
+			}
+			logger.Debug("updating framework config with duration: %d", durationSec)
 			err = config.ConfigStore.UpdateFrameworkConfig(ctx, &configstoreTables.TableFrameworkConfig{
 				ID:                  configID,
 				PricingURL:          pricingConfig.PricingURL,
-				PricingSyncInterval: bifrost.Ptr(int64(duration)),
+				PricingSyncInterval: bifrost.Ptr(durationSec),
 			})
 			if err != nil {
 				return nil, fmt.Errorf("failed to update framework config: %w", err)
@@ -455,7 +486,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 				Pricing: pricingConfig,
 			}
 			// Initializing pricing manager
-			pricingManager, err := pricing.Init(ctx, pricingConfig, config.ConfigStore, logger)
+			pricingManager, err := modelcatalog.Init(ctx, pricingConfig, config.ConfigStore, logger)
 			if err != nil {
 				logger.Warn("failed to initialize pricing manager: %v", err)
 			}
@@ -772,6 +803,32 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		}
 	}
 
+	if configData.AuthConfig != nil {
+		if config.ConfigStore != nil {
+			configStoreAuthConfig, err := config.ConfigStore.GetAuthConfig(ctx)
+			if err == nil && configStoreAuthConfig == nil {
+				// Adding this config
+				if err := config.ConfigStore.UpdateAuthConfig(ctx, configData.AuthConfig); err != nil {
+					logger.Warn("failed to update auth config: %v", err)
+				}
+			}
+		} else if governanceConfig != nil && governanceConfig.AuthConfig == nil {
+			// Adding this config
+			governanceConfig.AuthConfig = configData.AuthConfig
+			// Resolving username and password if the value contains env.VAR_NAME
+			if configData.AuthConfig.AdminUserName != "" {
+				if configData.AuthConfig.AdminUserName, _, err = config.processEnvValue(configData.AuthConfig.AdminUserName); err != nil {
+					logger.Warn("failed to resolve username: %v", err)
+				}
+			}
+			if configData.AuthConfig.AdminPassword != "" {
+				if configData.AuthConfig.AdminPassword, _, err = config.processEnvValue(configData.AuthConfig.AdminPassword); err != nil {
+					logger.Warn("failed to resolve password: %v", err)
+				}
+			}
+		}
+	}
+
 	// 5. Check for Plugins
 
 	if config.ConfigStore != nil {
@@ -787,6 +844,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 					Name:    plugin.Name,
 					Enabled: plugin.Enabled,
 					Config:  plugin.Config,
+					Path:    plugin.Path,
 				}
 				if plugin.Name == semanticcache.PluginName {
 					if err := config.AddProviderKeysToSemanticCacheConfig(pluginConfig); err != nil {
@@ -798,10 +856,21 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		}
 	}
 
-	// If plugins are not present in the store, we will use the config file
-	if len(config.PluginConfigs) == 0 && len(configData.Plugins) > 0 {
+	// First we are loading plugins from the db
+	if len(configData.Plugins) > 0 {
 		logger.Debug("no plugins found in store, processing from config file")
-		config.PluginConfigs = configData.Plugins
+		if len(config.PluginConfigs) == 0 {
+			config.PluginConfigs = configData.Plugins
+		} else {
+			// Here we will append new plugins to the config.PluginConfigs
+			for _, plugin := range configData.Plugins {
+				if !slices.ContainsFunc(config.PluginConfigs, func(p *schemas.PluginConfig) bool {
+					return p.Name == plugin.Name
+				}) {
+					config.PluginConfigs = append(config.PluginConfigs, plugin)
+				}
+			}
+		}
 
 		for i, plugin := range config.PluginConfigs {
 			if plugin.Name == semanticcache.PluginName {
@@ -825,6 +894,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 					Name:    plugin.Name,
 					Enabled: plugin.Enabled,
 					Config:  pluginConfigCopy,
+					Path:    plugin.Path,
 				}
 				if plugin.Name == semanticcache.PluginName {
 					if err := config.RemoveProviderKeysFromSemanticCacheConfig(pluginConfig); err != nil {
@@ -854,7 +924,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	}
 
 	// Initializing pricing manager
-	pricingConfig := &pricing.Config{}
+	pricingConfig := &modelcatalog.Config{}
 	if config.ConfigStore != nil {
 		frameworkConfig, err := config.ConfigStore.GetFrameworkConfig(ctx)
 		if err != nil {
@@ -877,7 +947,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		Pricing: pricingConfig,
 	}
 	// Creating pricing manager
-	pricingManager, err := pricing.Init(ctx, pricingConfig, config.ConfigStore, logger)
+	pricingManager, err := modelcatalog.Init(ctx, pricingConfig, config.ConfigStore, logger)
 	if err != nil {
 		logger.Warn("failed to initialize pricing manager: %v", err)
 	}
@@ -982,6 +1052,38 @@ func (c *Config) GetLoadedPlugins() []schemas.Plugin {
 		return *plugins
 	}
 	return nil
+}
+
+// AddLoadedPlugin adds a plugin to the loaded plugins list.
+// This method is lock-free and safe for concurrent access from hot paths.
+// It iterates through the plugin slice (typically 5-10 plugins, ~50ns overhead).
+// For small plugin counts, this is faster than maintaining a separate map.
+func (c *Config) AddLoadedPlugin(plugin schemas.Plugin) error {
+	for {
+		oldPlugins := c.Plugins.Load()
+		if oldPlugins == nil {
+			// Initialize with the new plugin
+			newPlugins := []schemas.Plugin{plugin}
+			if c.Plugins.CompareAndSwap(oldPlugins, &newPlugins) {
+				return nil
+			}
+			continue
+		}
+		newPlugins := make([]schemas.Plugin, len(*oldPlugins))
+		copy(newPlugins, *oldPlugins)
+		// Checking if the plugin is already loaded
+		for i, p := range *oldPlugins {
+			if p.GetName() == plugin.GetName() {
+				// Removing the plugin from the list
+				newPlugins = append(newPlugins[:i], newPlugins[i+1:]...)
+				break
+			}
+		}
+		newPlugins = append(newPlugins, plugin)
+		if c.Plugins.CompareAndSwap(oldPlugins, &newPlugins) {
+			return nil
+		}
+	}
 }
 
 // IsPluginLoaded checks if a plugin with the given name is currently loaded.
@@ -1452,12 +1554,35 @@ func (c *Config) processMCPEnvVars() error {
 					EnvVar:     envVar,
 					Provider:   "",
 					KeyType:    "connection_string",
-					ConfigPath: fmt.Sprintf("mcp.client_configs.%s.connection_string", clientConfig.Name),
+					ConfigPath: fmt.Sprintf("mcp.client_configs.%s.connection_string", clientConfig.ID),
 					KeyID:      "", // Empty for MCP connection strings
 				})
 			}
 			c.MCPConfig.ClientConfigs[i].ConnectionString = &newValue
 		}
+
+		// Process Headers if present
+		if clientConfig.Headers != nil {
+			for header, value := range clientConfig.Headers {
+				newValue, envVar, err := c.processEnvValue(value)
+				if err != nil {
+					logger.Warn("failed to process env vars in MCP client %s: %v", clientConfig.Name, err)
+					missingEnvVars = append(missingEnvVars, envVar)
+					continue
+				}
+				if envVar != "" {
+					c.EnvKeys[envVar] = append(c.EnvKeys[envVar], configstore.EnvKeyInfo{
+						EnvVar:     envVar,
+						Provider:   "",
+						KeyType:    "mcp_header",
+						ConfigPath: fmt.Sprintf("mcp.client_configs.%s.headers.%s", clientConfig.ID, header),
+						KeyID:      "", // Empty for MCP headers
+					})
+				}
+				clientConfig.Headers[header] = newValue
+			}
+		}
+		c.MCPConfig.ClientConfigs[i].Headers = clientConfig.Headers
 	}
 
 	if len(missingEnvVars) > 0 {
@@ -1475,6 +1600,36 @@ func (c *Config) SetBifrostClient(client *bifrost.Bifrost) {
 	defer c.muMCP.Unlock()
 
 	c.client = client
+}
+
+// GetMCPClient gets an MCP client configuration from the configuration.
+// This method is called when an MCP client is reconnected via the HTTP API.
+//
+// Parameters:
+//   - id: ID of the client to get
+//
+// Returns:
+//   - *schemas.MCPClientConfig: The MCP client configuration (not redacted)
+//   - error: Any retrieval error
+func (c *Config) GetMCPClient(id string) (*schemas.MCPClientConfig, error) {
+	c.muMCP.RLock()
+	defer c.muMCP.RUnlock()
+
+	if c.client == nil {
+		return nil, fmt.Errorf("bifrost client not set")
+	}
+
+	if c.MCPConfig == nil {
+		return nil, fmt.Errorf("no MCP config found")
+	}
+
+	for _, clientConfig := range c.MCPConfig.ClientConfigs {
+		if clientConfig.ID == id {
+			return &clientConfig, nil
+		}
+	}
+
+	return nil, fmt.Errorf("MCP client '%s' not found", id)
 }
 
 // AddMCPClient adds a new MCP client to the configuration.
@@ -1496,6 +1651,11 @@ func (c *Config) AddMCPClient(ctx context.Context, clientConfig schemas.MCPClien
 		c.MCPConfig = &schemas.MCPConfig{}
 	}
 
+	// Generate a unique ID for the client if not provided
+	if clientConfig.ID == "" {
+		clientConfig.ID = uuid.NewString()
+	}
+
 	// Track new environment variables
 	newEnvKeys := make(map[string]struct{})
 
@@ -1514,17 +1674,38 @@ func (c *Config) AddMCPClient(ctx context.Context, clientConfig schemas.MCPClien
 				EnvVar:     envVar,
 				Provider:   "",
 				KeyType:    "connection_string",
-				ConfigPath: fmt.Sprintf("mcp.client_configs.%s.connection_string", clientConfig.Name),
+				ConfigPath: fmt.Sprintf("mcp.client_configs.%s.connection_string", clientConfig.ID),
 				KeyID:      "", // Empty for MCP connection strings
 			})
 		}
 		c.MCPConfig.ClientConfigs[len(c.MCPConfig.ClientConfigs)-1].ConnectionString = &processedValue
 	}
 
+	// Process Headers if present
+	if clientConfig.Headers != nil {
+		for header, value := range clientConfig.Headers {
+			newValue, envVar, err := c.processEnvValue(value)
+			if err != nil {
+				return fmt.Errorf("failed to process env var in header: %w", err)
+			}
+			if envVar != "" {
+				newEnvKeys[envVar] = struct{}{}
+				c.EnvKeys[envVar] = append(c.EnvKeys[envVar], configstore.EnvKeyInfo{
+					EnvVar:     envVar,
+					Provider:   "",
+					KeyType:    "mcp_header",
+					ConfigPath: fmt.Sprintf("mcp.client_configs.%s.headers.%s", clientConfig.ID, header),
+					KeyID:      "", // Empty for MCP headers
+				})
+			}
+			c.MCPConfig.ClientConfigs[len(c.MCPConfig.ClientConfigs)-1].Headers[header] = newValue
+		}
+	}
+
 	// Config with processed env vars
 	if err := c.client.AddMCPClient(c.MCPConfig.ClientConfigs[len(c.MCPConfig.ClientConfigs)-1]); err != nil {
 		c.MCPConfig.ClientConfigs = c.MCPConfig.ClientConfigs[:len(c.MCPConfig.ClientConfigs)-1]
-		c.cleanupEnvKeys("", clientConfig.Name, newEnvKeys)
+		c.cleanupEnvKeys("", clientConfig.ID, newEnvKeys)
 		return fmt.Errorf("failed to add MCP client: %w", err)
 	}
 
@@ -1547,7 +1728,7 @@ func (c *Config) AddMCPClient(ctx context.Context, clientConfig schemas.MCPClien
 //   - Validates that the MCP client exists
 //   - Removes the MCP client from the configuration
 //   - Removes the MCP client from the Bifrost client
-func (c *Config) RemoveMCPClient(ctx context.Context, name string) error {
+func (c *Config) RemoveMCPClient(ctx context.Context, id string) error {
 	if c.client == nil {
 		return fmt.Errorf("bifrost client not set")
 	}
@@ -1559,21 +1740,29 @@ func (c *Config) RemoveMCPClient(ctx context.Context, name string) error {
 		return fmt.Errorf("no MCP config found")
 	}
 
-	if err := c.client.RemoveMCPClient(name); err != nil {
-		return fmt.Errorf("failed to remove MCP client: %w", err)
+	// Check if client is registered in Bifrost (can be not registered if client initialization failed)
+	if clients, err := c.client.GetMCPClients(); err == nil && len(clients) > 0 {
+		for _, client := range clients {
+			if client.Config.ID == id {
+				if err := c.client.RemoveMCPClient(id); err != nil {
+					return fmt.Errorf("failed to remove MCP client: %w", err)
+				}
+				break
+			}
+		}
 	}
 
 	for i, clientConfig := range c.MCPConfig.ClientConfigs {
-		if clientConfig.Name == name {
+		if clientConfig.ID == id {
 			c.MCPConfig.ClientConfigs = append(c.MCPConfig.ClientConfigs[:i], c.MCPConfig.ClientConfigs[i+1:]...)
 			break
 		}
 	}
 
-	c.cleanupEnvKeys("", name, nil)
+	c.cleanupEnvKeys("", id, nil)
 
 	if c.ConfigStore != nil {
-		if err := c.ConfigStore.DeleteMCPClientConfig(ctx, name); err != nil {
+		if err := c.ConfigStore.DeleteMCPClientConfig(ctx, id); err != nil {
 			return fmt.Errorf("failed to delete MCP client config from store: %w", err)
 		}
 		if err := c.ConfigStore.UpdateEnvKeys(ctx, c.EnvKeys); err != nil {
@@ -1584,13 +1773,13 @@ func (c *Config) RemoveMCPClient(ctx context.Context, name string) error {
 	return nil
 }
 
-// EditMCPClientTools edits the tools of an MCP client.
-// This allows for dynamic MCP client tool management at runtime.
+// EditMCPClient edits an MCP client configuration.
+// This allows for dynamic MCP client management at runtime with proper env var handling.
 //
 // Parameters:
-//   - name: Name of the client to edit
-//   - toolsToExecute: Tools to execute from the client
-func (c *Config) EditMCPClientTools(ctx context.Context, name string, toolsToExecute []string) error {
+//   - id: ID of the client to edit
+//   - updatedConfig: Updated MCP client configuration
+func (c *Config) EditMCPClient(ctx context.Context, id string, updatedConfig schemas.MCPClientConfig) error {
 	if c.client == nil {
 		return fmt.Errorf("bifrost client not set")
 	}
@@ -1602,28 +1791,109 @@ func (c *Config) EditMCPClientTools(ctx context.Context, name string, toolsToExe
 		return fmt.Errorf("no MCP config found")
 	}
 
-	if err := c.client.EditMCPClientTools(name, toolsToExecute); err != nil {
-		return fmt.Errorf("failed to edit MCP client tools: %w", err)
-	}
-
-	// Find the client config and create an updated version
-	var updatedClientConfig schemas.MCPClientConfig
+	// Find the existing client config
+	var oldConfig schemas.MCPClientConfig
 	var found bool
+	var configIndex int
 	for i, clientConfig := range c.MCPConfig.ClientConfigs {
-		if clientConfig.Name == name {
-			c.MCPConfig.ClientConfigs[i].ToolsToExecute = toolsToExecute
-			updatedClientConfig = c.MCPConfig.ClientConfigs[i]
+		if clientConfig.ID == id {
+			oldConfig = clientConfig
+			configIndex = i
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		return fmt.Errorf("MCP client '%s' not found", name)
+		return fmt.Errorf("MCP client '%s' not found", id)
 	}
 
+	// Track new environment variables being added
+	newEnvKeys := make(map[string]struct{})
+
+	// Create a copy of updatedConfig to process env vars
+	processedConfig := updatedConfig
+
+	// Process Headers if present
+	if processedConfig.Headers != nil {
+		processedHeaders := make(map[string]string)
+
+		// Track which headers are in the new config
+		newHeaders := make(map[string]bool)
+		for header := range processedConfig.Headers {
+			newHeaders[header] = true
+		}
+
+		// Clean up env vars for headers that are being removed
+		if oldConfig.Headers != nil {
+			for oldHeader := range oldConfig.Headers {
+				if !newHeaders[oldHeader] {
+					c.cleanupOldMCPEnvVar(id, "mcp_header", oldHeader)
+				}
+			}
+		}
+
+		// Process each header value
+		for header, value := range processedConfig.Headers {
+			newValue, envVar, err := c.processEnvValue(value)
+			if err != nil {
+				// Clean up any env vars we added before the error
+				c.cleanupEnvKeys("", id, newEnvKeys)
+				return fmt.Errorf("failed to process env var in header %s: %w", header, err)
+			}
+
+			if envVar != "" {
+				newEnvKeys[envVar] = struct{}{}
+				// Remove old env var entry for this specific header if it exists
+				c.cleanupOldMCPEnvVar(id, "mcp_header", header)
+				// Add new env var entry
+				c.EnvKeys[envVar] = append(c.EnvKeys[envVar], configstore.EnvKeyInfo{
+					EnvVar:     envVar,
+					Provider:   "",
+					KeyType:    "mcp_header",
+					ConfigPath: fmt.Sprintf("mcp.client_configs.%s.headers.%s", id, header),
+					KeyID:      "",
+				})
+			} else {
+				// If new value is not an env var but old one might have been, clean up
+				c.cleanupOldMCPEnvVar(id, "mcp_header", header)
+			}
+
+			processedHeaders[header] = newValue
+		}
+		processedConfig.Headers = processedHeaders
+	} else if oldConfig.Headers != nil {
+		// If headers are being removed entirely, clean up all old header env vars
+		for oldHeader := range oldConfig.Headers {
+			c.cleanupOldMCPEnvVar(id, "mcp_header", oldHeader)
+		}
+	}
+
+	// Update the in-memory config with the processed values
+	c.MCPConfig.ClientConfigs[configIndex].Name = processedConfig.Name
+	c.MCPConfig.ClientConfigs[configIndex].Headers = processedConfig.Headers
+	c.MCPConfig.ClientConfigs[configIndex].ToolsToExecute = processedConfig.ToolsToExecute
+
+	// Check if client is registered in Bifrost (can be not registered if client initialization failed)
+	if clients, err := c.client.GetMCPClients(); err == nil && len(clients) > 0 {
+		for _, client := range clients {
+			if client.Config.ID == id {
+				// Give the PROCESSED config (with actual env var values) to bifrost client
+				if err := c.client.EditMCPClient(id, processedConfig); err != nil {
+					// Rollback in-memory changes
+					c.MCPConfig.ClientConfigs[configIndex] = oldConfig
+					// Clean up any new env vars we added
+					c.cleanupEnvKeys("", id, newEnvKeys)
+					return fmt.Errorf("failed to edit MCP client: %w", err)
+				}
+				break
+			}
+		}
+	}
+
+	// Persist changes to config store
 	if c.ConfigStore != nil {
-		if err := c.ConfigStore.UpdateMCPClientConfig(ctx, name, updatedClientConfig, c.EnvKeys); err != nil {
+		if err := c.ConfigStore.UpdateMCPClientConfig(ctx, id, updatedConfig, c.EnvKeys); err != nil {
 			return fmt.Errorf("failed to update MCP client config in store: %w", err)
 		}
 		if err := c.ConfigStore.UpdateEnvKeys(ctx, c.EnvKeys); err != nil {
@@ -1639,6 +1909,7 @@ func (c *Config) EditMCPClientTools(ctx context.Context, name string, toolsToExe
 func (c *Config) RedactMCPClientConfig(config schemas.MCPClientConfig) schemas.MCPClientConfig {
 	// Create a copy with basic fields
 	configCopy := schemas.MCPClientConfig{
+		ID:               config.ID,
 		Name:             config.Name,
 		ConnectionType:   config.ConnectionType,
 		ConnectionString: config.ConnectionString,
@@ -1653,7 +1924,7 @@ func (c *Config) RedactMCPClientConfig(config schemas.MCPClientConfig) schemas.M
 		// Check if this value came from an env var
 		for envVar, infos := range c.EnvKeys {
 			for _, info := range infos {
-				if info.Provider == "" && info.KeyType == "connection_string" && info.ConfigPath == fmt.Sprintf("mcp.client_configs.%s.connection_string", config.Name) {
+				if info.Provider == "" && info.KeyType == "connection_string" && info.ConfigPath == fmt.Sprintf("mcp.client_configs.%s.connection_string", config.ID) {
 					connStr = "env." + envVar
 					break
 				}
@@ -1665,6 +1936,31 @@ func (c *Config) RedactMCPClientConfig(config schemas.MCPClientConfig) schemas.M
 			connStr = RedactKey(connStr)
 		}
 		configCopy.ConnectionString = &connStr
+
+	}
+
+	// Redact Header values if present
+	if config.Headers != nil {
+		configCopy.Headers = make(map[string]string, len(config.Headers))
+		for header, value := range config.Headers {
+			headerValue := value
+
+			// Check if this header value came from an env var
+			for envVar, infos := range c.EnvKeys {
+				for _, info := range infos {
+					if info.Provider == "" && info.KeyType == "mcp_header" && info.ConfigPath == fmt.Sprintf("mcp.client_configs.%s.headers.%s", config.ID, header) {
+						headerValue = "env." + envVar
+						break
+					}
+				}
+			}
+
+			// If not from env var, redact it
+			if !strings.HasPrefix(headerValue, "env.") {
+				headerValue = RedactKey(headerValue)
+			}
+			configCopy.Headers[header] = headerValue
+		}
 	}
 
 	return configCopy
@@ -1722,26 +2018,26 @@ func IsRedacted(key string) bool {
 //
 // Parameters:
 //   - provider: Provider name to clean up (empty string for MCP clients)
-//   - mcpClientName: MCP client name to clean up (empty string for providers)
+//   - mcpClientID: MCP client ID to clean up (empty string for providers)
 //   - envVarsToRemove: Optional map of specific env vars to remove (nil to remove all)
-func (c *Config) cleanupEnvKeys(provider schemas.ModelProvider, mcpClientName string, envVarsToRemove map[string]struct{}) {
+func (c *Config) cleanupEnvKeys(provider schemas.ModelProvider, mcpClientID string, envVarsToRemove map[string]struct{}) {
 	// If envVarsToRemove is provided, only clean those specific vars
 	if envVarsToRemove != nil {
 		for envVar := range envVarsToRemove {
-			c.cleanupEnvVar(envVar, provider, mcpClientName)
+			c.cleanupEnvVar(envVar, provider, mcpClientID)
 		}
 		return
 	}
 
 	// If envVarsToRemove is nil, clean all vars for the provider/client
 	for envVar := range c.EnvKeys {
-		c.cleanupEnvVar(envVar, provider, mcpClientName)
+		c.cleanupEnvVar(envVar, provider, mcpClientID)
 	}
 }
 
 // cleanupEnvVar removes entries for a specific environment variable based on provider/client.
 // This is a helper function to avoid duplicating the filtering logic.
-func (c *Config) cleanupEnvVar(envVar string, provider schemas.ModelProvider, mcpClientName string) {
+func (c *Config) cleanupEnvVar(envVar string, provider schemas.ModelProvider, mcpClientID string) {
 	infos := c.EnvKeys[envVar]
 	if len(infos) == 0 {
 		return
@@ -1753,8 +2049,8 @@ func (c *Config) cleanupEnvVar(envVar string, provider schemas.ModelProvider, mc
 		shouldKeep := false
 		if provider != "" {
 			shouldKeep = info.Provider != provider
-		} else if mcpClientName != "" {
-			shouldKeep = info.Provider != "" || !strings.HasPrefix(info.ConfigPath, fmt.Sprintf("mcp.client_configs.%s", mcpClientName))
+		} else if mcpClientID != "" {
+			shouldKeep = info.Provider != "" || !strings.HasPrefix(info.ConfigPath, fmt.Sprintf("mcp.client_configs.%s", mcpClientID))
 		}
 		if shouldKeep {
 			filteredInfos = append(filteredInfos, info)
@@ -1765,6 +2061,44 @@ func (c *Config) cleanupEnvVar(envVar string, provider schemas.ModelProvider, mc
 		delete(c.EnvKeys, envVar)
 	} else {
 		c.EnvKeys[envVar] = filteredInfos
+	}
+}
+
+// cleanupOldMCPEnvVar removes a specific env var entry for an MCP client field.
+// This is used when updating MCP client fields that may have had env vars.
+//
+// Parameters:
+//   - mcpClientID: The ID of the MCP client
+//   - keyType: The type of field ("connection_string", "mcp_header")
+//   - headerName: The header name (only used for "mcp_header" keyType)
+func (c *Config) cleanupOldMCPEnvVar(mcpClientID string, keyType string, headerName string) {
+	for envVar, infos := range c.EnvKeys {
+		filteredInfos := make([]configstore.EnvKeyInfo, 0, len(infos))
+
+		for _, info := range infos {
+			shouldKeep := true
+			// Only consider MCP-related entries (Provider is empty for MCP)
+			if info.Provider == "" && string(info.KeyType) == keyType {
+				if keyType == "mcp_header" && headerName != "" {
+					// For headers, match by client ID and header name
+					// ConfigPath format: mcp.client_configs.<id>.headers.<header>
+					if strings.Contains(info.ConfigPath, fmt.Sprintf(".headers.%s", headerName)) &&
+						strings.Contains(info.ConfigPath, mcpClientID) {
+						shouldKeep = false
+					}
+				}
+			}
+
+			if shouldKeep {
+				filteredInfos = append(filteredInfos, info)
+			}
+		}
+
+		if len(filteredInfos) == 0 {
+			delete(c.EnvKeys, envVar)
+		} else {
+			c.EnvKeys[envVar] = filteredInfos
+		}
 	}
 }
 
@@ -2257,6 +2591,12 @@ func ValidateCustomProvider(config configstore.ProviderConfig, provider schemas.
 	if !bifrost.IsSupportedBaseProvider(cpc.BaseProviderType) {
 		return fmt.Errorf("custom provider validation failed: unsupported base_provider_type: %s", cpc.BaseProviderType)
 	}
+
+	// Reject Bedrock providers with IsKeyLess=true
+	if cpc.BaseProviderType == schemas.Bedrock && cpc.IsKeyLess {
+		return fmt.Errorf("custom provider validation failed: Bedrock providers cannot be keyless (is_key_less=true)")
+	}
+
 	return nil
 }
 
@@ -2287,6 +2627,11 @@ func ValidateCustomProviderUpdate(newConfig, existingConfig configstore.Provider
 	if newCPC.BaseProviderType != existingCPC.BaseProviderType {
 		return fmt.Errorf("provider %s: base_provider_type cannot be changed from %s to %s after creation",
 			provider, existingCPC.BaseProviderType, newCPC.BaseProviderType)
+	}
+
+	// Validate the new config (this will catch Bedrock+IsKeyLess configurations)
+	if err := ValidateCustomProvider(newConfig, provider); err != nil {
+		return err
 	}
 
 	return nil

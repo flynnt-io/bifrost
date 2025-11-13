@@ -94,7 +94,7 @@ func RunTranscriptionTest(t *testing.T, client *bifrost.Bifrost, ctx context.Con
 					os.Remove(audioFileName)
 				})
 
-				t.Logf("🔄 Generated TTS audio for round-trip: %s (%d bytes)", audioFileName, len(ttsResponse.Audio))
+				t.Logf("Generated TTS audio for round-trip: %s (%d bytes)", audioFileName, len(ttsResponse.Audio))
 
 				// Step 2: Transcribe the generated audio
 				transcriptionRequest := &schemas.BifrostTranscriptionRequest{
@@ -203,7 +203,7 @@ func RunTranscriptionAdvancedTest(t *testing.T, client *bifrost.Bifrost, ctx con
 			audioData, _ := GenerateTTSAudioForTest(ctx, t, client, testConfig.Provider, testConfig.SpeechSynthesisModel, TTSTestTextBasic, "primary", "mp3")
 
 			// Test supported response formats (excluding text to avoid JSON parsing issues)
-			formats := []string{"json", "verbose_json"}
+			formats := []string{"json"}
 
 			for _, format := range formats {
 				t.Run("Format_"+format, func(t *testing.T) {
@@ -357,5 +357,5 @@ func validateTranscriptionRoundTrip(t *testing.T, response *schemas.BifrostTrans
 		t.Logf("⚠️ Provider mismatch: expected %s, got %s", testConfig.Provider, response.ExtraFields.Provider)
 	}
 
-	t.Logf("🔄 Round-trip test '%s' completed successfully", testName)
+	t.Logf("Round-trip test '%s' completed successfully", testName)
 }

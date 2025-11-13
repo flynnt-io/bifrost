@@ -5,6 +5,9 @@ import { KnownProvidersNames } from "@/lib/constants/logs";
 // Known provider names - all supported standard providers
 export type KnownProvider = (typeof KnownProvidersNames)[number];
 
+// Base provider names - all supported base providers
+export type BaseProvider = "openai" | "anthropic" | "cohere" | "gemini" | "bedrock";
+
 // Branded type for custom provider names to prevent collision with known providers
 export type CustomProviderName = string & { readonly __brand: "CustomProviderName" };
 
@@ -86,6 +89,7 @@ export const DefaultModelProviderKey: ModelProviderKey = {
 // NetworkConfig matching Go's schemas.NetworkConfig
 export interface NetworkConfig {
 	base_url?: string;
+	is_key_less?: boolean;
 	extra_headers?: Record<string, string>;
 	default_request_timeout_in_seconds: number;
 	max_retries: number;
@@ -110,39 +114,44 @@ export interface ProxyConfig {
 	password?: string;
 }
 
+// Request types matching Go's schemas.RequestType
+export type RequestType =
+	| "list_models"
+	| "text_completion"
+	| "text_completion_stream"
+	| "chat_completion"
+	| "chat_completion_stream"
+	| "responses"
+	| "responses_stream"
+	| "embedding"
+	| "speech"
+	| "speech_stream"
+	| "transcription"
+	| "transcription_stream";
+
 // AllowedRequests matching Go's schemas.AllowedRequests
 export interface AllowedRequests {
 	text_completion: boolean;
+	text_completion_stream: boolean;
 	chat_completion: boolean;
 	chat_completion_stream: boolean;
+	responses: boolean;
+	responses_stream: boolean;
 	embedding: boolean;
 	speech: boolean;
 	speech_stream: boolean;
 	transcription: boolean;
 	transcription_stream: boolean;
+	list_models: boolean;
 }
-
-export const DefaultAllowedRequests: AllowedRequests = {
-	text_completion: true,
-	chat_completion: true,
-	chat_completion_stream: true,
-	embedding: true,
-	speech: true,
-	speech_stream: true,
-	transcription: true,
-	transcription_stream: true,
-} as const satisfies Required<AllowedRequests>;
 
 // CustomProviderConfig matching Go's schemas.CustomProviderConfig
 export interface CustomProviderConfig {
 	base_provider_type: KnownProvider;
+	is_key_less?: boolean;
 	allowed_requests?: AllowedRequests;
+	request_path_overrides?: Record<string, string>;
 }
-
-export const DefaultCustomProviderConfig: CustomProviderConfig = {
-	base_provider_type: "openai",
-	allowed_requests: DefaultAllowedRequests,
-} as const satisfies Required<CustomProviderConfig>;
 
 // ProviderConfig matching Go's lib.ProviderConfig
 export interface ModelProviderConfig {
@@ -157,6 +166,7 @@ export interface ModelProviderConfig {
 // ProviderResponse matching Go's ProviderResponse
 export interface ModelProvider extends ModelProviderConfig {
 	name: ModelProviderName;
+	status: ProviderStatus;
 }
 
 // ListProvidersResponse matching Go's ListProvidersResponse
@@ -212,13 +222,23 @@ export interface FrameworkConfig {
 	pricing_sync_interval: number;
 }
 
+// Auth config
+export interface AuthConfig {
+	admin_username: string;
+	admin_password: string;
+	is_enabled: boolean;
+	disable_auth_on_inference?: boolean;
+}
+
 // Bifrost Config
 export interface BifrostConfig {
 	client_config: CoreConfig;
 	framework_config: FrameworkConfig;
+	auth_config?: AuthConfig;
 	is_db_connected: boolean;
 	is_cache_connected: boolean;
 	is_logs_connected: boolean;
+	auth_token?: string;
 }
 
 // Core Bifrost configuration types
@@ -227,6 +247,7 @@ export interface CoreConfig {
 	initial_pool_size: number;
 	prometheus_labels: string[];
 	enable_logging: boolean;
+	disable_content_logging: boolean;
 	enable_governance: boolean;
 	enforce_governance_header: boolean;
 	allow_direct_keys: boolean;
@@ -285,4 +306,4 @@ export interface ProviderFormData {
 }
 
 // Status types
-export type ProviderStatus = "active" | "error" | "added" | "updated" | "deleted";
+export type ProviderStatus = "active" | "error" | "deleted";

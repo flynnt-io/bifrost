@@ -10,6 +10,7 @@ import (
 )
 
 func TestGemini(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("GEMINI_API_KEY") == "" {
 		t.Skip("Skipping Gemini tests because GEMINI_API_KEY is not set")
 	}
@@ -50,6 +51,7 @@ func TestGemini(t *testing.T) {
 			SpeechSynthesis:       true,
 			SpeechSynthesisStream: true,
 			Reasoning:             false, //TODO: Supported but lost since we map Gemini's responses via chat completions, fix is a native Gemini handler or reasoning support in chat completions
+			ListModels:            true,
 		},
 	}
 

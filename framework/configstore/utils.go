@@ -3,29 +3,10 @@ package configstore
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 )
-
-// processEnvValue processes a value that might be an environment variable reference
-func processEnvValue(value string, logger schemas.Logger) (string, error) {
-	v := strings.TrimSpace(value)
-	if !strings.HasPrefix(v, "env.") {
-		return value, nil
-	}
-	envKey := strings.TrimSpace(strings.TrimPrefix(v, "env."))
-	if envKey == "" {
-		logger.Warn(fmt.Sprintf("Environment variable name missing in value: %s", value))
-		return "", fmt.Errorf("environment variable name missing in %q", value)
-	}
-	if envValue, ok := os.LookupEnv(envKey); ok {
-		return envValue, nil
-	}
-	logger.Warn(fmt.Sprintf("Environment variable not found: %s", envKey))
-	return "", fmt.Errorf("environment variable %s not found", envKey)
-}
 
 // marshalToString marshals the given value to a JSON string.
 func marshalToString(v any) (string, error) {
@@ -163,6 +144,16 @@ func substituteMCPEnvVars(config *schemas.MCPConfig, envKeys map[string][]EnvKey
 					envVarMap[fmt.Sprintf("%s.connection_string", clientName)] = envVar
 				}
 			}
+			// For MCP headers
+			if keyInfo.KeyType == "mcp_header" {
+				// Extract client name and header name from config path like "mcp.client_configs.clientName.headers.headerName"
+				pathParts := strings.Split(keyInfo.ConfigPath, ".")
+				if len(pathParts) >= 5 && pathParts[0] == "mcp" && pathParts[1] == "client_configs" && pathParts[3] == "headers" {
+					clientName := pathParts[2]
+					headerName := pathParts[4]
+					envVarMap[fmt.Sprintf("%s.headers.%s", clientName, headerName)] = envVar
+				}
+			}
 		}
 	}
 
@@ -176,12 +167,21 @@ func substituteMCPEnvVars(config *schemas.MCPConfig, envKeys map[string][]EnvKey
 				config.ClientConfigs[i].ConnectionString = &[]string{fmt.Sprintf("env.%s", envVar)}[0]
 			}
 		}
+
+		// Substitute headers
+		if clientConfig.Headers != nil {
+			for header := range clientConfig.Headers {
+				if envVar, exists := envVarMap[fmt.Sprintf("%s.headers.%s", clientPrefix, header)]; exists {
+					clientConfig.Headers[header] = fmt.Sprintf("env.%s", envVar)
+				}
+			}
+		}
 	}
 }
 
 // substituteMCPClientEnvVars replaces resolved environment variable values with their original env.VAR_NAME references for a single MCP client config
 func substituteMCPClientEnvVars(clientConfig *schemas.MCPClientConfig, envKeys map[string][]EnvKeyInfo) {
-	// Find the environment variable for this client's connection string
+	// Find the environment variable for this client's connection string and headers
 	for envVar, keyInfos := range envKeys {
 		for _, keyInfo := range keyInfos {
 			// For MCP connection strings
@@ -193,6 +193,19 @@ func substituteMCPClientEnvVars(clientConfig *schemas.MCPClientConfig, envKeys m
 					// If this environment variable is for the current client
 					if clientName == clientConfig.Name && clientConfig.ConnectionString != nil {
 						clientConfig.ConnectionString = &[]string{fmt.Sprintf("env.%s", envVar)}[0]
+					}
+				}
+			}
+			// For MCP headers
+			if keyInfo.KeyType == "mcp_header" {
+				// Extract client name and header name from config path like "mcp.client_configs.clientName.headers.headerName"
+				pathParts := strings.Split(keyInfo.ConfigPath, ".")
+				if len(pathParts) >= 5 && pathParts[0] == "mcp" && pathParts[1] == "client_configs" && pathParts[3] == "headers" {
+					clientName := pathParts[2]
+					headerName := pathParts[4]
+					// If this environment variable is for the current client
+					if clientName == clientConfig.Name && clientConfig.Headers != nil {
+						clientConfig.Headers[headerName] = fmt.Sprintf("env.%s", envVar)
 					}
 				}
 			}

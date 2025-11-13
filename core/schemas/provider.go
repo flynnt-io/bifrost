@@ -1,4 +1,4 @@
-	// Package schemas defines the core schemas and types used by the Bifrost system.
+// Package schemas defines the core schemas and types used by the Bifrost system.
 package schemas
 
 import (
@@ -19,14 +19,16 @@ const (
 
 // Pre-defined errors for provider operations
 const (
-	ErrProviderRequestTimedOut   = "request timed out (default is 30 seconds). You can increase it by setting the default_request_timeout_in_seconds in the network_config or in UI - Providers > Provider Name > Network Config."
-	ErrRequestCancelled          = "request cancelled by caller"
-	ErrProviderRequest           = "failed to make HTTP request to provider API"
-	ErrProviderResponseUnmarshal = "failed to unmarshal response from provider API"
-	ErrProviderJSONMarshaling    = "failed to marshal request body to JSON"
-	ErrProviderDecodeStructured  = "failed to decode provider's structured response"
-	ErrProviderDecodeRaw         = "failed to decode provider's raw response"
-	ErrProviderDecompress        = "failed to decompress provider's response"
+	ErrProviderRequestTimedOut      = "request timed out (default is 30 seconds). You can increase it by setting the default_request_timeout_in_seconds in the network_config or in UI - Providers > Provider Name > Network Config."
+	ErrRequestCancelled             = "request cancelled by caller"
+	ErrRequestBodyConversion        = "failed to convert bifrost request to the expected provider request body"
+	ErrProviderRequestMarshal       = "failed to marshal request body to JSON"
+	ErrProviderCreateRequest        = "failed to create HTTP request to provider API"
+	ErrProviderDoRequest            = "failed to execute HTTP request to provider API"
+	ErrProviderResponseDecode       = "failed to decode response body from provider API"
+	ErrProviderResponseUnmarshal    = "failed to unmarshal response from provider API"
+	ErrProviderRawResponseUnmarshal = "failed to unmarshal raw response from provider API"
+	ErrProviderResponseDecompress   = "failed to decompress provider's response"
 )
 
 // NetworkConfig represents the network configuration for provider connections.
@@ -87,10 +89,13 @@ type ProxyConfig struct {
 // A nil *AllowedRequests means "all operations allowed."
 // A non-nil value only allows fields set to true; omitted or false fields are disallowed.
 type AllowedRequests struct {
+	ListModels           bool `json:"list_models"`
 	TextCompletion       bool `json:"text_completion"`
 	TextCompletionStream bool `json:"text_completion_stream"`
 	ChatCompletion       bool `json:"chat_completion"`
 	ChatCompletionStream bool `json:"chat_completion_stream"`
+	Responses            bool `json:"responses"`
+	ResponsesStream      bool `json:"responses_stream"`
 	Embedding            bool `json:"embedding"`
 	Speech               bool `json:"speech"`
 	SpeechStream         bool `json:"speech_stream"`
@@ -105,6 +110,8 @@ func (ar *AllowedRequests) IsOperationAllowed(operation RequestType) bool {
 	}
 
 	switch operation {
+	case ListModelsRequest:
+		return ar.ListModels
 	case TextCompletionRequest:
 		return ar.TextCompletion
 	case TextCompletionStreamRequest:
@@ -113,6 +120,10 @@ func (ar *AllowedRequests) IsOperationAllowed(operation RequestType) bool {
 		return ar.ChatCompletion
 	case ChatCompletionStreamRequest:
 		return ar.ChatCompletionStream
+	case ResponsesRequest:
+		return ar.Responses
+	case ResponsesStreamRequest:
+		return ar.ResponsesStream
 	case EmbeddingRequest:
 		return ar.Embedding
 	case SpeechRequest:
@@ -129,9 +140,11 @@ func (ar *AllowedRequests) IsOperationAllowed(operation RequestType) bool {
 }
 
 type CustomProviderConfig struct {
-	CustomProviderKey string           `json:"-"`                  // Custom provider key, internally set by Bifrost
-	BaseProviderType  ModelProvider    `json:"base_provider_type"` // Base provider type
-	AllowedRequests   *AllowedRequests `json:"allowed_requests,omitempty"`
+	CustomProviderKey    string                 `json:"-"`                                // Custom provider key, internally set by Bifrost
+	IsKeyLess            bool                   `json:"is_key_less"`                      // Whether the custom provider requires a key (not allowed for Bedrock)
+	BaseProviderType     ModelProvider          `json:"base_provider_type"`               // Base provider type
+	AllowedRequests      *AllowedRequests       `json:"allowed_requests,omitempty"`       // Allowed requests for the custom provider
+	RequestPathOverrides map[RequestType]string `json:"request_path_overrides,omitempty"` // Mapping of request type to its custom path which will override the default path of the provider (not allowed for Bedrock)
 }
 
 // IsOperationAllowed checks if a specific operation is allowed for this custom provider
@@ -194,6 +207,8 @@ type PostHookRunner func(ctx *context.Context, result *BifrostResponse, err *Bif
 type Provider interface {
 	// GetProviderKey returns the provider's identifier
 	GetProviderKey() ModelProvider
+	// ListModels performs a list models request
+	ListModels(ctx context.Context, keys []Key, request *BifrostListModelsRequest) (*BifrostListModelsResponse, *BifrostError)
 	// TextCompletion performs a text completion request
 	TextCompletion(ctx context.Context, key Key, request *BifrostTextCompletionRequest) (*BifrostTextCompletionResponse, *BifrostError)
 	// TextCompletionStream performs a text completion stream request

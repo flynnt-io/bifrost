@@ -11,6 +11,7 @@ import (
 )
 
 func TestGroq(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("GROQ_API_KEY") == "" {
 		t.Skip("Skipping Groq tests because GROQ_API_KEY is not set")
 	}
@@ -47,6 +48,7 @@ func TestGroq(t *testing.T) {
 			MultipleImages:        false,
 			CompleteEnd2End:       true,
 			Embedding:             false,
+			ListModels:            true,
 		},
 	}
 

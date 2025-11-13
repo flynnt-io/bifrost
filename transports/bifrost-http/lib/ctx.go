@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/maxim"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/valyala/fasthttp"
@@ -50,21 +51,31 @@ import (
 //   - Keys are extracted and stored in the context using schemas.BifrostContextKey
 //   - This enables explicit key usage for requests via headers
 //
+// 6. Cancellable Context:
+//   - Creates a cancellable context that can be used to cancel upstream requests when clients disconnect
+//   - This is critical for streaming requests where write errors indicate client disconnects
+//   - Also useful for non-streaming requests to allow provider-level cancellation
 
 // Parameters:
 //   - ctx: The FastHTTP request context containing the original headers
+//   - allowDirectKeys: Whether to allow direct API key usage from headers
 //
 // Returns:
-//   - *context.Context: A new context.Context containing the propagated values
+//   - *context.Context: A new cancellable context.Context containing the propagated values
+//   - context.CancelFunc: Function to cancel the context (should be called when request completes)
 //
 // Example Usage:
 //
 //	fastCtx := &fasthttp.RequestCtx{...}
-//	bifrostCtx := ConvertToBifrostContext(fastCtx)
+//	bifrostCtx, cancel := ConvertToBifrostContext(fastCtx, true)
+//	defer cancel() // Ensure cleanup
 //	// bifrostCtx now contains any prometheus and maxim header values
 
-func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) *context.Context {
-	bifrostCtx := context.Background()
+func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) (*context.Context, context.CancelFunc) {
+	// Create cancellable context for all requests
+	// This enables proper cleanup when clients disconnect or requests are cancelled
+	baseCtx := context.Background()
+	bifrostCtx, cancel := context.WithCancel(baseCtx)
 
 	// First, check if x-request-id header exists
 	requestID := string(ctx.Request.Header.Peek("x-request-id"))
@@ -131,9 +142,24 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) *co
 			bifrostCtx = context.WithValue(bifrostCtx, schemas.BifrostContextKey(keyStr), string(value))
 			return true
 		}
-		// Handle virtual key header (x-bf-vk)
+		// Handle virtual key header (x-bf-vk, authorization, x-api-key headers)
 		if keyStr == string(schemas.BifrostContextKeyVirtualKey) {
 			bifrostCtx = context.WithValue(bifrostCtx, schemas.BifrostContextKey(keyStr), string(value))
+			return true
+		}
+		if keyStr == "authorization" {
+			valueStr := string(value)
+			// Only accept Bearer token format: "Bearer ..."
+			if strings.HasPrefix(strings.ToLower(valueStr), "bearer ") {
+				authHeaderValue := strings.TrimSpace(valueStr[7:]) // Remove "Bearer " prefix
+				if authHeaderValue != "" && strings.HasPrefix(strings.ToLower(authHeaderValue), governance.VirtualKeyPrefix) {
+					bifrostCtx = context.WithValue(bifrostCtx, schemas.BifrostContextKeyVirtualKey, authHeaderValue)
+					return true
+				}
+			}
+		}
+		if keyStr == "x-api-key" && strings.HasPrefix(strings.ToLower(string(value)), governance.VirtualKeyPrefix) {
+			bifrostCtx = context.WithValue(bifrostCtx, schemas.BifrostContextKeyVirtualKey, string(value))
 			return true
 		}
 		// Handle cache key header (x-bf-cache-key)
@@ -189,6 +215,13 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) *co
 			}
 			return true
 		}
+		// Send back raw response header
+		if keyStr == "x-bf-send-back-raw-response" {
+			if valueStr := string(value); valueStr == "true" {
+				bifrostCtx = context.WithValue(bifrostCtx, schemas.BifrostContextKeySendBackRawResponse, true)
+			}
+			return true
+		}
 		return true
 	})
 
@@ -208,7 +241,7 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) *co
 			// Only accept Bearer token format: "Bearer ..."
 			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 				authHeaderValue := strings.TrimSpace(authHeader[7:]) // Remove "Bearer " prefix
-				if authHeaderValue != "" {
+				if authHeaderValue != "" && !strings.HasPrefix(strings.ToLower(authHeaderValue), governance.VirtualKeyPrefix) {
 					apiKey = authHeaderValue
 				}
 			} else {
@@ -219,7 +252,7 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) *co
 		// Check x-api-key header if no valid Authorization header found (Anthropic style)
 		if apiKey == "" {
 			xAPIKey := string(ctx.Request.Header.Peek("x-api-key"))
-			if xAPIKey != "" {
+			if xAPIKey != "" && !strings.HasPrefix(strings.ToLower(xAPIKey), governance.VirtualKeyPrefix) {
 				apiKey = strings.TrimSpace(xAPIKey)
 			}
 		}
@@ -240,5 +273,5 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool) *co
 		bifrostCtx = context.WithValue(bifrostCtx, schemas.BifrostContextKey("x-litellm-fallback"), "true")
 	}
 
-	return &bifrostCtx
+	return &bifrostCtx, cancel
 }

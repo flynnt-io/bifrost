@@ -8,7 +8,7 @@ import (
 	"time"
 
 	schemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/pricing"
+	"github.com/maximhq/bifrost/framework/modelcatalog"
 )
 
 // Accumulator manages accumulation of streaming chunks
@@ -22,7 +22,7 @@ type Accumulator struct {
 	audioStreamChunkPool         sync.Pool // Pool for reusing AudioStreamChunk structs
 	transcriptionStreamChunkPool sync.Pool // Pool for reusing TranscriptionStreamChunk structs
 
-	pricingManager *pricing.PricingManager
+	pricingManager *modelcatalog.ModelCatalog
 
 	stopCleanup   chan struct{}
 	cleanupWg     sync.WaitGroup
@@ -242,6 +242,7 @@ func (a *Accumulator) accumulateToolCallsInMessage(message *schemas.ChatMessage,
 				args = "" // Reset empty braces to empty string to avoid duplication
 			}
 			toolCallToModify = &schemas.ChatAssistantMessageToolCall{
+				Index: uint16(len(existingToolCalls)),
 				ID: deltaToolCall.ID,
 				Function: schemas.ChatAssistantMessageToolCallFunction{
 					Name:      deltaToolCall.Function.Name,
@@ -390,7 +391,7 @@ func (a *Accumulator) startAccumulatorMapCleanup() {
 }
 
 // NewAccumulator creates a new accumulator
-func NewAccumulator(pricingManager *pricing.PricingManager, logger schemas.Logger) *Accumulator {
+func NewAccumulator(pricingManager *modelcatalog.ModelCatalog, logger schemas.Logger) *Accumulator {
 	a := &Accumulator{
 		streamAccumulators: sync.Map{},
 		chatStreamChunkPool: sync.Pool{

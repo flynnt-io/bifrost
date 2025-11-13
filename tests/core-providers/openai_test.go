@@ -10,6 +10,7 @@ import (
 )
 
 func TestOpenAI(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("OPENAI_API_KEY") == "" {
 		t.Skip("Skipping OpenAI tests because OPENAI_API_KEY is not set")
 	}
@@ -55,6 +56,7 @@ func TestOpenAI(t *testing.T) {
 			TranscriptionStream:   true,
 			Embedding:             true,
 			Reasoning:             true,
+			ListModels:            true,
 		},
 	}
 

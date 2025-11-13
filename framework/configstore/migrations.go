@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/migrator"
 	"gorm.io/gorm"
@@ -45,7 +46,25 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationCleanupMCPClientToolsConfig(ctx, db); err != nil {
 		return err
 	}
-	if err := migrationAddVKMCPConfigsTable(ctx, db); err != nil {
+	if err := migrationAddVirtualKeyMCPConfigsTable(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddPluginPathColumn(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddProviderConfigBudgetRateLimit(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddSessionsTable(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddHeadersJSONColumnIntoMCPClient(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddDisableContentLoggingColumn(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddMCPClientIDColumn(ctx, db); err != nil {
 		return err
 	}
 	if err := migrationAddApertusEndpointColumn(ctx, db); err != nil {
@@ -135,8 +154,8 @@ func migrationInit(ctx context.Context, db *gorm.DB) error {
 					return err
 				}
 			}
-			if !migrator.HasTable(&tables.TableConfig{}) {
-				if err := migrator.CreateTable(&tables.TableConfig{}); err != nil {
+			if !migrator.HasTable(&tables.TableGovernanceConfig{}) {
+				if err := migrator.CreateTable(&tables.TableGovernanceConfig{}); err != nil {
 					return err
 				}
 			}
@@ -196,7 +215,7 @@ func migrationInit(ctx context.Context, db *gorm.DB) error {
 			if err := migrator.DropTable(&tables.TableLogStoreConfig{}); err != nil {
 				return err
 			}
-			if err := migrator.DropTable(&tables.TableConfig{}); err != nil {
+			if err := migrator.DropTable(&tables.TableGovernanceConfig{}); err != nil {
 				return err
 			}
 			if err := migrator.DropTable(&tables.TableModelPricing{}); err != nil {
@@ -566,7 +585,8 @@ func migrationCleanupMCPClientToolsConfig(ctx context.Context, db *gorm.DB) erro
 	return nil
 }
 
-func migrationAddVKMCPConfigsTable(ctx context.Context, db *gorm.DB) error {
+// migrationAddVirtualKeyMCPConfigsTable adds the virtual_key_mcp_configs table
+func migrationAddVirtualKeyMCPConfigsTable(ctx context.Context, db *gorm.DB) error {
 	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
 		ID: "add_vk_mcp_configs_table",
 		Migrate: func(tx *gorm.DB) error {
@@ -622,6 +642,590 @@ func migrationAddApertusEndpointColumn(ctx context.Context, db *gorm.DB) error {
 	err := m.Migrate()
 	if err != nil {
 		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddProviderConfigBudgetRateLimit adds budget_id and rate_limit_id columns with proper foreign key constraints
+func migrationAddProviderConfigBudgetRateLimit(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_provider_config_budget_rate_limit",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			// Add BudgetID column if it doesn't exist
+			if migrator.HasTable(&tables.TableVirtualKeyProviderConfig{}) {
+				if !migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id") {
+					if err := migrator.AddColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id"); err != nil {
+						return fmt.Errorf("failed to add budget_id column: %w", err)
+					}
+				}
+
+				// Add RateLimitID column if it doesn't exist
+				if !migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id") {
+					if err := migrator.AddColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id"); err != nil {
+						return fmt.Errorf("failed to add rate_limit_id column: %w", err)
+					}
+				}
+
+				// Create foreign key indexes for better performance
+				if !migrator.HasIndex(&tables.TableVirtualKeyProviderConfig{}, "idx_provider_config_budget") {
+					if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_provider_config_budget ON governance_virtual_key_provider_configs (budget_id)").Error; err != nil {
+						return fmt.Errorf("failed to create budget_id index: %w", err)
+					}
+				}
+
+				if !migrator.HasIndex(&tables.TableVirtualKeyProviderConfig{}, "idx_provider_config_rate_limit") {
+					if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_provider_config_rate_limit ON governance_virtual_key_provider_configs (rate_limit_id)").Error; err != nil {
+						return fmt.Errorf("failed to create rate_limit_id index: %w", err)
+					}
+				}
+
+				// Create FK constraints (dialect‑agnostic)
+				if !migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget") {
+					if err := migrator.CreateConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget"); err != nil {
+						return fmt.Errorf("failed to create Budget FK constraint: %w", err)
+					}
+				}
+				if !migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit") {
+					if err := migrator.CreateConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit"); err != nil {
+						return fmt.Errorf("failed to create RateLimit FK constraint: %w", err)
+					}
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			// Drop indexes first
+			if err := tx.Exec("DROP INDEX IF EXISTS idx_provider_config_budget").Error; err != nil {
+				return fmt.Errorf("failed to drop budget_id index: %w", err)
+			}
+			if err := tx.Exec("DROP INDEX IF EXISTS idx_provider_config_rate_limit").Error; err != nil {
+				return fmt.Errorf("failed to drop rate_limit_id index: %w", err)
+			}
+
+			// Drop FK constraints
+			if migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget") {
+				if err := migrator.DropConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget"); err != nil {
+					return fmt.Errorf("failed to drop Budget FK constraint: %w", err)
+				}
+			}
+			if migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit") {
+				if err := migrator.DropConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit"); err != nil {
+					return fmt.Errorf("failed to drop RateLimit FK constraint: %w", err)
+				}
+			}
+
+			// Drop columns
+			if migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id") {
+				if err := migrator.DropColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id"); err != nil {
+					return fmt.Errorf("failed to drop budget_id column: %w", err)
+				}
+			}
+			if migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id") {
+				if err := migrator.DropColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id"); err != nil {
+					return fmt.Errorf("failed to drop rate_limit_id column: %w", err)
+				}
+			}
+
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running provider config budget/rate limit migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddPluginPathColumn adds the path column to the plugin table
+func migrationAddPluginPathColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "update_plugins_table_for_custom_plugins",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TablePlugin{}, "path") {
+				if err := migrator.AddColumn(&tables.TablePlugin{}, "path"); err != nil {
+					return err
+				}
+			}
+			if !migrator.HasColumn(&tables.TablePlugin{}, "is_custom") {
+				if err := migrator.AddColumn(&tables.TablePlugin{}, "is_custom"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TablePlugin{}, "path"); err != nil {
+				return err
+			}
+			if err := migrator.DropColumn(&tables.TablePlugin{}, "is_custom"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running plugin path migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddSessionsTable adds the sessions table
+func migrationAddSessionsTable(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_sessions_table",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasTable(&tables.SessionsTable{}) {
+				if err := migrator.CreateTable(&tables.SessionsTable{}); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropTable(&tables.SessionsTable{}); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddHeadersJSONColumnIntoMCPClient adds the headers_json column to the mcp_client table
+func migrationAddHeadersJSONColumnIntoMCPClient(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_headers_json_column_into_mcp_client",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TableMCPClient{}, "headers_json") {
+				if err := migrator.AddColumn(&tables.TableMCPClient{}, "headers_json"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TableMCPClient{}, "headers_json"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+func migrationAddDisableContentLoggingColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_disable_content_logging_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TableClientConfig{}, "disable_content_logging") {
+				if err := migrator.AddColumn(&tables.TableClientConfig{}, "disable_content_logging"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TableClientConfig{}, "disable_content_logging"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddMCPClientIDColumn adds the client_id column to the mcp_clients table and populates unique client IDs
+func migrationAddMCPClientIDColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_mcp_client_id_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			if !migrator.HasColumn(&tables.TableMCPClient{}, "client_id") {
+				// Add the column as nullable first
+				if err := tx.Exec("ALTER TABLE config_mcp_clients ADD COLUMN client_id VARCHAR(255)").Error; err != nil {
+					return fmt.Errorf("failed to add client_id column: %w", err)
+				}
+
+				// Populate unique client_ids (UUIDs) for all existing MCP clients
+				var mcpClients []tables.TableMCPClient
+				if err := tx.Find(&mcpClients).Error; err != nil {
+					return fmt.Errorf("failed to fetch MCP clients: %w", err)
+				}
+
+				for _, client := range mcpClients {
+					// Generate a UUID for the client_id
+					clientID := uuid.New().String()
+
+					// Update the client with the generated client_id
+					if err := tx.Model(&client).Update("client_id", clientID).Error; err != nil {
+						return fmt.Errorf("failed to update MCP client %d with client_id %s: %w", client.ID, clientID, err)
+					}
+				}
+
+				// Create unique index on client_id
+				if err := tx.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_client_id ON config_mcp_clients (client_id)").Error; err != nil {
+					return fmt.Errorf("failed to create unique index on client_id: %w", err)
+				}
+				// Enforce NOT NULL in Postgres to guarantee ID presence on new rows
+				if tx.Dialector.Name() == "postgres" {
+					if err := tx.Exec("ALTER TABLE config_mcp_clients ALTER COLUMN client_id SET NOT NULL").Error; err != nil {
+						return fmt.Errorf("failed to set client_id NOT NULL: %w", err)
+					}
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			// Drop the unique index first to avoid orphaned index artifacts
+			if err := tx.Exec("DROP INDEX IF EXISTS idx_mcp_client_id").Error; err != nil {
+				return fmt.Errorf("failed to drop client_id index: %w", err)
+			}
+
+			if err := migrator.DropColumn(&tables.TableMCPClient{}, "client_id"); err != nil {
+				return fmt.Errorf("failed to drop client_id column: %w", err)
+			}
+
+			return nil
+		},
+	}})
+
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running MCP client_id migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddProviderConfigBudgetRateLimit adds budget_id and rate_limit_id columns with proper foreign key constraints
+func migrationAddProviderConfigBudgetRateLimit(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_provider_config_budget_rate_limit",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			// Add BudgetID column if it doesn't exist
+			if migrator.HasTable(&tables.TableVirtualKeyProviderConfig{}) {
+				if !migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id") {
+					if err := migrator.AddColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id"); err != nil {
+						return fmt.Errorf("failed to add budget_id column: %w", err)
+					}
+				}
+
+				// Add RateLimitID column if it doesn't exist
+				if !migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id") {
+					if err := migrator.AddColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id"); err != nil {
+						return fmt.Errorf("failed to add rate_limit_id column: %w", err)
+					}
+				}
+
+				// Create foreign key indexes for better performance
+				if !migrator.HasIndex(&tables.TableVirtualKeyProviderConfig{}, "idx_provider_config_budget") {
+					if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_provider_config_budget ON governance_virtual_key_provider_configs (budget_id)").Error; err != nil {
+						return fmt.Errorf("failed to create budget_id index: %w", err)
+					}
+				}
+
+				if !migrator.HasIndex(&tables.TableVirtualKeyProviderConfig{}, "idx_provider_config_rate_limit") {
+					if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_provider_config_rate_limit ON governance_virtual_key_provider_configs (rate_limit_id)").Error; err != nil {
+						return fmt.Errorf("failed to create rate_limit_id index: %w", err)
+					}
+				}
+
+				// Create FK constraints (dialect‑agnostic)
+				if !migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget") {
+					if err := migrator.CreateConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget"); err != nil {
+						return fmt.Errorf("failed to create Budget FK constraint: %w", err)
+					}
+				}
+				if !migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit") {
+					if err := migrator.CreateConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit"); err != nil {
+						return fmt.Errorf("failed to create RateLimit FK constraint: %w", err)
+					}
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			// Drop indexes first
+			if err := tx.Exec("DROP INDEX IF EXISTS idx_provider_config_budget").Error; err != nil {
+				return fmt.Errorf("failed to drop budget_id index: %w", err)
+			}
+			if err := tx.Exec("DROP INDEX IF EXISTS idx_provider_config_rate_limit").Error; err != nil {
+				return fmt.Errorf("failed to drop rate_limit_id index: %w", err)
+			}
+
+			// Drop FK constraints
+			if migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget") {
+				if err := migrator.DropConstraint(&tables.TableVirtualKeyProviderConfig{}, "Budget"); err != nil {
+					return fmt.Errorf("failed to drop Budget FK constraint: %w", err)
+				}
+			}
+			if migrator.HasConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit") {
+				if err := migrator.DropConstraint(&tables.TableVirtualKeyProviderConfig{}, "RateLimit"); err != nil {
+					return fmt.Errorf("failed to drop RateLimit FK constraint: %w", err)
+				}
+			}
+
+			// Drop columns
+			if migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id") {
+				if err := migrator.DropColumn(&tables.TableVirtualKeyProviderConfig{}, "budget_id"); err != nil {
+					return fmt.Errorf("failed to drop budget_id column: %w", err)
+				}
+			}
+			if migrator.HasColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id") {
+				if err := migrator.DropColumn(&tables.TableVirtualKeyProviderConfig{}, "rate_limit_id"); err != nil {
+					return fmt.Errorf("failed to drop rate_limit_id column: %w", err)
+				}
+			}
+
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running provider config budget/rate limit migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddPluginPathColumn adds the path column to the plugin table
+func migrationAddPluginPathColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "update_plugins_table_for_custom_plugins",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TablePlugin{}, "path") {
+				if err := migrator.AddColumn(&tables.TablePlugin{}, "path"); err != nil {
+					return err
+				}
+			}
+			if !migrator.HasColumn(&tables.TablePlugin{}, "is_custom") {
+				if err := migrator.AddColumn(&tables.TablePlugin{}, "is_custom"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TablePlugin{}, "path"); err != nil {
+				return err
+			}
+			if err := migrator.DropColumn(&tables.TablePlugin{}, "is_custom"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running plugin path migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddSessionsTable adds the sessions table
+func migrationAddSessionsTable(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_sessions_table",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasTable(&tables.SessionsTable{}) {
+				if err := migrator.CreateTable(&tables.SessionsTable{}); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropTable(&tables.SessionsTable{}); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddHeadersJSONColumnIntoMCPClient adds the headers_json column to the mcp_client table
+func migrationAddHeadersJSONColumnIntoMCPClient(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_headers_json_column_into_mcp_client",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TableMCPClient{}, "headers_json") {
+				if err := migrator.AddColumn(&tables.TableMCPClient{}, "headers_json"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TableMCPClient{}, "headers_json"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+func migrationAddDisableContentLoggingColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_disable_content_logging_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TableClientConfig{}, "disable_content_logging") {
+				if err := migrator.AddColumn(&tables.TableClientConfig{}, "disable_content_logging"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if err := migrator.DropColumn(&tables.TableClientConfig{}, "disable_content_logging"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running db migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddMCPClientIDColumn adds the client_id column to the mcp_clients table and populates unique client IDs
+func migrationAddMCPClientIDColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_mcp_client_id_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			if !migrator.HasColumn(&tables.TableMCPClient{}, "client_id") {
+				// Add the column as nullable first
+				if err := tx.Exec("ALTER TABLE config_mcp_clients ADD COLUMN client_id VARCHAR(255)").Error; err != nil {
+					return fmt.Errorf("failed to add client_id column: %w", err)
+				}
+
+				// Populate unique client_ids (UUIDs) for all existing MCP clients
+				var mcpClients []tables.TableMCPClient
+				if err := tx.Find(&mcpClients).Error; err != nil {
+					return fmt.Errorf("failed to fetch MCP clients: %w", err)
+				}
+
+				for _, client := range mcpClients {
+					// Generate a UUID for the client_id
+					clientID := uuid.New().String()
+
+					// Update the client with the generated client_id
+					if err := tx.Model(&client).Update("client_id", clientID).Error; err != nil {
+						return fmt.Errorf("failed to update MCP client %d with client_id %s: %w", client.ID, clientID, err)
+					}
+				}
+
+				// Create unique index on client_id
+				if err := tx.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_client_id ON config_mcp_clients (client_id)").Error; err != nil {
+					return fmt.Errorf("failed to create unique index on client_id: %w", err)
+				}
+				// Enforce NOT NULL in Postgres to guarantee ID presence on new rows
+				if tx.Dialector.Name() == "postgres" {
+					if err := tx.Exec("ALTER TABLE config_mcp_clients ALTER COLUMN client_id SET NOT NULL").Error; err != nil {
+						return fmt.Errorf("failed to set client_id NOT NULL: %w", err)
+					}
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			// Drop the unique index first to avoid orphaned index artifacts
+			if err := tx.Exec("DROP INDEX IF EXISTS idx_mcp_client_id").Error; err != nil {
+				return fmt.Errorf("failed to drop client_id index: %w", err)
+			}
+
+			if err := migrator.DropColumn(&tables.TableMCPClient{}, "client_id"); err != nil {
+				return fmt.Errorf("failed to drop client_id column: %w", err)
+			}
+
+			return nil
+		},
+	}})
+
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running MCP client_id migration: %s", err.Error())
 	}
 	return nil
 }

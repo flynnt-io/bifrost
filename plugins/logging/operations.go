@@ -13,22 +13,33 @@ import (
 )
 
 // insertInitialLogEntry creates a new log entry in the database using GORM
-func (p *LoggerPlugin) insertInitialLogEntry(ctx context.Context, requestID string, parentRequestID string, timestamp time.Time, data *InitialLogData) error {
+func (p *LoggerPlugin) insertInitialLogEntry(
+	ctx context.Context,
+	requestID string,
+	parentRequestID string,
+	timestamp time.Time,
+	numberOfRetries int,
+	fallbackIndex int,
+	data *InitialLogData,
+) error {
 	entry := &logstore.Log{
-		ID:        requestID,
-		Timestamp: timestamp,
-		Object:    data.Object,
-		Provider:  data.Provider,
-		Model:     data.Model,
-		Status:    "processing",
-		Stream:    false,
-		CreatedAt: timestamp,
+		ID:              requestID,
+		Timestamp:       timestamp,
+		Object:          data.Object,
+		Provider:        data.Provider,
+		Model:           data.Model,
+		NumberOfRetries: numberOfRetries,
+		FallbackIndex:   fallbackIndex,
+		Status:          "processing",
+		Stream:          false,
+		CreatedAt:       timestamp,
 		// Set parsed fields for serialization
-		InputHistoryParsed:       data.InputHistory,
-		ParamsParsed:             data.Params,
-		ToolsParsed:              data.Tools,
-		SpeechInputParsed:        data.SpeechInput,
-		TranscriptionInputParsed: data.TranscriptionInput,
+		InputHistoryParsed:          data.InputHistory,
+		ResponsesInputHistoryParsed: data.ResponsesInputHistory,
+		ParamsParsed:                data.Params,
+		ToolsParsed:                 data.Tools,
+		SpeechInputParsed:           data.SpeechInput,
+		TranscriptionInputParsed:    data.TranscriptionInput,
 	}
 
 	if parentRequestID != "" {
@@ -39,12 +50,30 @@ func (p *LoggerPlugin) insertInitialLogEntry(ctx context.Context, requestID stri
 }
 
 // updateLogEntry updates an existing log entry using GORM
-func (p *LoggerPlugin) updateLogEntry(ctx context.Context, requestID string, latency int64, cacheDebug *schemas.BifrostCacheDebug, data *UpdateLogData) error {
+func (p *LoggerPlugin) updateLogEntry(
+	ctx context.Context,
+	requestID string,
+	selectedKeyID string,
+	selectedKeyName string,
+	latency int64,
+	virtualKeyID string,
+	virtualKeyName string,
+	cacheDebug *schemas.BifrostCacheDebug,
+	data *UpdateLogData,
+) error {
 	updates := make(map[string]interface{})
+	updates["selected_key_id"] = selectedKeyID
+	updates["selected_key_name"] = selectedKeyName
 	if latency != 0 {
 		updates["latency"] = float64(latency)
 	}
 	updates["status"] = data.Status
+	if virtualKeyID != "" {
+		updates["virtual_key_id"] = virtualKeyID
+	}
+	if virtualKeyName != "" {
+		updates["virtual_key_name"] = virtualKeyName
+	}
 	// Handle JSON fields by setting them on a temporary entry and serializing
 	tempEntry := &logstore.Log{}
 	if data.ChatOutput != nil {
@@ -57,39 +86,41 @@ func (p *LoggerPlugin) updateLogEntry(ctx context.Context, requestID string, lat
 		}
 	}
 
-	if data.ResponsesOutput != nil {
-		tempEntry.ResponsesOutputParsed = data.ResponsesOutput
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize responses output: %v", err)
-		} else {
-			updates["responses_output"] = tempEntry.ResponsesOutput
+	if p.disableContentLogging == nil || !*p.disableContentLogging {
+		if data.ResponsesOutput != nil {
+			tempEntry.ResponsesOutputParsed = data.ResponsesOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize responses output: %v", err)
+			} else {
+				updates["responses_output"] = tempEntry.ResponsesOutput
+			}
 		}
-	}
 
-	if data.EmbeddingOutput != nil {
-		tempEntry.EmbeddingOutputParsed = data.EmbeddingOutput
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize embedding output: %v", err)
-		} else {
-			updates["embedding_output"] = tempEntry.EmbeddingOutput
+		if data.EmbeddingOutput != nil {
+			tempEntry.EmbeddingOutputParsed = data.EmbeddingOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize embedding output: %v", err)
+			} else {
+				updates["embedding_output"] = tempEntry.EmbeddingOutput
+			}
 		}
-	}
 
-	if data.SpeechOutput != nil {
-		tempEntry.SpeechOutputParsed = data.SpeechOutput
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize speech output: %v", err)
-		} else {
-			updates["speech_output"] = tempEntry.SpeechOutput
+		if data.SpeechOutput != nil {
+			tempEntry.SpeechOutputParsed = data.SpeechOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize speech output: %v", err)
+			} else {
+				updates["speech_output"] = tempEntry.SpeechOutput
+			}
 		}
-	}
 
-	if data.TranscriptionOutput != nil {
-		tempEntry.TranscriptionOutputParsed = data.TranscriptionOutput
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize transcription output: %v", err)
-		} else {
-			updates["transcription_output"] = tempEntry.TranscriptionOutput
+		if data.TranscriptionOutput != nil {
+			tempEntry.TranscriptionOutputParsed = data.TranscriptionOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize transcription output: %v", err)
+			} else {
+				updates["transcription_output"] = tempEntry.TranscriptionOutput
+			}
 		}
 	}
 
@@ -129,7 +160,7 @@ func (p *LoggerPlugin) updateLogEntry(ctx context.Context, requestID string, lat
 		}
 	}
 
-	if data.RawResponse != nil {
+	if p.disableContentLogging == nil || !*p.disableContentLogging && data.RawResponse != nil {
 		rawResponseBytes, err := sonic.Marshal(data.RawResponse)
 		if err != nil {
 			p.logger.Error("failed to marshal raw response: %v", err)
@@ -142,9 +173,27 @@ func (p *LoggerPlugin) updateLogEntry(ctx context.Context, requestID string, lat
 }
 
 // updateStreamingLogEntry handles streaming updates using GORM
-func (p *LoggerPlugin) updateStreamingLogEntry(ctx context.Context, requestID string, cacheDebug *schemas.BifrostCacheDebug, streamResponse *streaming.ProcessedStreamResponse, isFinalChunk bool) error {
+func (p *LoggerPlugin) updateStreamingLogEntry(
+	ctx context.Context,
+	requestID string,
+	selectedKeyID string,
+	selectedKeyName string,
+	virtualKeyID string,
+	virtualKeyName string,
+	cacheDebug *schemas.BifrostCacheDebug,
+	streamResponse *streaming.ProcessedStreamResponse,
+	isFinalChunk bool,
+) error {
 	p.logger.Debug("[logging] updating streaming log entry %s", requestID)
 	updates := make(map[string]interface{})
+	updates["selected_key_id"] = selectedKeyID
+	updates["selected_key_name"] = selectedKeyName
+	if virtualKeyID != "" {
+		updates["virtual_key_id"] = virtualKeyID
+	}
+	if virtualKeyName != "" {
+		updates["virtual_key_name"] = virtualKeyName
+	}
 	// Handle error case first
 	if streamResponse.Data.ErrorDetails != nil {
 		tempEntry := &logstore.Log{}
@@ -191,51 +240,54 @@ func (p *LoggerPlugin) updateStreamingLogEntry(ctx context.Context, requestID st
 	if isFinalChunk {
 		updates["status"] = "success"
 	}
-	// Handle transcription output from stream updates
-	if streamResponse.Data.TranscriptionOutput != nil {
-		tempEntry.TranscriptionOutputParsed = streamResponse.Data.TranscriptionOutput
-		// Here we just log error but move one vs breaking the entire logging flow
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Warn("failed to serialize transcription output: %v", err)
-		} else {
-			updates["transcription_output"] = tempEntry.TranscriptionOutput
+
+	if p.disableContentLogging == nil || !*p.disableContentLogging {
+		// Handle transcription output from stream updates
+		if streamResponse.Data.TranscriptionOutput != nil {
+			tempEntry.TranscriptionOutputParsed = streamResponse.Data.TranscriptionOutput
+			// Here we just log error but move one vs breaking the entire logging flow
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize transcription output: %v", err)
+			} else {
+				updates["transcription_output"] = tempEntry.TranscriptionOutput
+			}
 		}
-	}
-	// Handle speech output from stream updates
-	if streamResponse.Data.AudioOutput != nil {
-		tempEntry.SpeechOutputParsed = streamResponse.Data.AudioOutput
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize speech output: %v", err)
-		} else {
-			updates["speech_output"] = tempEntry.SpeechOutput
+		// Handle speech output from stream updates
+		if streamResponse.Data.AudioOutput != nil {
+			tempEntry.SpeechOutputParsed = streamResponse.Data.AudioOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize speech output: %v", err)
+			} else {
+				updates["speech_output"] = tempEntry.SpeechOutput
+			}
 		}
-	}
-	// Handle cache debug
-	if cacheDebug != nil {
-		tempEntry.CacheDebugParsed = cacheDebug
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize cache debug: %v", err)
-		} else {
-			updates["cache_debug"] = tempEntry.CacheDebug
+		// Handle cache debug
+		if cacheDebug != nil {
+			tempEntry.CacheDebugParsed = cacheDebug
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize cache debug: %v", err)
+			} else {
+				updates["cache_debug"] = tempEntry.CacheDebug
+			}
 		}
-	}
-	// Create content summary
-	if streamResponse.Data.OutputMessage != nil {
-		tempEntry.OutputMessageParsed = streamResponse.Data.OutputMessage
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize output message: %v", err)
-		} else {
-			updates["output_message"] = tempEntry.OutputMessage
-			updates["content_summary"] = tempEntry.ContentSummary
+		// Create content summary
+		if streamResponse.Data.OutputMessage != nil {
+			tempEntry.OutputMessageParsed = streamResponse.Data.OutputMessage
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize output message: %v", err)
+			} else {
+				updates["output_message"] = tempEntry.OutputMessage
+				updates["content_summary"] = tempEntry.ContentSummary
+			}
 		}
-	}
-	// Handle responses output from stream updates
-	if streamResponse.Data.OutputMessages != nil {
-		tempEntry.ResponsesOutputParsed = streamResponse.Data.OutputMessages
-		if err := tempEntry.SerializeFields(); err != nil {
-			p.logger.Error("failed to serialize responses output: %v", err)
-		} else {
-			updates["responses_output"] = tempEntry.ResponsesOutput
+		// Handle responses output from stream updates
+		if streamResponse.Data.OutputMessages != nil {
+			tempEntry.ResponsesOutputParsed = streamResponse.Data.OutputMessages
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize responses output: %v", err)
+			} else {
+				updates["responses_output"] = tempEntry.ResponsesOutput
+			}
 		}
 	}
 	// Only perform update if there's something to update
@@ -272,19 +324,73 @@ func (p *LoggerPlugin) SearchLogs(ctx context.Context, filters logstore.SearchFi
 
 // GetAvailableModels returns all unique models from logs
 func (p *LoggerPlugin) GetAvailableModels(ctx context.Context) []string {
-	modelSet := make(map[string]bool)
-	// Query distinct models from logs
 	result, err := p.store.FindAll(ctx, "model IS NOT NULL AND model != ''", "model")
 	if err != nil {
 		p.logger.Error("failed to get available models: %w", err)
 		return []string{}
 	}
-	for _, model := range result {
-		modelSet[model.Model] = true
+	return p.extractUniqueStrings(result, func(log *logstore.Log) string { return log.Model })
+}
+
+func (p *LoggerPlugin) GetAvailableSelectedKeys(ctx context.Context) []KeyPair {
+	result, err := p.store.FindAll(ctx, "selected_key_id IS NOT NULL AND selected_key_id != '' AND selected_key_name IS NOT NULL AND selected_key_name != ''", "selected_key_id, selected_key_name")
+	if err != nil {
+		p.logger.Error("failed to get available selected keys: %w", err)
+		return []KeyPair{}
 	}
-	models := make([]string, 0, len(modelSet))
-	for model := range modelSet {
-		models = append(models, model)
+	return p.extractUniqueKeyPairs(result, func(log *logstore.Log) KeyPair {
+		return KeyPair{
+			ID:   log.SelectedKeyID,
+			Name: log.SelectedKeyName,
+		}
+	})
+}
+
+func (p *LoggerPlugin) GetAvailableVirtualKeys(ctx context.Context) []KeyPair {
+	result, err := p.store.FindAll(ctx, "virtual_key_id IS NOT NULL AND virtual_key_id != '' AND virtual_key_name IS NOT NULL AND virtual_key_name != ''", "virtual_key_id, virtual_key_name")
+	if err != nil {
+		p.logger.Error("failed to get available virtual keys: %w", err)
+		return []KeyPair{}
 	}
-	return models
+	return p.extractUniqueKeyPairs(result, func(log *logstore.Log) KeyPair {
+		if log.VirtualKeyID != nil && log.VirtualKeyName != nil {
+			return KeyPair{
+				ID:   *log.VirtualKeyID,
+				Name: *log.VirtualKeyName,
+			}
+		}
+		return KeyPair{}
+	})
+}
+
+// extractUniqueKeyPairs extracts unique non-empty key pairs from logs using the provided extractor function
+func (p *LoggerPlugin) extractUniqueKeyPairs(logs []*logstore.Log, extractor func(*logstore.Log) KeyPair) []KeyPair {
+	uniqueSet := make(map[string]KeyPair)
+	for _, log := range logs {
+		pair := extractor(log)
+		if pair.ID != "" && pair.Name != "" {
+			uniqueSet[pair.ID] = pair
+		}
+	}
+
+	result := make([]KeyPair, 0, len(uniqueSet))
+	for _, pair := range uniqueSet {
+		result = append(result, pair)
+	}
+	return result
+}
+
+// extractUniqueStrings extracts unique non-empty string values from logs using the provided extractor function
+func (p *LoggerPlugin) extractUniqueStrings(logs []*logstore.Log, extractor func(*logstore.Log) string) []string {
+	uniqueSet := make(map[string]bool)
+	for _, log := range logs {
+		if value := extractor(log); value != "" {
+			uniqueSet[value] = true
+		}
+	}
+	result := make([]string, 0, len(uniqueSet))
+	for value := range uniqueSet {
+		result = append(result, value)
+	}
+	return result
 }

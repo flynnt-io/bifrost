@@ -1,13 +1,16 @@
 package integrations
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/maximhq/bifrost/core/providers/gemini"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/core/schemas/providers/gemini"
+
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -23,7 +26,7 @@ func CreateGenAIRouteConfigs(pathPrefix string) []RouteConfig {
 
 	// Chat completions endpoint
 	routes = append(routes, RouteConfig{
-		Type: RouteConfigTypeGenAI,
+		Type:   RouteConfigTypeGenAI,
 		Path:   pathPrefix + "/v1beta/models/{model:*}",
 		Method: "POST",
 		GetRequestTypeInstance: func() interface{} {
@@ -44,6 +47,11 @@ func CreateGenAIRouteConfigs(pathPrefix string) []RouteConfig {
 			return nil, errors.New("invalid request type")
 		},
 		EmbeddingResponseConverter: func(resp *schemas.BifrostEmbeddingResponse) (interface{}, error) {
+			if resp.ExtraFields.Provider == schemas.Gemini {
+				if resp.ExtraFields.RawResponse != nil {
+					return resp.ExtraFields.RawResponse, nil
+				}
+			}
 			return gemini.ToGeminiEmbeddingResponse(resp), nil
 		},
 		ChatResponseConverter: func(resp *schemas.BifrostChatResponse) (interface{}, error) {
@@ -63,6 +71,30 @@ func CreateGenAIRouteConfigs(pathPrefix string) []RouteConfig {
 		PreCallback: extractAndSetModelFromURL,
 	})
 
+	routes = append(routes, RouteConfig{
+		Type:   RouteConfigTypeGenAI,
+		Path:   pathPrefix + "/v1beta/models",
+		Method: "GET",
+		GetRequestTypeInstance: func() interface{} {
+			return &schemas.BifrostListModelsRequest{}
+		},
+		RequestConverter: func(req interface{}) (*schemas.BifrostRequest, error) {
+			if listModelsReq, ok := req.(*schemas.BifrostListModelsRequest); ok {
+				return &schemas.BifrostRequest{
+					ListModelsRequest: listModelsReq,
+				}, nil
+			}
+			return nil, errors.New("invalid request type")
+		},
+		ListModelsResponseConverter: func(resp *schemas.BifrostListModelsResponse) (interface{}, error) {
+			return gemini.ToGeminiListModelsResponse(resp), nil
+		},
+		ErrorConverter: func(err *schemas.BifrostError) interface{} {
+			return gemini.ToGeminiError(err)
+		},
+		PreCallback: extractGeminiListModelsParams,
+	})
+
 	return routes
 }
 
@@ -80,7 +112,7 @@ var embeddingPaths = []string{
 }
 
 // extractAndSetModelFromURL extracts model from URL and sets it in the request
-func extractAndSetModelFromURL(ctx *fasthttp.RequestCtx, req interface{}) error {
+func extractAndSetModelFromURL(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, req interface{}) error {
 	model := ctx.UserValue("model")
 	if model == nil {
 		return fmt.Errorf("model parameter is required")
@@ -126,4 +158,27 @@ func extractAndSetModelFromURL(ctx *fasthttp.RequestCtx, req interface{}) error 
 	}
 
 	return fmt.Errorf("invalid request type for GenAI")
+}
+
+// extractGeminiListModelsParams extracts query parameters for list models request
+func extractGeminiListModelsParams(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, req interface{}) error {
+	if listModelsReq, ok := req.(*schemas.BifrostListModelsRequest); ok {
+		// Set provider to Gemini
+		listModelsReq.Provider = schemas.Gemini
+
+		// Extract pageSize from query parameters (Gemini uses pageSize instead of limit)
+		if pageSizeStr := string(ctx.QueryArgs().Peek("pageSize")); pageSizeStr != "" {
+			if pageSize, err := strconv.Atoi(pageSizeStr); err == nil {
+				listModelsReq.PageSize = pageSize
+			}
+		}
+
+		// Extract pageToken from query parameters
+		if pageToken := string(ctx.QueryArgs().Peek("pageToken")); pageToken != "" {
+			listModelsReq.PageToken = pageToken
+		}
+
+		return nil
+	}
+	return errors.New("invalid request type for Gemini list models")
 }

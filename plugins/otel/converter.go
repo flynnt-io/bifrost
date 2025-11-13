@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/pricing"
+	"github.com/maximhq/bifrost/framework/modelcatalog"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -351,7 +351,7 @@ func getResponsesRequestParams(req *schemas.BifrostResponsesRequest) []*KeyValue
 		if req.Params.Tools != nil {
 			tools := make([]string, len(req.Params.Tools))
 			for i, tool := range req.Params.Tools {
-				tools[i] = tool.Type
+				tools[i] = string(tool.Type)
 			}
 			params = append(params, kvStr("gen_ai.request.tools", strings.Join(tools, ",")))
 		}
@@ -427,7 +427,19 @@ func createResourceSpan(traceID, spanID string, timestamp time.Time, req *schema
 }
 
 // completeResourceSpan completes a resource span for a Bifrost response
-func completeResourceSpan(span *ResourceSpan, timestamp time.Time, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError, pricingManager *pricing.PricingManager) *ResourceSpan {
+func completeResourceSpan(
+	span *ResourceSpan,
+	timestamp time.Time,
+	resp *schemas.BifrostResponse,
+	bifrostErr *schemas.BifrostError,
+	pricingManager *modelcatalog.ModelCatalog,
+	virtualKeyID string,
+	virtualKeyName string,
+	selectedKeyID string,
+	selectedKeyName string,
+	numberOfRetries int,
+	fallbackIndex int,
+) *ResourceSpan {
 	params := []*KeyValue{}
 
 	if resp != nil {
@@ -608,7 +620,7 @@ func completeResourceSpan(span *ResourceSpan, timestamp time.Time, resp *schemas
 			if responsesResponse.Tools != nil {
 				tools := make([]string, len(responsesResponse.Tools))
 				for i, tool := range responsesResponse.Tools {
-					tools[i] = tool.Type
+					tools[i] = string(tool.Type)
 				}
 				params = append(params, kvStr("gen_ai.responses.tools", strings.Join(tools, ",")))
 			}
@@ -659,6 +671,17 @@ func completeResourceSpan(span *ResourceSpan, timestamp time.Time, resp *schemas
 		}
 		params = append(params, kvStr("gen_ai.error", bifrostErr.Error.Message))
 	}
+	// Adding request metadata to the span
+	if virtualKeyID != "" {
+		params = append(params, kvStr("gen_ai.virtual_key_id", virtualKeyID))
+		params = append(params, kvStr("gen_ai.virtual_key_name", virtualKeyName))
+	}
+	if selectedKeyID != "" {
+		params = append(params, kvStr("gen_ai.selected_key_id", selectedKeyID))
+		params = append(params, kvStr("gen_ai.selected_key_name", selectedKeyName))
+	}
+	params = append(params, kvInt("gen_ai.number_of_retries", int64(numberOfRetries)))
+	params = append(params, kvInt("gen_ai.fallback_index", int64(fallbackIndex)))
 	span.ScopeSpans[0].Spans[0].Attributes = append(span.ScopeSpans[0].Spans[0].Attributes, params...)
 	span.ScopeSpans[0].Spans[0].Status = &tracepb.Status{Code: status}
 	span.ScopeSpans[0].Spans[0].EndTimeUnixNano = uint64(timestamp.UnixNano())

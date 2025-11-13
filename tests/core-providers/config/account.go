@@ -13,6 +13,8 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
+const Concurrency = 4
+
 // ProviderOpenAICustom represents the custom OpenAI provider for testing
 const ProviderOpenAICustom = schemas.ModelProvider("openai-custom")
 
@@ -37,6 +39,7 @@ type TestScenarios struct {
 	TranscriptionStream   bool // Streaming speech-to-text functionality
 	Embedding             bool // Embedding functionality
 	Reasoning             bool // Reasoning/thinking functionality via Responses API
+	ListModels            bool // List available models functionality
 }
 
 // ComprehensiveTestConfig extends TestConfig with additional scenarios
@@ -83,6 +86,7 @@ func (account *ComprehensiveTestAccount) GetConfiguredProviders() ([]schemas.Mod
 		schemas.Groq,
 		schemas.SGL,
 		schemas.Parasail,
+		schemas.Perplexity,
 		schemas.Cerebras,
 		schemas.Gemini,
 		schemas.OpenRouter,
@@ -157,12 +161,14 @@ func (account *ComprehensiveTestAccount) GetKeysForProvider(ctx *context.Context
 		return []schemas.Key{
 			{
 				Value:  os.Getenv("AZURE_API_KEY"),
-				Models: []string{"gpt-4o"},
+				Models: []string{},
 				Weight: 1.0,
 				AzureKeyConfig: &schemas.AzureKeyConfig{
 					Endpoint: os.Getenv("AZURE_ENDPOINT"),
 					Deployments: map[string]string{
-						"gpt-4o": "gpt-4o-aug",
+						"gpt-4o":        "gpt-4o",
+						"gpt-4o-backup": "gpt-4o-aug",
+						"o1":            "o1",
 					},
 					// Use environment variable for API version with fallback to current preview version
 					// Note: This is a preview API version that may change over time. Update as needed.
@@ -179,10 +185,9 @@ func (account *ComprehensiveTestAccount) GetKeysForProvider(ctx *context.Context
 					Deployments: map[string]string{
 						"text-embedding-ada-002": "text-embedding-ada-002",
 					},
-					// Use environment variable for API version with fallback to current preview version
-					// Note: This is a preview API version that may change over time. Update as needed.
+					// Use environment variable for API version with fallback to current stable version
 					// Set AZURE_API_VERSION environment variable to override the default.
-					APIVersion: bifrost.Ptr(getEnvWithDefault("AZURE_API_VERSION", "2024-08-01-preview")),
+					APIVersion: bifrost.Ptr(getEnvWithDefault("AZURE_API_VERSION", "2024-10-21")),
 				},
 			},
 		}, nil
@@ -219,6 +224,14 @@ func (account *ComprehensiveTestAccount) GetKeysForProvider(ctx *context.Context
 		return []schemas.Key{
 			{
 				Value:  os.Getenv("PARASAIL_API_KEY"),
+				Models: []string{},
+				Weight: 1.0,
+			},
+		}, nil
+	case schemas.Perplexity:
+		return []schemas.Key{
+			{
+				Value:  os.Getenv("PERPLEXITY_API_KEY"),
 				Models: []string{},
 				Weight: 1.0,
 			},
@@ -278,7 +291,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                10 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 			CustomProviderConfig: &schemas.CustomProviderConfig{
@@ -304,7 +317,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                8 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -314,10 +327,10 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				DefaultRequestTimeoutInSeconds: 120,
 				MaxRetries:                     5, // AWS services can have occasional issues
 				RetryBackoffInitial:            5 * time.Second,
-				RetryBackoffMax:                20 * time.Second,
+				RetryBackoffMax:                40 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -325,25 +338,25 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 		return &schemas.ProviderConfig{
 			NetworkConfig: schemas.NetworkConfig{
 				DefaultRequestTimeoutInSeconds: 120,
-				MaxRetries:                     4, // Cohere can be variable
-				RetryBackoffInitial:            750 * time.Millisecond,
-				RetryBackoffMax:                10 * time.Second,
+				MaxRetries:                     5, // Cohere can be variable
+				RetryBackoffInitial:            5 * time.Second,
+				RetryBackoffMax:                40 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
 	case schemas.Azure:
 		return &schemas.ProviderConfig{
 			NetworkConfig: schemas.NetworkConfig{
-				DefaultRequestTimeoutInSeconds: 120,
-				MaxRetries:                     3, // Azure OpenAI is generally reliable
-				RetryBackoffInitial:            500 * time.Millisecond,
-				RetryBackoffMax:                8 * time.Second,
+				DefaultRequestTimeoutInSeconds: 600,
+				MaxRetries:                     5,
+				RetryBackoffInitial:            20 * time.Second,
+				RetryBackoffMax:                3 * time.Minute,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -356,7 +369,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                8 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -370,7 +383,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				BaseURL:                        os.Getenv("OLLAMA_BASE_URL"),
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -378,12 +391,12 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 		return &schemas.ProviderConfig{
 			NetworkConfig: schemas.NetworkConfig{
 				DefaultRequestTimeoutInSeconds: 120,
-				MaxRetries:                     4, // Mistral can be variable
-				RetryBackoffInitial:            750 * time.Millisecond,
-				RetryBackoffMax:                10 * time.Second,
+				MaxRetries:                     5, // Mistral can be variable
+				RetryBackoffInitial:            5 * time.Second,
+				RetryBackoffMax:                3 * time.Minute,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 3,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -396,7 +409,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                15 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 2,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -410,7 +423,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                15 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -423,7 +436,20 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                12 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
+				BufferSize:  10,
+			},
+		}, nil
+	case schemas.Perplexity:
+		return &schemas.ProviderConfig{
+			NetworkConfig: schemas.NetworkConfig{
+				DefaultRequestTimeoutInSeconds: 120,
+				MaxRetries:                     5, // Perplexity can be variable
+				RetryBackoffInitial:            1 * time.Second,
+				RetryBackoffMax:                12 * time.Second,
+			},
+			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -431,12 +457,12 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 		return &schemas.ProviderConfig{
 			NetworkConfig: schemas.NetworkConfig{
 				DefaultRequestTimeoutInSeconds: 120,
-				MaxRetries:                     4, // Cerebras is reasonably stable
-				RetryBackoffInitial:            750 * time.Millisecond,
-				RetryBackoffMax:                10 * time.Second,
+				MaxRetries:                     5, // Cerebras is reasonably stable
+				RetryBackoffInitial:            5 * time.Second,
+				RetryBackoffMax:                3 * time.Minute,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 2,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -449,7 +475,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                12 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 20,
+				Concurrency: Concurrency,
 				BufferSize:  20,
 			},
 		}, nil
@@ -462,7 +488,7 @@ func (account *ComprehensiveTestAccount) GetConfigForProvider(providerKey schema
 				RetryBackoffMax:                12 * time.Second,
 			},
 			ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-				Concurrency: 10,
+				Concurrency: Concurrency,
 				BufferSize:  10,
 			},
 		}, nil
@@ -500,6 +526,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			TranscriptionStream:   true, // OpenAI supports streaming STT
 			Embedding:             true,
 			Reasoning:             true, // OpenAI supports reasoning via o1 models
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.Anthropic, Model: "claude-3-7-sonnet-20250219"},
@@ -527,6 +554,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             false,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -554,6 +582,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             true,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -581,6 +610,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             true,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -608,6 +638,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported yet
 			TranscriptionStream:   false, // Not supported yet
 			Embedding:             true,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -635,6 +666,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             true,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -661,6 +693,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             true,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -688,6 +721,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             false,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -715,6 +749,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             false,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -742,6 +777,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false, // Not supported
 			TranscriptionStream:   false, // Not supported
 			Embedding:             false,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -772,6 +808,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         true,
 			TranscriptionStream:   true,
 			Embedding:             true,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},
@@ -799,6 +836,7 @@ var AllProviderConfigs = []ComprehensiveTestConfig{
 			Transcription:         false,
 			TranscriptionStream:   false,
 			Embedding:             false,
+			ListModels:            true,
 		},
 		Fallbacks: []schemas.Fallback{
 			{Provider: schemas.OpenAI, Model: "gpt-4o-mini"},

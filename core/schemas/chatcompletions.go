@@ -9,11 +9,16 @@ import (
 
 // BifrostChatRequest is the request struct for chat completion requests
 type BifrostChatRequest struct {
-	Provider  ModelProvider   `json:"provider"`
-	Model     string          `json:"model"`
-	Input     []ChatMessage   `json:"input,omitempty"`
-	Params    *ChatParameters `json:"params,omitempty"`
-	Fallbacks []Fallback      `json:"fallbacks,omitempty"`
+	Provider       ModelProvider   `json:"provider"`
+	Model          string          `json:"model"`
+	Input          []ChatMessage   `json:"input,omitempty"`
+	Params         *ChatParameters `json:"params,omitempty"`
+	Fallbacks      []Fallback      `json:"fallbacks,omitempty"`
+	RawRequestBody []byte          `json:"-"` // set bifrost-use-raw-request-body to true in ctx to use the raw request body. Bifrost will directly send this to the downstream provider.
+}
+
+func (r *BifrostChatRequest) GetRawRequestBody() []byte {
+	return r.RawRequestBody
 }
 
 // BifrostChatResponse represents the complete result from a chat completion request.
@@ -27,6 +32,11 @@ type BifrostChatResponse struct {
 	SystemFingerprint string                     `json:"system_fingerprint"`
 	Usage             *BifrostLLMUsage           `json:"usage"`
 	ExtraFields       BifrostResponseExtraFields `json:"extra_fields"`
+
+	// Perplexity-specific fields
+	SearchResults []SearchResult `json:"search_results,omitempty"`
+	Videos        []VideoResult  `json:"videos,omitempty"`
+	Citations     []string       `json:"citations,omitempty"`
 }
 
 // ToTextCompletionResponse converts a BifrostChatResponse to a BifrostTextCompletionResponse
@@ -471,6 +481,7 @@ type ChatAssistantMessageAnnotationCitation struct {
 
 // ChatAssistantMessageToolCall represents a tool call in a message
 type ChatAssistantMessageToolCall struct {
+	Index    uint16                               `json:"index"`
 	Type     *string                              `json:"type,omitempty"`
 	ID       *string                              `json:"id,omitempty"`
 	Function ChatAssistantMessageToolCallFunction `json:"function"`
@@ -550,6 +561,7 @@ type BifrostLLMUsage struct {
 	CompletionTokens        int                          `json:"completion_tokens,omitempty"`
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 	TotalTokens             int                          `json:"total_tokens"`
+	Cost                    *BifrostCost                 `json:"cost,omitempty"` //Only for the providers which support cost calculation
 }
 
 type ChatPromptTokensDetails struct {
@@ -558,8 +570,55 @@ type ChatPromptTokensDetails struct {
 }
 
 type ChatCompletionTokensDetails struct {
-	AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
-	AudioTokens              int `json:"audio_tokens,omitempty"`
-	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
-	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+	AcceptedPredictionTokens int  `json:"accepted_prediction_tokens,omitempty"`
+	AudioTokens              int  `json:"audio_tokens,omitempty"`
+	CitationTokens           *int `json:"citation_tokens,omitempty"`
+	NumSearchQueries         *int `json:"num_search_queries,omitempty"`
+	ReasoningTokens          int  `json:"reasoning_tokens,omitempty"`
+	RejectedPredictionTokens int  `json:"rejected_prediction_tokens,omitempty"`
+}
+
+type BifrostCost struct {
+	InputTokensCost  float64 `json:"input_tokens_cost,omitempty"`
+	OutputTokensCost float64 `json:"output_tokens_cost,omitempty"`
+	RequestCost      float64 `json:"request_cost,omitempty"`
+	TotalCost        float64 `json:"total_cost,omitempty"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshalling for BifrostCost.
+func (bc *BifrostCost) UnmarshalJSON(data []byte) error {
+	// First, try to unmarshal as a direct float
+	var costFloat float64
+	if err := sonic.Unmarshal(data, &costFloat); err == nil {
+		bc.TotalCost = costFloat
+		return nil
+	}
+
+	// Try to unmarshal as a full BifrostCost struct
+	// Use a type alias to avoid infinite recursion
+	type Alias BifrostCost
+	var costStruct Alias
+	if err := sonic.Unmarshal(data, &costStruct); err == nil {
+		*bc = BifrostCost(costStruct)
+		return nil
+	}
+
+	return fmt.Errorf("cost field is neither a float nor an object")
+}
+
+type SearchResult struct {
+	Title       string  `json:"title"`
+	URL         string  `json:"url"`
+	Date        *string `json:"date,omitempty"`
+	LastUpdated *string `json:"last_updated,omitempty"`
+	Snippet     *string `json:"snippet,omitempty"`
+	Source      *string `json:"source,omitempty"`
+}
+
+type VideoResult struct {
+	URL             string   `json:"url"`
+	ThumbnailURL    *string  `json:"thumbnail_url,omitempty"`
+	ThumbnailWidth  *int     `json:"thumbnail_width,omitempty"`
+	ThumbnailHeight *int     `json:"thumbnail_height,omitempty"`
+	Duration        *float64 `json:"duration,omitempty"`
 }
