@@ -1,11 +1,9 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { baseApi } from "./apis/baseApi";
-import { appReducer, guardrailReducer, pluginReducer, providerReducer } from "./slices";
+import { appReducer, pluginReducer, providerReducer } from "./slices";
 
 // Import enterprise types for TypeScript
-type EnterpriseState = {
-	//@ts-ignore
-} & import("@enterprise/lib/store/slices").EnterpriseState;
+type EnterpriseState = {} & import("@enterprise/lib/store/slices").EnterpriseState;
 
 // Get enterprise reducers if they are available
 let enterpriseReducers = {};
@@ -21,7 +19,6 @@ try {
 
 // Inject enterprise APIs if they are available
 try {
-	//@ts-ignore
 	const enterpriseApis = require("@enterprise/lib/store/apis");
 	// Access the apis array to ensure all API modules are loaded
 	// APIs are already injected into baseApi via injectEndpoints
@@ -43,8 +40,6 @@ export const store = configureStore({
 		provider: providerReducer,
 		// Plugin state slice
 		plugin: pluginReducer,
-		// Guardrail state slice
-		guardrail: guardrailReducer,
 		// Enterprise reducers (if available)
 		...enterpriseReducers,
 	},

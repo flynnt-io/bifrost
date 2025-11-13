@@ -24,19 +24,19 @@ func TestEmbeddingRequestsCaching(t *testing.T) {
 
 	// Make first request (will go to OpenAI and be cached) - with retries
 	start1 := time.Now()
-	response1, err1 := EmbeddingRequestWithRetries(t, setup.Client, ctx, embeddingRequest)
+	response1, err1 := setup.Client.EmbeddingRequest(ctx, embeddingRequest)
 	duration1 := time.Since(start1)
 
 	if err1 != nil {
 		return // Test will be skipped by retry function
 	}
 
-	if response1 == nil || len(response1.EmbeddingResponse.Data) == 0 {
+	if response1 == nil || len(response1.Data) == 0 {
 		t.Fatal("First embedding response is invalid")
 	}
 
 	t.Logf("First embedding request completed in %v", duration1)
-	t.Logf("Response contains %d embeddings", len(response1.EmbeddingResponse.Data))
+	t.Logf("Response contains %d embeddings", len(response1.Data))
 
 	// Wait for cache to be written
 	WaitForCache()
@@ -67,8 +67,8 @@ func TestEmbeddingRequestsCaching(t *testing.T) {
 	}
 
 	// Responses should be identical
-	if len(response1.EmbeddingResponse.Data) != len(response2.Data) {
-		t.Errorf("Response lengths differ: %d vs %d", len(response1.EmbeddingResponse.Data), len(response2.Data))
+	if len(response1.Data) != len(response2.Data) {
+		t.Errorf("Response lengths differ: %d vs %d", len(response1.Data), len(response2.Data))
 	}
 
 	t.Log("✅ Embedding requests properly cached using direct hash matching")
@@ -86,13 +86,13 @@ func TestEmbeddingRequestsNoCacheWithoutCacheKey(t *testing.T) {
 
 	t.Log("Making embedding request without cache key...")
 
-	response, err := EmbeddingRequestWithRetries(t, setup.Client, ctx, embeddingRequest)
+	response, err := setup.Client.EmbeddingRequest(ctx, embeddingRequest)
 	if err != nil {
 		t.Fatalf("Embedding request failed: %v", err)
 	}
 
 	// Should not be cached
-	AssertNoCacheHit(t, response)
+	AssertNoCacheHit(t, &schemas.BifrostResponse{EmbeddingResponse: response})
 
 	t.Log("✅ Embedding requests without cache key are properly not cached")
 }
@@ -109,21 +109,21 @@ func TestEmbeddingRequestsDifferentTexts(t *testing.T) {
 	request2 := CreateEmbeddingRequest([]string{"Second set of texts"})
 
 	t.Log("Making first embedding request...")
-	response1, err1 := EmbeddingRequestWithRetries(t, setup.Client, ctx, request1)
+	response1, err1 := setup.Client.EmbeddingRequest(ctx, request1)
 	if err1 != nil {
 		return // Test will be skipped by retry function
 	}
-	AssertNoCacheHit(t, response1)
+	AssertNoCacheHit(t, &schemas.BifrostResponse{EmbeddingResponse: response1})
 
 	WaitForCache()
 
 	t.Log("Making second different embedding request...")
-	response2, err2 := EmbeddingRequestWithRetries(t, setup.Client, ctx, request2)
+	response2, err2 := setup.Client.EmbeddingRequest(ctx, request2)
 	if err2 != nil {
 		return // Test will be skipped by retry function
 	}
 	// Should not be a cache hit since texts are different
-	AssertNoCacheHit(t, response2)
+	AssertNoCacheHit(t, &schemas.BifrostResponse{EmbeddingResponse: response2})
 
 	t.Log("✅ Different embedding texts produce different cache entries")
 }
@@ -140,11 +140,11 @@ func TestEmbeddingRequestsCacheExpiration(t *testing.T) {
 	embeddingRequest := CreateEmbeddingRequest([]string{"TTL test embedding"})
 
 	t.Log("Making first embedding request with short TTL...")
-	response1, err1 := EmbeddingRequestWithRetries(t, setup.Client, ctx, embeddingRequest)
+	response1, err1 := setup.Client.EmbeddingRequest(ctx, embeddingRequest)
 	if err1 != nil {
 		return // Test will be skipped by retry function
 	}
-	AssertNoCacheHit(t, response1)
+	AssertNoCacheHit(t, &schemas.BifrostResponse{EmbeddingResponse: response1})
 
 	WaitForCache()
 
@@ -163,12 +163,12 @@ func TestEmbeddingRequestsCacheExpiration(t *testing.T) {
 	time.Sleep(shortTTL + 1*time.Second) // Wait for TTL to expire
 
 	t.Log("Making third request after TTL expiration...")
-	response3, err3 := EmbeddingRequestWithRetries(t, setup.Client, ctx, embeddingRequest)
+	response3, err3 := setup.Client.EmbeddingRequest(ctx, embeddingRequest)
 	if err3 != nil {
 		return // Test will be skipped by retry function
 	}
 	// Should not be a cache hit since TTL expired
-	AssertNoCacheHit(t, response3)
+	AssertNoCacheHit(t, &schemas.BifrostResponse{EmbeddingResponse: response3})
 
 	t.Log("✅ Embedding requests properly handle TTL expiration")
 }

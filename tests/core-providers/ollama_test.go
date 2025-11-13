@@ -10,6 +10,7 @@ import (
 )
 
 func TestOllama(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("OLLAMA_BASE_URL") == "" {
 		t.Skip("Skipping Ollama tests because OLLAMA_BASE_URL is not set")
 	}
@@ -39,6 +40,7 @@ func TestOllama(t *testing.T) {
 			MultipleImages:        false,
 			CompleteEnd2End:       true,
 			Embedding:             false,
+			ListModels:            true,
 		},
 	}
 

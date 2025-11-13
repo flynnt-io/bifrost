@@ -1,4 +1,4 @@
-import { AllowedRequests, ConcurrencyAndBufferSize, NetworkConfig } from "@/lib/types/config";
+import { AllowedRequests, BaseProvider, ConcurrencyAndBufferSize, NetworkConfig } from "@/lib/types/config";
 import { ProviderName } from "./logs";
 
 // Model placeholders based on provider type
@@ -15,6 +15,7 @@ export const ModelPlaceholders = {
 	openrouter: "e.g. openai/gpt-4, anthropic/claude-3-haiku",
 	sgl: "e.g. sgl-2, sgl-vision",
 	parasail: "e.g. parasail-2, parasail-vision",
+	perplexity: "e.g. sonar-pro, sonar-deep-research",
 	ollama: "e.g. llama3.1, llama2",
 	openai: "e.g. gpt-4, gpt-4o, gpt-4o-mini, gpt-3.5-turbo",
 	vertex: "e.g. gemini-1.5-pro, text-bison, chat-bison",
@@ -35,6 +36,7 @@ export const isKeyRequiredByProvider: Record<ProviderName, boolean> = {
 	ollama: false,
 	openai: true,
 	vertex: true,
+	perplexity: true,
 };
 
 export const DefaultNetworkConfig = {
@@ -56,15 +58,59 @@ export const MCP_STATUS_COLORS = {
 	disconnected: "bg-gray-100 text-gray-800",
 } as const;
 
-export const DEFAULT_ALLOWED_REQUESTS = {
-	text_completion: true,
-	chat_completion: true,
-	chat_completion_stream: true,
-	embedding: true,
-	speech: true,
-	speech_stream: true,
-	transcription: true,
-	transcription_stream: true,
-} as const satisfies Required<AllowedRequests>;
+// Mapping of what IS supported by each base provider
+export const PROVIDER_SUPPORTED_REQUESTS: Record<BaseProvider, string[]> = {
+	openai: [
+		"list_models",
+        "text_completion",
+        "text_completion_stream",
+        "chat_completion",
+        "chat_completion_stream",
+        "responses",
+        "responses_stream",
+        "embedding",
+        "speech",
+        "speech_stream",
+        "transcription",
+        "transcription_stream",
+    ],
+	anthropic: [
+		"list_models",
+		"chat_completion",
+		"chat_completion_stream",
+		"responses",
+		"responses_stream",
+	],
+	gemini: [
+		"list_models",
+		"chat_completion",
+		"chat_completion_stream",
+		"responses",
+		"responses_stream",
+		"embedding",
+		"transcription",
+		"transcription_stream",
+        "speech",
+        "speech_stream",
+	],
+	cohere: [
+		"list_models",
+		"chat_completion",
+		"chat_completion_stream",
+		"responses",
+		"responses_stream",
+		"embedding",
+	],
+	bedrock: [
+		"list_models",
+		"text_completion",
+		"chat_completion",
+		"chat_completion_stream",
+		"responses",
+		"responses_stream",
+		"embedding",
+	],
+};
+
 
 export const IS_ENTERPRISE = process.env.NEXT_PUBLIC_IS_ENTERPRISE === "true";

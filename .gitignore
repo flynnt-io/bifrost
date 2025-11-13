@@ -7,6 +7,7 @@
 private.*
 .venv
 bifrost-data
+test-coverage-local.sh
 
 # Enterprise
 ui/app/enterprise
@@ -25,6 +26,7 @@ node_modules
 temp*/
 tmp/
 tmp-*
+private
 
 # Go workspaces (local only)
 go.work
@@ -34,5 +36,8 @@ go.work.sum
 *.db
 *.db-shm
 *.db-wal
+
+# Test reports
+test-reports
 
 .claude

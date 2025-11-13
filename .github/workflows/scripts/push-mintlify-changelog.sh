@@ -19,19 +19,31 @@ fi
 # Source changelog utilities
 source "$(dirname "$0")/changelog-utils.sh"
 
+# Get current date
+CURRENT_DATE=$(date +"%Y-%m-%d")
+
 # Preparing changelog file
 CHANGELOG_BODY="---
 title: \"$VERSION\"
-description: \"$VERSION changelog\"
+description: \"$VERSION changelog - $CURRENT_DATE\"
 ---"
+
+# Array to track cleaned changelog files
+CLEANED_CHANGELOG_FILES=()
 
 # Helper to append a section if changelog file exists and is non-empty
 append_section () {
   label=$1
   path=$2
   if [ -f "$path" ]; then
-    content=$(get_changelog_content "$path") || return 0
-    CHANGELOG_BODY+=$'\n'"<Update label=\"$label\" description=\"$VERSION\">"$'\n'"$content"$'\n\n'"</Update>"
+    content=$(get_changelog_content "$path")
+    if [ -n "$content" ]; then
+      CHANGELOG_BODY+=$'\n'"<Update label=\"$label\" description=\"$VERSION\">"$'\n'"$content"$'\n\n'"</Update>"
+    fi
+    # Clear the changelog file after processing
+    printf '' > "$path"
+    # Track this file for git commit
+    CLEANED_CHANGELOG_FILES+=("$path")
   fi
 }
 
@@ -94,6 +106,10 @@ git pull origin main
 # Commit and push changes
 git add docs/changelogs/$VERSION.mdx
 git add docs/docs.json
+# Add all cleaned changelog files
+for file in "${CLEANED_CHANGELOG_FILES[@]}"; do
+  git add "$file"
+done
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git commit -m "Adds changelog for $VERSION --skip-pipeline"

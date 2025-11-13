@@ -1,12 +1,48 @@
 package bifrost
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"math/rand"
+	"strings"
 	"time"
 
 	schemas "github.com/maximhq/bifrost/core/schemas"
 )
+
+// Define a set of retryable status codes
+var retryableStatusCodes = map[int]bool{
+	500: true, // Internal Server Error
+	502: true, // Bad Gateway
+	503: true, // Service Unavailable
+	504: true, // Gateway Timeout
+	429: true, // Too Many Requests
+}
+
+// Define rate limit error message patterns (case-insensitive)
+var rateLimitPatterns = []string{
+	"rate limit",
+	"rate_limit",
+	"ratelimit",
+	"too many requests",
+	"quota exceeded",
+	"quota_exceeded",
+	"request limit",
+	"throttled",
+	"throttling",
+	"rate exceeded",
+	"limit exceeded",
+	"requests per",
+	"rpm exceeded",
+	"tpm exceeded",
+	"tokens per minute",
+	"requests per minute",
+	"requests per second",
+	"api rate limit",
+	"usage limit",
+	"concurrent requests limit",
+}
 
 // Ptr returns a pointer to the given value.
 func Ptr[T any](v T) *T {
@@ -15,7 +51,11 @@ func Ptr[T any](v T) *T {
 
 // providerRequiresKey returns true if the given provider requires an API key for authentication.
 // Some providers like Ollama and SGL are keyless and don't require API keys.
-func providerRequiresKey(providerKey schemas.ModelProvider) bool {
+func providerRequiresKey(providerKey schemas.ModelProvider, customConfig *schemas.CustomProviderConfig) bool {
+	// Keyless custom providers are not allowed for Bedrock.
+	if customConfig != nil && customConfig.IsKeyLess && customConfig.BaseProviderType != schemas.Bedrock {
+		return false
+	}
 	return providerKey != schemas.Ollama && providerKey != schemas.SGL
 }
 
@@ -23,6 +63,10 @@ func providerRequiresKey(providerKey schemas.ModelProvider) bool {
 // Some providers like Vertex and Bedrock have their credentials in additional key configs..
 func canProviderKeyValueBeEmpty(providerKey schemas.ModelProvider) bool {
 	return providerKey == schemas.Vertex || providerKey == schemas.Bedrock
+}
+
+func isKeySkippingAllowed(providerKey schemas.ModelProvider) bool {
+	return providerKey != schemas.Azure && providerKey != schemas.Bedrock && providerKey != schemas.Vertex
 }
 
 // calculateBackoff implements exponential backoff with jitter for retry attempts.
@@ -36,6 +80,7 @@ func calculateBackoff(attempt int, config *schemas.ProviderConfig) time.Duration
 	return time.Duration(jitter)
 }
 
+// validateRequest validates the given request.
 func validateRequest(req *schemas.BifrostRequest) *schemas.BifrostError {
 	if req == nil {
 		return newBifrostErrorFromMsg("bifrost request cannot be nil")
@@ -49,6 +94,25 @@ func validateRequest(req *schemas.BifrostRequest) *schemas.BifrostError {
 	}
 
 	return nil
+}
+
+// IsRateLimitErrorMessage checks if an error message indicates a rate limit issue
+func IsRateLimitErrorMessage(errorMessage string) bool {
+	if errorMessage == "" {
+		return false
+	}
+
+	// Convert to lowercase for case-insensitive matching
+	lowerMessage := strings.ToLower(errorMessage)
+
+	// Check if any rate limit pattern is found in the error message
+	for _, pattern := range rateLimitPatterns {
+		if strings.Contains(lowerMessage, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // newBifrostError wraps a standard error into a BifrostError with IsBifrostError set to false.
@@ -127,6 +191,7 @@ func IsStreamRequestType(reqType schemas.RequestType) bool {
 	return reqType == schemas.TextCompletionStreamRequest || reqType == schemas.ChatCompletionStreamRequest || reqType == schemas.ResponsesStreamRequest || reqType == schemas.SpeechStreamRequest || reqType == schemas.TranscriptionStreamRequest
 }
 
+// IsFinalChunk returns true if the given context is a final chunk.
 func IsFinalChunk(ctx *context.Context) bool {
 	if ctx == nil {
 		return false
@@ -152,4 +217,53 @@ func GetResponseFields(result *schemas.BifrostResponse, err *schemas.BifrostErro
 	}
 
 	return err.ExtraFields.RequestType, err.ExtraFields.Provider, err.ExtraFields.ModelRequested
+}
+
+// MarshalUnsafe marshals the given value to a JSON string without escaping HTML characters.
+// Returns empty string if marshaling fails.
+func MarshalUnsafe(v any) string {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(v)
+	if err != nil {
+		return ""
+	}
+	// Encode adds a trailing newline, trim it
+	return strings.TrimSpace(buf.String())
+}
+
+func GetErrorMessage(err *schemas.BifrostError) string {
+	if err == nil {
+		return ""
+	}
+	if err.StatusCode != nil && (*err.StatusCode == 401 || *err.StatusCode == 403) {
+		return "key invalid or unauthorized or forbidden"
+	} else if err.Error != nil && err.Error.Message != "" {
+		return err.Error.Message
+	} else if err.Type != nil {
+		return *err.Type
+	} else {
+		return "unknown error"
+	}
+}
+
+// GetStringFromContext safely extracts a string value from context
+func GetStringFromContext(ctx context.Context, key any) string {
+	if value := ctx.Value(key); value != nil {
+		if str, ok := value.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
+// GetIntFromContext safely extracts an int value from context
+func GetIntFromContext(ctx context.Context, key any) int {
+	if value := ctx.Value(key); value != nil {
+		if intValue, ok := value.(int); ok {
+			return intValue
+		}
+	}
+	return 0
 }

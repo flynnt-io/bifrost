@@ -13,13 +13,14 @@ const (
 	EnvKeyTypeVertexConfig  EnvKeyType = "vertex_config"
 	EnvKeyTypeBedrockConfig EnvKeyType = "bedrock_config"
 	EnvKeyTypeConnection    EnvKeyType = "connection_string"
+	EnvKeyTypeMCPHeader     EnvKeyType = "mcp_header"
 )
 
 // EnvKeyInfo stores information about a key sourced from environment
 type EnvKeyInfo struct {
 	EnvVar     string                // The environment variable name (without env. prefix)
 	Provider   schemas.ModelProvider // The provider this key belongs to (empty for core/mcp configs)
-	KeyType    EnvKeyType            // Type of key (e.g., "api_key", "azure_config", "vertex_config", "bedrock_config", "connection_string")
+	KeyType    EnvKeyType            // Type of key (e.g., "api_key", "azure_config", "vertex_config", "bedrock_config", "connection_string", "mcp_header")
 	ConfigPath string                // Path in config where this env var is used
 	KeyID      string                // The key ID this env var belongs to (empty for non-key configs like bedrock_config, connection_string)
 }
@@ -31,6 +32,7 @@ type ClientConfig struct {
 	InitialPoolSize         int      `json:"initial_pool_size"`         // The initial pool size for the bifrost client
 	PrometheusLabels        []string `json:"prometheus_labels"`         // The labels to be used for prometheus metrics
 	EnableLogging           bool     `json:"enable_logging"`            // Enable logging of requests and responses
+	DisableContentLogging   bool     `json:"disable_content_logging"`   // Disable logging of content
 	EnableGovernance        bool     `json:"enable_governance"`         // Enable governance on all requests
 	EnforceGovernanceHeader bool     `json:"enforce_governance_header"` // Enforce governance on all requests
 	AllowDirectKeys         bool     `json:"allow_direct_keys"`         // Allow direct keys to be used for requests
@@ -50,6 +52,14 @@ type ProviderConfig struct {
 	CustomProviderConfig     *schemas.CustomProviderConfig     `json:"custom_provider_config,omitempty"`      // Custom provider configuration
 }
 
+// AuthConfig represents configured auth config for Bifrost dashboard
+type AuthConfig struct {
+	AdminUserName           string `json:"admin_username"`
+	AdminPassword           string `json:"admin_password"`
+	IsEnabled               bool   `json:"is_enabled"`
+	DisableAuthOnInference  bool   `json:"disable_auth_on_inference"`
+}
+
 // ConfigMap maps provider names to their configurations.
 type ConfigMap map[schemas.ModelProvider]ProviderConfig
 
@@ -59,4 +69,5 @@ type GovernanceConfig struct {
 	Customers   []tables.TableCustomer   `json:"customers"`
 	Budgets     []tables.TableBudget     `json:"budgets"`
 	RateLimits  []tables.TableRateLimit  `json:"rate_limits"`
+	AuthConfig  *AuthConfig              `json:"auth_config,omitempty"`
 }

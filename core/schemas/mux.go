@@ -27,7 +27,7 @@ func (ct *ChatTool) ToResponsesTool() *ResponsesTool {
 	}
 
 	rt := &ResponsesTool{
-		Type: string(ct.Type),
+		Type: ResponsesToolType(ct.Type),
 	}
 
 	// Convert function tools
@@ -340,9 +340,17 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 			ContentBlocks: []ResponsesMessageContentBlock{refusalBlock},
 		}
 	} else if cm.Content != nil && cm.Content.ContentStr != nil {
-		// Convert regular string content
-		rm.Content = &ResponsesMessageContent{
-			ContentStr: cm.Content.ContentStr,
+		// Convert regular string content (if input message then ContentStr, else ContentBlocks)
+		if cm.Role == ChatMessageRoleAssistant {
+			rm.Content = &ResponsesMessageContent{
+				ContentBlocks: []ResponsesMessageContentBlock{
+					{Type: ResponsesOutputMessageContentTypeText, Text: cm.Content.ContentStr},
+				},
+			}
+		} else {
+			rm.Content = &ResponsesMessageContent{
+				ContentStr: cm.Content.ContentStr,
+			}
 		}
 	} else if cm.Content != nil && cm.Content.ContentBlocks != nil {
 		// Convert content blocks
@@ -538,9 +546,17 @@ func ToChatMessages(rms []ResponsesMessage) []ChatMessage {
 
 		// Convert content (skip for refusal messages since refusal is already extracted)
 		if rm.Content != nil && (rm.Type == nil || *rm.Type != ResponsesMessageTypeRefusal) {
-			if rm.Content.ContentStr != nil {
-				cm.Content = &ChatMessageContent{
-					ContentStr: rm.Content.ContentStr,
+			if rm.Content.ContentStr != nil ||
+				(len(rm.Content.ContentBlocks) == 1 &&
+					(rm.Content.ContentBlocks[0].Type == ResponsesInputMessageContentBlockTypeText || rm.Content.ContentBlocks[0].Type == ResponsesOutputMessageContentTypeText)) {
+				if rm.Content.ContentStr != nil {
+					cm.Content = &ChatMessageContent{
+						ContentStr: rm.Content.ContentStr,
+					}
+				} else {
+					cm.Content = &ChatMessageContent{
+						ContentStr: rm.Content.ContentBlocks[0].Text,
+					}
 				}
 			} else if rm.Content.ContentBlocks != nil {
 				chatBlocks := make([]ChatContentBlock, len(rm.Content.ContentBlocks))
@@ -624,6 +640,7 @@ func (cu *BifrostLLMUsage) ToResponsesResponseUsage() *ResponsesResponseUsage {
 		InputTokens:  cu.PromptTokens,
 		OutputTokens: cu.CompletionTokens,
 		TotalTokens:  cu.TotalTokens,
+		Cost:         cu.Cost,
 	}
 
 	if cu.PromptTokensDetails != nil {
@@ -638,6 +655,8 @@ func (cu *BifrostLLMUsage) ToResponsesResponseUsage() *ResponsesResponseUsage {
 			AudioTokens:              cu.CompletionTokensDetails.AudioTokens,
 			ReasoningTokens:          cu.CompletionTokensDetails.ReasoningTokens,
 			RejectedPredictionTokens: cu.CompletionTokensDetails.RejectedPredictionTokens,
+			CitationTokens:           cu.CompletionTokensDetails.CitationTokens,
+			NumSearchQueries:         cu.CompletionTokensDetails.NumSearchQueries,
 		}
 	}
 
@@ -653,6 +672,7 @@ func (ru *ResponsesResponseUsage) ToBifrostLLMUsage() *BifrostLLMUsage {
 		PromptTokens:     ru.InputTokens,
 		CompletionTokens: ru.OutputTokens,
 		TotalTokens:      ru.TotalTokens,
+		Cost:             ru.Cost,
 	}
 
 	if ru.InputTokensDetails != nil {
@@ -667,6 +687,8 @@ func (ru *ResponsesResponseUsage) ToBifrostLLMUsage() *BifrostLLMUsage {
 			AudioTokens:              ru.OutputTokensDetails.AudioTokens,
 			ReasoningTokens:          ru.OutputTokensDetails.ReasoningTokens,
 			RejectedPredictionTokens: ru.OutputTokensDetails.RejectedPredictionTokens,
+			CitationTokens:           ru.OutputTokensDetails.CitationTokens,
+			NumSearchQueries:         ru.OutputTokensDetails.NumSearchQueries,
 		}
 	}
 
@@ -755,6 +777,8 @@ func (bcr *BifrostChatRequest) ToResponsesRequest() *BifrostResponsesRequest {
 		}
 	}
 
+	brr.RawRequestBody = bcr.RawRequestBody
+
 	return brr
 }
 
@@ -827,6 +851,8 @@ func (brr *BifrostResponsesRequest) ToChatRequest() *BifrostChatRequest {
 		}
 	}
 
+	bcr.RawRequestBody = brr.RawRequestBody
+
 	return bcr
 }
 
@@ -843,7 +869,10 @@ func (cr *BifrostChatResponse) ToBifrostResponsesResponse() *BifrostResponsesRes
 
 	// Create new BifrostResponsesResponse from Chat fields
 	responsesResp := &BifrostResponsesResponse{
-		CreatedAt: cr.Created,
+		CreatedAt:     cr.Created,
+		Citations:     cr.Citations,
+		SearchResults: cr.SearchResults,
+		Videos:        cr.Videos,
 	}
 
 	// Convert Choices to Output messages
@@ -882,8 +911,11 @@ func (responsesResp *BifrostResponsesResponse) ToBifrostChatResponse() *BifrostC
 
 	// Create new BifrostChatResponse from Responses fields
 	chatResp := &BifrostChatResponse{
-		Created: responsesResp.CreatedAt,
-		Object:  "chat.completion",
+		Created:       responsesResp.CreatedAt,
+		Object:        "chat.completion",
+		Citations:     responsesResp.Citations,
+		SearchResults: responsesResp.SearchResults,
+		Videos:        responsesResp.Videos,
 	}
 
 	// Create Choices from ResponsesResponse
@@ -915,6 +947,7 @@ func (responsesResp *BifrostResponsesResponse) ToBifrostChatResponse() *BifrostC
 	// Copy other relevant fields
 	chatResp.ExtraFields = responsesResp.ExtraFields
 	chatResp.ExtraFields.RequestType = ChatCompletionRequest
+	chatResp.ExtraFields.Provider = responsesResp.ExtraFields.Provider
 
 	return chatResp
 }
@@ -944,6 +977,9 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse() *BifrostRespon
 		ContentIndex:   Ptr(0),
 		OutputIndex:    &choice.Index,
 		ExtraFields:    cr.ExtraFields,
+		SearchResults:  cr.SearchResults,
+		Videos:         cr.Videos,
+		Citations:      cr.Citations,
 	}
 
 	// Handle different types of streaming content
@@ -1048,6 +1084,8 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse() *BifrostRespon
 			streamResp.Type = ResponsesStreamResponseTypeCompleted
 		}
 	}
+
+	streamResp.ExtraFields.RequestType = ResponsesStreamRequest
 
 	// Return the created stream response
 	return streamResp

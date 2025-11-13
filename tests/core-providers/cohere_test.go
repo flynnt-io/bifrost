@@ -10,6 +10,7 @@ import (
 )
 
 func TestCohere(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("COHERE_API_KEY") == "" {
 		t.Skip("Skipping Cohere tests because COHERE_API_KEY is not set")
 	}
@@ -41,6 +42,7 @@ func TestCohere(t *testing.T) {
 			CompleteEnd2End:       false,
 			Embedding:             true,
 			Reasoning:             true,
+			ListModels:            true,
 		},
 	}
 

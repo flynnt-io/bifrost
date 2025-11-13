@@ -30,11 +30,16 @@ import (
 // =============================================================================
 
 type BifrostResponsesRequest struct {
-	Provider  ModelProvider        `json:"provider"`
-	Model     string               `json:"model"`
-	Input     []ResponsesMessage   `json:"input,omitempty"`
-	Params    *ResponsesParameters `json:"params,omitempty"`
-	Fallbacks []Fallback           `json:"fallbacks,omitempty"`
+	Provider       ModelProvider        `json:"provider"`
+	Model          string               `json:"model"`
+	Input          []ResponsesMessage   `json:"input,omitempty"`
+	Params         *ResponsesParameters `json:"params,omitempty"`
+	Fallbacks      []Fallback           `json:"fallbacks,omitempty"`
+	RawRequestBody []byte               `json:"-"` // set bifrost-use-raw-request-body to true in ctx to use the raw request body. Bifrost will directly send this to the downstream provider.
+}
+
+func (r *BifrostResponsesRequest) GetRawRequestBody() []byte {
+	return r.RawRequestBody
 }
 
 type BifrostResponsesResponse struct {
@@ -69,6 +74,11 @@ type BifrostResponsesResponse struct {
 	Truncation         *string                             `json:"truncation,omitempty"`
 	Usage              *ResponsesResponseUsage             `json:"usage,omitempty"`
 	ExtraFields        BifrostResponseExtraFields          `json:"extra_fields"`
+
+	// Perplexity-specific fields
+	SearchResults []SearchResult `json:"search_results,omitempty"`
+	Videos        []VideoResult  `json:"videos,omitempty"`
+	Citations     []string       `json:"citations,omitempty"`
 }
 
 type ResponsesParameters struct {
@@ -94,7 +104,7 @@ type ResponsesParameters struct {
 	ToolChoice         *ResponsesToolChoice          `json:"tool_choice,omitempty"` // Whether to call a tool
 	Tools              []ResponsesTool               `json:"tools,omitempty"`       // Tools to use
 	Truncation         *string                       `json:"truncation,omitempty"`
-
+	User               *string                       `json:"user,omitempty"`
 	// Dynamic parameters that can be provider-specific, they are directly
 	// added to the request as is.
 	ExtraParams map[string]interface{} `json:"-"`
@@ -243,6 +253,7 @@ type ResponsesResponseUsage struct {
 	OutputTokens        int                            `json:"output_tokens"`         // Number of output tokens
 	OutputTokensDetails *ResponsesResponseOutputTokens `json:"output_tokens_details"` // Detailed breakdown of output tokens	TotalTokens int `json:"total_tokens"` // Total number of tokens used
 	TotalTokens         int                            `json:"total_tokens"`          // Total number of tokens used
+	Cost                *BifrostCost                   `json:"cost,omitempty"`        // Only for the providers which support cost calculation
 }
 
 type ResponsesResponseInputTokens struct {
@@ -251,10 +262,12 @@ type ResponsesResponseInputTokens struct {
 }
 
 type ResponsesResponseOutputTokens struct {
-	AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
-	AudioTokens              int `json:"audio_tokens,omitempty"`
-	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
-	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+	AcceptedPredictionTokens int  `json:"accepted_prediction_tokens,omitempty"`
+	AudioTokens              int  `json:"audio_tokens,omitempty"`
+	ReasoningTokens          int  `json:"reasoning_tokens,omitempty"`
+	RejectedPredictionTokens int  `json:"rejected_prediction_tokens,omitempty"`
+	CitationTokens           *int `json:"citation_tokens,omitempty"`
+	NumSearchQueries         *int `json:"num_search_queries,omitempty"`
 }
 
 // =============================================================================
@@ -313,7 +326,9 @@ const (
 
 // ResponsesMessageContent is a union type that can be either a string or array of content blocks
 type ResponsesMessageContent struct {
-	ContentStr    *string                        // Simple text content
+	ContentStr *string // Simple text content
+
+	// Output will ALWAYS be an array of content blocks
 	ContentBlocks []ResponsesMessageContentBlock // Rich content with multiple media types
 }
 
@@ -561,7 +576,7 @@ type ResponsesFileSearchToolCallResult struct {
 
 // ResponsesComputerToolCall represents a computer tool call
 type ResponsesComputerToolCall struct {
-	PendingSafetyChecks []ResponsesComputerToolCallPendingSafetyCheck `json:"pending_safety_checks"`
+	PendingSafetyChecks []ResponsesComputerToolCallPendingSafetyCheck `json:"pending_safety_checks,omitempty"`
 }
 
 // ResponsesComputerToolCallPendingSafetyCheck represents a pending safety check
@@ -984,11 +999,26 @@ type ResponsesToolChoiceAllowedToolDef struct {
 // 7. TOOL CONFIGURATION STRUCTURES
 // =============================================================================
 
+type ResponsesToolType string
+
+const (
+	ResponsesToolTypeFunction           ResponsesToolType = "function"
+	ResponsesToolTypeFileSearch         ResponsesToolType = "file_search"
+	ResponsesToolTypeComputerUsePreview ResponsesToolType = "computer_use_preview"
+	ResponsesToolTypeWebSearch          ResponsesToolType = "web_search"
+	ResponsesToolTypeMCP                ResponsesToolType = "mcp"
+	ResponsesToolTypeCodeInterpreter    ResponsesToolType = "code_interpreter"
+	ResponsesToolTypeImageGeneration    ResponsesToolType = "image_generation"
+	ResponsesToolTypeLocalShell         ResponsesToolType = "local_shell"
+	ResponsesToolTypeCustom             ResponsesToolType = "custom"
+	ResponsesToolTypeWebSearchPreview   ResponsesToolType = "web_search_preview"
+)
+
 // ResponsesTool represents a tool
 type ResponsesTool struct {
-	Type        string  `json:"type"`                  // "function" | "file_search" | "computer_use_preview" | "web_search" | "web_search_2025_08_26" | "mcp" | "code_interpreter" | "image_generation" | "local_shell" | "custom" | "web_search_preview" | "web_search_preview_2025_03_11"
-	Name        *string `json:"name,omitempty"`        // Common name field (Function, Custom tools)
-	Description *string `json:"description,omitempty"` // Common description field (Function, Custom tools)
+	Type        ResponsesToolType `json:"type"`                  // "function" | "file_search" | "computer_use_preview" | "web_search" | "web_search_2025_08_26" | "mcp" | "code_interpreter" | "image_generation" | "local_shell" | "custom" | "web_search_preview" | "web_search_preview_2025_03_11"
+	Name        *string           `json:"name,omitempty"`        // Common name field (Function, Custom tools)
+	Description *string           `json:"description,omitempty"` // Common description field (Function, Custom tools)
 
 	*ResponsesToolFunction
 	*ResponsesToolFileSearch
@@ -1206,6 +1236,54 @@ type ResponsesToolMCPAllowedToolsApprovalSetting struct {
 	Never   *ResponsesToolMCPAllowedToolsApprovalFilter `json:"never,omitempty"`
 }
 
+// MarshalJSON implements custom JSON marshalling for ResponsesToolMCPAllowedToolsApprovalSetting
+func (as ResponsesToolMCPAllowedToolsApprovalSetting) MarshalJSON() ([]byte, error) {
+	// Validation: ensure only one representation is set
+	if as.Setting != nil && (as.Always != nil || as.Never != nil) {
+		return nil, fmt.Errorf("only one of 'Setting' or ('Always'/'Never') can be set")
+	}
+
+	if as.Setting != nil {
+		return sonic.Marshal(*as.Setting)
+	}
+	if as.Always != nil || as.Never != nil {
+		// Marshal as an object with always/never fields
+		obj := make(map[string]interface{})
+		if as.Always != nil {
+			obj["always"] = as.Always
+		}
+		if as.Never != nil {
+			obj["never"] = as.Never
+		}
+		return sonic.Marshal(obj)
+	}
+	// If all are nil, return null
+	return sonic.Marshal(nil)
+}
+
+// UnmarshalJSON implements custom JSON unmarshalling for ResponsesToolMCPAllowedToolsApprovalSetting
+func (as *ResponsesToolMCPAllowedToolsApprovalSetting) UnmarshalJSON(data []byte) error {
+	// First, try to unmarshal as a direct string
+	var settingStr string
+	if err := sonic.Unmarshal(data, &settingStr); err == nil {
+		as.Setting = &settingStr
+		return nil
+	}
+
+	// Try to unmarshal as an object with always/never fields
+	var obj struct {
+		Always *ResponsesToolMCPAllowedToolsApprovalFilter `json:"always,omitempty"`
+		Never  *ResponsesToolMCPAllowedToolsApprovalFilter `json:"never,omitempty"`
+	}
+	if err := sonic.Unmarshal(data, &obj); err == nil {
+		as.Always = obj.Always
+		as.Never = obj.Never
+		return nil
+	}
+
+	return fmt.Errorf("require_approval field is neither a string nor an object with always/never filters")
+}
+
 // ResponsesToolMCPAllowedToolsApprovalFilter - Filter for approval settings
 type ResponsesToolMCPAllowedToolsApprovalFilter struct {
 	ReadOnly  *bool    `json:"read_only,omitempty"`  // Whether tool is read-only
@@ -1363,5 +1441,10 @@ type BifrostResponsesStreamResponse struct {
 	Message *string `json:"message,omitempty"`
 	Param   *string `json:"param,omitempty"`
 
-	ExtraFields BifrostResponseExtraFields `json:"extra_fields,omitempty"`
+	ExtraFields BifrostResponseExtraFields `json:"extra_fields"`
+
+	// Perplexity-specific fields
+	SearchResults []SearchResult `json:"search_results,omitempty"`
+	Videos        []VideoResult  `json:"videos,omitempty"`
+	Citations     []string       `json:"citations,omitempty"`
 }

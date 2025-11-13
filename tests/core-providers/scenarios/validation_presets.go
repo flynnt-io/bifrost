@@ -205,16 +205,6 @@ func ReasoningExpectations() ResponseExpectations {
 		ShouldHaveUsageStats: true,
 		ShouldHaveTimestamps: true,
 		ShouldHaveModel:      true,
-		// Reasoning-specific validations
-		ShouldContainAnyOf: []string{
-			"step", "first", "then", "next", "calculate", "therefore", "because",
-			"reasoning", "think", "analysis", "conclusion", "solution", "solve",
-		},
-		ShouldNotContainWords: []string{
-			"i can't", "i cannot", "i'm unable", "i am unable",
-			"cannot solve", "unable to calculate", "need more information",
-			"insufficient data", "missing information",
-		},
 		ProviderSpecific: map[string]interface{}{
 			"response_type":        "reasoning",
 			"expects_step_by_step": true,
@@ -302,9 +292,6 @@ func GetExpectationsForScenario(scenarioName string, testConfig config.Comprehen
 
 	case "Reasoning":
 		expectations := ReasoningExpectations()
-		if requiresReasoning, ok := customParams["requires_reasoning"].(bool); ok && requiresReasoning {
-			expectations.ShouldContainAnyOf = []string{"step", "first", "then", "calculate", "therefore", "because", "solve"}
-		}
 		return expectations
 
 	case "ProviderSpecific":

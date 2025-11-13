@@ -81,7 +81,7 @@ if [ -f "go.mod" ]; then
   # Run tests if any exist
   if go list ./... | grep -q .; then
     echo "🧪 Running plugin tests..."
-    # go test -p 1 ./...
+    # go test -v -run .
   fi
 
   echo "✅ Plugin $PLUGIN_NAME build validation successful"

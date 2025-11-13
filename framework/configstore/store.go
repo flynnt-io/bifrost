@@ -37,8 +37,8 @@ type ConfigStore interface {
 	GetMCPConfig(ctx context.Context) (*schemas.MCPConfig, error)
 	GetMCPClientByName(ctx context.Context, name string) (*tables.TableMCPClient, error)
 	CreateMCPClientConfig(ctx context.Context, clientConfig schemas.MCPClientConfig, envKeys map[string][]EnvKeyInfo) error
-	UpdateMCPClientConfig(ctx context.Context, name string, clientConfig schemas.MCPClientConfig, envKeys map[string][]EnvKeyInfo) error
-	DeleteMCPClientConfig(ctx context.Context, name string) error
+	UpdateMCPClientConfig(ctx context.Context, id string, clientConfig schemas.MCPClientConfig, envKeys map[string][]EnvKeyInfo) error
+	DeleteMCPClientConfig(ctx context.Context, id string) error
 
 	// Vector store config CRUD
 	UpdateVectorStoreConfig(ctx context.Context, config *vectorstore.Config) error
@@ -53,11 +53,11 @@ type ConfigStore interface {
 	GetEnvKeys(ctx context.Context) (map[string][]EnvKeyInfo, error)
 
 	// Config CRUD
-	GetConfig(ctx context.Context, key string) (*tables.TableConfig, error)
-	UpdateConfig(ctx context.Context, config *tables.TableConfig, tx ...*gorm.DB) error
+	GetConfig(ctx context.Context, key string) (*tables.TableGovernanceConfig, error)
+	UpdateConfig(ctx context.Context, config *tables.TableGovernanceConfig, tx ...*gorm.DB) error
 
 	// Plugins CRUD
-	GetPlugins(ctx context.Context) ([]tables.TablePlugin, error)
+	GetPlugins(ctx context.Context) ([]*tables.TablePlugin, error)
 	GetPlugin(ctx context.Context, name string) (*tables.TablePlugin, error)
 	CreatePlugin(ctx context.Context, plugin *tables.TablePlugin, tx ...*gorm.DB) error
 	UpdatePlugin(ctx context.Context, plugin *tables.TablePlugin, tx ...*gorm.DB) error
@@ -65,6 +65,7 @@ type ConfigStore interface {
 
 	// Governance config CRUD
 	GetVirtualKeys(ctx context.Context) ([]tables.TableVirtualKey, error)
+	GetRedactedVirtualKeys(ctx context.Context, ids []string) ([]tables.TableVirtualKey, error) // leave ids empty to get all
 	GetVirtualKey(ctx context.Context, id string) (*tables.TableVirtualKey, error)
 	GetVirtualKeyByValue(ctx context.Context, value string) (*tables.TableVirtualKey, error)
 	CreateVirtualKey(ctx context.Context, virtualKey *tables.TableVirtualKey, tx ...*gorm.DB) error
@@ -110,7 +111,17 @@ type ConfigStore interface {
 	UpdateBudget(ctx context.Context, budget *tables.TableBudget, tx ...*gorm.DB) error
 	UpdateBudgets(ctx context.Context, budgets []*tables.TableBudget, tx ...*gorm.DB) error
 
+	// Governance config CRUD
 	GetGovernanceConfig(ctx context.Context) (*GovernanceConfig, error)
+
+	// Auth config CRUD
+	GetAuthConfig(ctx context.Context) (*AuthConfig, error)
+	UpdateAuthConfig(ctx context.Context, config *AuthConfig) error
+
+	// Session CRUD
+	GetSession(ctx context.Context, token string) (*tables.SessionsTable, error)
+	CreateSession(ctx context.Context, session *tables.SessionsTable) error
+	DeleteSession(ctx context.Context, token string) error
 
 	// Model pricing CRUD
 	GetModelPrices(ctx context.Context) ([]tables.TableModelPricing, error)
@@ -119,6 +130,7 @@ type ConfigStore interface {
 
 	// Key management
 	GetKeysByIDs(ctx context.Context, ids []string) ([]tables.TableKey, error)
+	GetAllRedactedKeys(ctx context.Context, ids []string) ([]schemas.Key, error) // leave ids empty to get all
 
 	// Generic transaction manager
 	ExecuteTransaction(ctx context.Context, fn func(tx *gorm.DB) error) error

@@ -1,4 +1,4 @@
-// Package http provides an HTTP service using FastHTTP that exposes endpoints
+// Package main provides an HTTP service using FastHTTP that exposes endpoints
 // for text and chat completions using various AI model providers (OpenAI, Anthropic, Bedrock, Mistral, Ollama, etc.).
 //
 // The HTTP service provides the following main endpoints:
@@ -63,6 +63,7 @@ import (
 	schemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	bifrostServer "github.com/maximhq/bifrost/transports/bifrost-http/server"
 )
 
 //go:embed all:ui
@@ -71,9 +72,10 @@ var uiContent embed.FS
 var Version string
 
 var logger = bifrost.NewDefaultLogger(schemas.LogLevelInfo)
-var server *handlers.BifrostHTTPServer
+var server *bifrostServer.BifrostHTTPServer
 
-// init initializes command line flags and validates required configuration.
+// init initializes command line flags (but does not parse them).
+// Flag parsing is deferred to main() to avoid conflicts with test flags.
 // It sets up the following flags:
 //   - host: Host to bind the server to (default: localhost, can be overridden with BIFROST_HOST env var)
 //   - port: Server port (default: 8080)
@@ -85,6 +87,26 @@ func init() {
 	if Version == "" {
 		Version = "v1.0.0"
 	}
+	// Set default host from environment variable or use localhost
+	defaultHost := os.Getenv("BIFROST_HOST")
+	if defaultHost == "" {
+		defaultHost = bifrostServer.DefaultHost
+	}
+	// Initializing server
+	server = bifrostServer.NewBifrostHTTPServer(Version, uiContent)
+	// Updating server properties from flags
+	flag.StringVar(&server.Port, "port", bifrostServer.DefaultPort, "Port to run the server on")
+	flag.StringVar(&server.Host, "host", defaultHost, "Host to bind the server to (default: localhost, override with BIFROST_HOST env var)")
+	flag.StringVar(&server.AppDir, "app-dir", bifrostServer.DefaultAppDir, "Application data directory (contains config.json and logs)")
+	flag.StringVar(&server.LogLevel, "log-level", bifrostServer.DefaultLogLevel, "Logger level (debug, info, warn, error). Default is info.")
+	flag.StringVar(&server.LogOutputStyle, "log-style", bifrostServer.DefaultLogOutputStyle, "Logger output type (json or pretty). Default is JSON.")
+}
+
+// main is the entry point of the application.
+func main() {
+	// Parse command line flags
+	flag.Parse()
+
 	// Printing version
 	versionLine := fmt.Sprintf("║%s%s%s║", strings.Repeat(" ", (61-2-len(Version))/2), Version, strings.Repeat(" ", (61-2-len(Version)+1)/2))
 	// Welcome to bifrost!
@@ -107,31 +129,15 @@ func init() {
 ╚═══════════════════════════════════════════════════════════╝
 
 `, versionLine)
-	// Set default host from environment variable or use localhost
-	defaultHost := os.Getenv("BIFROST_HOST")
-	if defaultHost == "" {
-		defaultHost = handlers.DefaultHost
-	}
-	// Initializing server
-	server = handlers.NewBifrostHTTPServer(Version, uiContent)
-	// Updating server properties from flags
-	flag.StringVar(&server.Port, "port", handlers.DefaultPort, "Port to run the server on")
-	flag.StringVar(&server.Host, "host", defaultHost, "Host to bind the server to (default: localhost, override with BIFROST_HOST env var)")
-	flag.StringVar(&server.AppDir, "app-dir", handlers.DefaultAppDir, "Application data directory (contains config.json and logs)")
-	flag.StringVar(&server.LogLevel, "log-level", handlers.DefaultLogLevel, "Logger level (debug, info, warn, error). Default is info.")
-	flag.StringVar(&server.LogOutputStyle, "log-style", handlers.DefaultLogOutputStyle, "Logger output type (json or pretty). Default is JSON.")
-	flag.Parse()
+
 	// Configure logger from flags
 	logger.SetOutputType(schemas.LoggerOutputType(server.LogOutputStyle))
 	logger.SetLevel(schemas.LogLevel(server.LogLevel))
 	// Setting up logger
 	lib.SetLogger(logger)
+	bifrostServer.SetLogger(logger)
 	handlers.SetLogger(logger)
 
-}
-
-// main is the entry point of the application.
-func main() {
 	ctx := context.Background()
 	err := server.Bootstrap(ctx)
 	if err != nil {

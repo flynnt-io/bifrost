@@ -54,6 +54,7 @@ type AudioStreamChunk struct {
 	SemanticCacheDebug *schemas.BifrostCacheDebug           // Semantic cache debug if available
 	Cost               *float64                             // Cost in dollars from pricing plugin
 	ErrorDetails       *schemas.BifrostError                // Error if any
+	ChunkIndex         int                                  // Index of the chunk in the stream
 }
 
 // TranscriptionStreamChunk represents a single transcription streaming chunk
@@ -65,6 +66,7 @@ type TranscriptionStreamChunk struct {
 	SemanticCacheDebug *schemas.BifrostCacheDebug                  // Semantic cache debug if available
 	Cost               *float64                                    // Cost in dollars from pricing plugin
 	ErrorDetails       *schemas.BifrostError                       // Error if any
+	ChunkIndex         int                                         // Index of the chunk in the stream
 }
 
 // ChatStreamChunk represents a single streaming chunk
@@ -76,6 +78,7 @@ type ChatStreamChunk struct {
 	SemanticCacheDebug *schemas.BifrostCacheDebug             // Semantic cache debug if available
 	Cost               *float64                               // Cost in dollars from pricing plugin
 	ErrorDetails       *schemas.BifrostError                  // Error if any
+	ChunkIndex         int                                    // Index of the chunk in the stream
 }
 
 // ResponsesStreamChunk represents a single responses streaming chunk
@@ -87,6 +90,7 @@ type ResponsesStreamChunk struct {
 	SemanticCacheDebug *schemas.BifrostCacheDebug              // Semantic cache debug if available
 	Cost               *float64                                // Cost in dollars from pricing plugin
 	ErrorDetails       *schemas.BifrostError                   // Error if any
+	ChunkIndex         int                                     // Index of the chunk in the stream
 }
 
 // StreamAccumulator manages accumulation of streaming chunks
@@ -195,6 +199,22 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			ModelRequested: p.Model,
 			Latency:        p.Data.Latency,
 		}
+	case StreamTypeResponses:
+		responsesResp := &schemas.BifrostResponsesResponse{}
+
+		if p.Data.OutputMessages != nil {
+			responsesResp.Output = p.Data.OutputMessages
+		}
+		if p.Data.TokenUsage != nil {
+			responsesResp.Usage = p.Data.TokenUsage.ToResponsesResponseUsage()
+		}
+		responsesResp.ExtraFields = schemas.BifrostResponseExtraFields{
+			RequestType:    schemas.ResponsesRequest,
+			Provider:       p.Provider,
+			ModelRequested: p.Model,
+			Latency:        p.Data.Latency,
+		}
+		resp.ResponsesResponse = responsesResp
 	case StreamTypeAudio:
 		speechResp := p.Data.AudioOutput
 		if speechResp == nil {

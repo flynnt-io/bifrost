@@ -1,3 +1,6 @@
+import { PROVIDER_SUPPORTED_REQUESTS } from "../constants/config";
+import { BaseProvider, KnownProvider } from "../types/config";
+
 export interface ValidationRule {
 	isValid: boolean;
 	message: string;
@@ -553,3 +556,34 @@ export const cleanJson = (text: unknown) => {
 		return text;
 	}
 };
+
+/**
+ * Checks if a request type is disabled for a provider
+ * @param providerType - The provider type
+ * @param requestType - The request type
+ * @returns true if the request type is disabled
+ */
+export function isRequestTypeDisabled(providerType: BaseProvider | undefined, requestType: string): boolean {
+	if (!providerType) return false;
+	
+	const supportedRequests = PROVIDER_SUPPORTED_REQUESTS[providerType];
+	if (!supportedRequests) return false; // If provider not in base list, allow all
+	
+	return !supportedRequests.includes(requestType);
+}
+
+
+/**
+ * Cleans the path overrides by removing empty values
+ * @param overrides - The path overrides to clean
+ * @returns The cleaned path overrides
+ */
+export function cleanPathOverrides(overrides?: Record<string, string | undefined>) {
+	if (!overrides) return undefined;
+
+	const entries = Object.entries(overrides)
+		.map(([k, v]) => [k, v?.trim()])
+		.filter(([, v]) => v && v !== "");
+
+	return entries.length ? Object.fromEntries(entries) as Record<string, string> : undefined;
+}

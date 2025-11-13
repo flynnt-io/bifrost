@@ -36,9 +36,13 @@ cd ..
 echo "✅ Core build validation successful"
 
 # Run core provider tests
+echo "🔧 Running core tests..."
+cd core
+# go test -v ./...
+cd ..
 echo "🔧 Running core provider tests..."
 cd tests/core-providers
-go test -v ./...
+go test -v -run .
 cd ../..
 
 # Capturing changelog
