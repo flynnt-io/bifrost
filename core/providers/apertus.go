@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maximhq/bifrost/core/providers/openai"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	schemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
 )
@@ -41,7 +43,7 @@ func NewApertusProvider(config *schemas.ProviderConfig, logger schemas.Logger) *
 	}
 
 	// Configure proxy if provided
-	client = configureProxy(client, config.ProxyConfig, logger)
+	client = providerUtils.ConfigureProxy(client, config.ProxyConfig, logger)
 
 	// Set default BaseURL if not provided (falls back to OpenAI)
 	if config.NetworkConfig.BaseURL == "" {
@@ -61,7 +63,7 @@ func NewApertusProvider(config *schemas.ProviderConfig, logger schemas.Logger) *
 
 // GetProviderKey returns the provider identifier for Apertus.
 func (provider *ApertusProvider) GetProviderKey() schemas.ModelProvider {
-	return getProviderName(schemas.Apertus, provider.customProviderConfig)
+	return providerUtils.GetProviderName(schemas.Apertus, provider.customProviderConfig)
 }
 
 // getBaseURL returns the effective base URL for the given key.
@@ -73,12 +75,56 @@ func (provider *ApertusProvider) getBaseURL(key schemas.Key) string {
 	return provider.networkConfig.BaseURL
 }
 
-// TextCompletion performs a text completion request to Apertus API.
-func (provider *ApertusProvider) TextCompletion(ctx context.Context, key schemas.Key, request *schemas.BifrostTextCompletionRequest) (*schemas.BifrostTextCompletionResponse, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionRequest); err != nil {
+// ListModels returns a static list of models configured for the keys.
+// Unlike other providers, Apertus does not call the /v1/models API endpoint.
+// Instead, it returns the models configured in the key configuration.
+func (provider *ApertusProvider) ListModels(ctx context.Context, keys []schemas.Key, request *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ListModelsRequest); err != nil {
 		return nil, err
 	}
-	return handleOpenAITextCompletionRequest(
+
+	providerName := provider.GetProviderKey()
+
+	// Collect all unique models from all keys
+	modelSet := make(map[string]bool)
+	for _, key := range keys {
+		for _, model := range key.Models {
+			modelSet[model] = true
+		}
+	}
+
+	// Convert to slice and sort for consistent output
+	models := make([]string, 0, len(modelSet))
+	for model := range modelSet {
+		models = append(models, model)
+	}
+
+	// Convert to Model format
+	modelInfos := make([]schemas.Model, len(models))
+	for i, model := range models {
+		modelInfos[i] = schemas.Model{
+			ID: model,
+		}
+	}
+
+	response := &schemas.BifrostListModelsResponse{
+		Data: modelInfos,
+		ExtraFields: schemas.BifrostResponseExtraFields{
+			Provider:    providerName,
+			RequestType: schemas.ListModelsRequest,
+			Latency:     0, // No actual API call made
+		},
+	}
+
+	return response, nil
+}
+
+// TextCompletion performs a text completion request to Apertus API.
+func (provider *ApertusProvider) TextCompletion(ctx context.Context, key schemas.Key, request *schemas.BifrostTextCompletionRequest) (*schemas.BifrostTextCompletionResponse, *schemas.BifrostError) {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionRequest); err != nil {
+		return nil, err
+	}
+	return openai.HandleOpenAITextCompletionRequest(
 		ctx,
 		provider.client,
 		provider.getBaseURL(key)+"/v1/completions",
@@ -93,12 +139,12 @@ func (provider *ApertusProvider) TextCompletion(ctx context.Context, key schemas
 
 // TextCompletionStream performs a streaming text completion request to Apertus API.
 func (provider *ApertusProvider) TextCompletionStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostTextCompletionRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionStreamRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionStreamRequest); err != nil {
 		return nil, err
 	}
-	return handleOpenAITextCompletionStreaming(
+	return openai.HandleOpenAITextCompletionStreaming(
 		ctx,
-		provider.streamClient,
+		provider.client,
 		provider.getBaseURL(key)+"/v1/completions",
 		request,
 		map[string]string{"Authorization": "Bearer " + key.Value},
@@ -106,17 +152,18 @@ func (provider *ApertusProvider) TextCompletionStream(ctx context.Context, postH
 		provider.sendBackRawResponse,
 		provider.GetProviderKey(),
 		postHookRunner,
+		nil, // postResponseConverter
 		provider.logger,
 	)
 }
 
 // ChatCompletion performs a chat completion request to the Apertus API.
 func (provider *ApertusProvider) ChatCompletion(ctx context.Context, key schemas.Key, request *schemas.BifrostChatRequest) (*schemas.BifrostChatResponse, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ChatCompletionRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ChatCompletionRequest); err != nil {
 		return nil, err
 	}
 
-	return handleOpenAIChatCompletionRequest(
+	return openai.HandleOpenAIChatCompletionRequest(
 		ctx,
 		provider.client,
 		provider.getBaseURL(key)+"/v1/chat/completions",
@@ -131,13 +178,13 @@ func (provider *ApertusProvider) ChatCompletion(ctx context.Context, key schemas
 
 // ChatCompletionStream handles streaming for Apertus chat completions.
 func (provider *ApertusProvider) ChatCompletionStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostChatRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ChatCompletionStreamRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ChatCompletionStreamRequest); err != nil {
 		return nil, err
 	}
 
-	return handleOpenAIChatCompletionStreaming(
+	return openai.HandleOpenAIChatCompletionStreaming(
 		ctx,
-		provider.streamClient,
+		provider.client,
 		provider.getBaseURL(key)+"/v1/chat/completions",
 		request,
 		map[string]string{"Authorization": "Bearer " + key.Value},
@@ -145,17 +192,19 @@ func (provider *ApertusProvider) ChatCompletionStream(ctx context.Context, postH
 		provider.sendBackRawResponse,
 		provider.GetProviderKey(),
 		postHookRunner,
+		nil, // customRequestConverter
+		nil, // postResponseConverter
 		provider.logger,
 	)
 }
 
 // Responses performs a responses request to the Apertus API.
 func (provider *ApertusProvider) Responses(ctx context.Context, key schemas.Key, request *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ResponsesRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ResponsesRequest); err != nil {
 		return nil, err
 	}
 
-	return handleOpenAIResponsesRequest(
+	return openai.HandleOpenAIResponsesRequest(
 		ctx,
 		provider.client,
 		provider.getBaseURL(key)+"/v1/responses",
@@ -170,13 +219,13 @@ func (provider *ApertusProvider) Responses(ctx context.Context, key schemas.Key,
 
 // ResponsesStream performs a streaming responses request to the Apertus API.
 func (provider *ApertusProvider) ResponsesStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostResponsesRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ResponsesStreamRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ResponsesStreamRequest); err != nil {
 		return nil, err
 	}
 
-	return handleOpenAIResponsesStreaming(
+	return openai.HandleOpenAIResponsesStreaming(
 		ctx,
-		provider.streamClient,
+		provider.client,
 		provider.getBaseURL(key)+"/v1/responses",
 		request,
 		map[string]string{"Authorization": "Bearer " + key.Value},
@@ -184,17 +233,19 @@ func (provider *ApertusProvider) ResponsesStream(ctx context.Context, postHookRu
 		provider.sendBackRawResponse,
 		provider.GetProviderKey(),
 		postHookRunner,
+		nil, // postRequestConverter
+		nil, // postResponseConverter
 		provider.logger,
 	)
 }
 
 // Embedding generates embeddings for the given input text(s).
 func (provider *ApertusProvider) Embedding(ctx context.Context, key schemas.Key, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.EmbeddingRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.EmbeddingRequest); err != nil {
 		return nil, err
 	}
 
-	return handleOpenAIEmbeddingRequest(
+	return openai.HandleOpenAIEmbeddingRequest(
 		ctx,
 		provider.client,
 		provider.getBaseURL(key)+"/v1/embeddings",
@@ -209,27 +260,23 @@ func (provider *ApertusProvider) Embedding(ctx context.Context, key schemas.Key,
 
 // Speech handles non-streaming speech synthesis requests.
 func (provider *ApertusProvider) Speech(ctx context.Context, key schemas.Key, request *schemas.BifrostSpeechRequest) (*schemas.BifrostSpeechResponse, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechRequest); err != nil {
 		return nil, err
 	}
 
-	// Delegate to the OpenAI provider's speech implementation by reusing its logic
-	// Create a temporary OpenAI provider with the custom endpoint
-	tempProvider := &OpenAIProvider{
-		logger:               provider.logger,
-		client:               provider.client,
-		streamClient:         provider.streamClient,
-		networkConfig:        schemas.NetworkConfig{
-			BaseURL:      provider.getBaseURL(key),
-			ExtraHeaders: provider.networkConfig.ExtraHeaders,
+	// Create a temporary OpenAI provider with the custom endpoint using the constructor
+	tempConfig := &schemas.ProviderConfig{
+		NetworkConfig: schemas.NetworkConfig{
+			BaseURL:                        provider.getBaseURL(key),
+			ExtraHeaders:                   provider.networkConfig.ExtraHeaders,
 			DefaultRequestTimeoutInSeconds: provider.networkConfig.DefaultRequestTimeoutInSeconds,
-			MaxRetries:                    provider.networkConfig.MaxRetries,
-			RetryBackoffInitial:           provider.networkConfig.RetryBackoffInitial,
-			RetryBackoffMax:               provider.networkConfig.RetryBackoffMax,
+			MaxRetries:                     provider.networkConfig.MaxRetries,
+			RetryBackoffInitial:            provider.networkConfig.RetryBackoffInitial,
+			RetryBackoffMax:                provider.networkConfig.RetryBackoffMax,
 		},
-		sendBackRawResponse:  provider.sendBackRawResponse,
-		customProviderConfig: nil, // Don't pass custom config to avoid confusion
+		SendBackRawResponse: provider.sendBackRawResponse,
 	}
+	tempProvider := openai.NewOpenAIProvider(tempConfig, provider.logger)
 
 	// Call OpenAI's Speech method but return response with Apertus provider name
 	response, err := tempProvider.Speech(ctx, key, request)
@@ -245,52 +292,46 @@ func (provider *ApertusProvider) Speech(ctx context.Context, key schemas.Key, re
 
 // SpeechStream handles streaming for speech synthesis.
 func (provider *ApertusProvider) SpeechStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostSpeechRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechStreamRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechStreamRequest); err != nil {
 		return nil, err
 	}
 
-	// Delegate to the OpenAI provider's speech streaming implementation
-	tempProvider := &OpenAIProvider{
-		logger:               provider.logger,
-		client:               provider.client,
-		streamClient:         provider.streamClient,
-		networkConfig:        schemas.NetworkConfig{
-			BaseURL:      provider.getBaseURL(key),
-			ExtraHeaders: provider.networkConfig.ExtraHeaders,
+	// Create a temporary OpenAI provider with the custom endpoint using the constructor
+	tempConfig := &schemas.ProviderConfig{
+		NetworkConfig: schemas.NetworkConfig{
+			BaseURL:                        provider.getBaseURL(key),
+			ExtraHeaders:                   provider.networkConfig.ExtraHeaders,
 			DefaultRequestTimeoutInSeconds: provider.networkConfig.DefaultRequestTimeoutInSeconds,
-			MaxRetries:                    provider.networkConfig.MaxRetries,
-			RetryBackoffInitial:           provider.networkConfig.RetryBackoffInitial,
-			RetryBackoffMax:               provider.networkConfig.RetryBackoffMax,
+			MaxRetries:                     provider.networkConfig.MaxRetries,
+			RetryBackoffInitial:            provider.networkConfig.RetryBackoffInitial,
+			RetryBackoffMax:                provider.networkConfig.RetryBackoffMax,
 		},
-		sendBackRawResponse:  provider.sendBackRawResponse,
-		customProviderConfig: nil,
+		SendBackRawResponse: provider.sendBackRawResponse,
 	}
+	tempProvider := openai.NewOpenAIProvider(tempConfig, provider.logger)
 
 	return tempProvider.SpeechStream(ctx, postHookRunner, key, request)
 }
 
 // Transcription handles non-streaming transcription requests.
 func (provider *ApertusProvider) Transcription(ctx context.Context, key schemas.Key, request *schemas.BifrostTranscriptionRequest) (*schemas.BifrostTranscriptionResponse, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TranscriptionRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TranscriptionRequest); err != nil {
 		return nil, err
 	}
 
-	// Delegate to the OpenAI provider's transcription implementation
-	tempProvider := &OpenAIProvider{
-		logger:               provider.logger,
-		client:               provider.client,
-		streamClient:         provider.streamClient,
-		networkConfig:        schemas.NetworkConfig{
-			BaseURL:      provider.getBaseURL(key),
-			ExtraHeaders: provider.networkConfig.ExtraHeaders,
+	// Create a temporary OpenAI provider with the custom endpoint using the constructor
+	tempConfig := &schemas.ProviderConfig{
+		NetworkConfig: schemas.NetworkConfig{
+			BaseURL:                        provider.getBaseURL(key),
+			ExtraHeaders:                   provider.networkConfig.ExtraHeaders,
 			DefaultRequestTimeoutInSeconds: provider.networkConfig.DefaultRequestTimeoutInSeconds,
-			MaxRetries:                    provider.networkConfig.MaxRetries,
-			RetryBackoffInitial:           provider.networkConfig.RetryBackoffInitial,
-			RetryBackoffMax:               provider.networkConfig.RetryBackoffMax,
+			MaxRetries:                     provider.networkConfig.MaxRetries,
+			RetryBackoffInitial:            provider.networkConfig.RetryBackoffInitial,
+			RetryBackoffMax:                provider.networkConfig.RetryBackoffMax,
 		},
-		sendBackRawResponse:  provider.sendBackRawResponse,
-		customProviderConfig: nil,
+		SendBackRawResponse: provider.sendBackRawResponse,
 	}
+	tempProvider := openai.NewOpenAIProvider(tempConfig, provider.logger)
 
 	response, err := tempProvider.Transcription(ctx, key, request)
 	if err != nil {
@@ -305,26 +346,23 @@ func (provider *ApertusProvider) Transcription(ctx context.Context, key schemas.
 
 // TranscriptionStream performs a streaming transcription request to the Apertus API.
 func (provider *ApertusProvider) TranscriptionStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostTranscriptionRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
-	if err := checkOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TranscriptionStreamRequest); err != nil {
+	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TranscriptionStreamRequest); err != nil {
 		return nil, err
 	}
 
-	// Delegate to the OpenAI provider's transcription streaming implementation
-	tempProvider := &OpenAIProvider{
-		logger:               provider.logger,
-		client:               provider.client,
-		streamClient:         provider.streamClient,
-		networkConfig:        schemas.NetworkConfig{
-			BaseURL:      provider.getBaseURL(key),
-			ExtraHeaders: provider.networkConfig.ExtraHeaders,
+	// Create a temporary OpenAI provider with the custom endpoint using the constructor
+	tempConfig := &schemas.ProviderConfig{
+		NetworkConfig: schemas.NetworkConfig{
+			BaseURL:                        provider.getBaseURL(key),
+			ExtraHeaders:                   provider.networkConfig.ExtraHeaders,
 			DefaultRequestTimeoutInSeconds: provider.networkConfig.DefaultRequestTimeoutInSeconds,
-			MaxRetries:                    provider.networkConfig.MaxRetries,
-			RetryBackoffInitial:           provider.networkConfig.RetryBackoffInitial,
-			RetryBackoffMax:               provider.networkConfig.RetryBackoffMax,
+			MaxRetries:                     provider.networkConfig.MaxRetries,
+			RetryBackoffInitial:            provider.networkConfig.RetryBackoffInitial,
+			RetryBackoffMax:                provider.networkConfig.RetryBackoffMax,
 		},
-		sendBackRawResponse:  provider.sendBackRawResponse,
-		customProviderConfig: nil,
+		SendBackRawResponse: provider.sendBackRawResponse,
 	}
+	tempProvider := openai.NewOpenAIProvider(tempConfig, provider.logger)
 
 	return tempProvider.TranscriptionStream(ctx, postHookRunner, key, request)
 }
