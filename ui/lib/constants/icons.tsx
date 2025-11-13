@@ -63,6 +63,41 @@ export const ProviderIcons = {
         );
     },
 
+	apertus: ({ size = "md", className = "", theme }: IconProps) => {
+		const resolvedSize = resolveSize(size);
+		return theme === "light" ? (
+			<svg
+				width={resolvedSize}
+				height={resolvedSize}
+				viewBox="0 0 28 28"
+				fill="none"
+				xmlns="http://www.w3.org/2000/svg"
+				className={className}
+			>
+				<circle cx="14" cy="14" r="10" fill="#4A90E2" />
+				<path
+					d="M14 6 L18 12 L22 12 L14 22 L10 16 L6 16 Z"
+					fill="white"
+				/>
+			</svg>
+		) : (
+			<svg
+				width={resolvedSize}
+				height={resolvedSize}
+				viewBox="0 0 28 28"
+				fill="none"
+				xmlns="http://www.w3.org/2000/svg"
+				className={className}
+			>
+				<circle cx="14" cy="14" r="10" fill="#5AA5F0" />
+				<path
+					d="M14 6 L18 12 L22 12 L14 22 L10 16 L6 16 Z"
+					fill="#1A1A1A"
+				/>
+			</svg>
+		);
+	},
+
     azure: ({ size = "md", className = "" }: IconProps) => {
         const resolvedSize = resolveSize(size);
 
