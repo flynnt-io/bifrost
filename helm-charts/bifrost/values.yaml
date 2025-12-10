@@ -1,0 +1,433 @@
+# Default values for Bifrost
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Bifrost application configuration
+replicaCount: 1
+
+image:
+  repository: docker.io/maximhq/bifrost
+  pullPolicy: IfNotPresent
+  # REQUIRED: Specify the image tag (e.g., v1.3.5, v1.3.36, latest)
+  # Docker images are tagged with v prefix (e.g., v1.3.5)
+  # See available tags at: https://hub.docker.com/r/maximhq/bifrost/tags
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials?
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+  runAsNonRoot: true
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}    
+  hosts:
+    - host: bifrost.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /metrics
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /metrics
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Additional volumes on the output Deployment definition.
+volumes: []
+
+# Additional volumeMounts on the output Deployment definition.
+volumeMounts: []
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Bifrost specific configuration
+# You can find entire schema at https://getbifrost.ai/schema
+bifrost:
+  # Application settings    
+  appDir: /app/data
+  port: 8080
+  host: 0.0.0.0
+  logLevel: info
+  logStyle: json
+  
+  # Encryption key for sensitive data
+  # Can be set as a secret or environment variable
+  encryptionKey: ""
+  
+  # Client configuration
+  client:
+    dropExcessRequests: false
+    initialPoolSize: 300
+    allowedOrigins:
+      - "*"
+    enableLogging: true
+    enableGovernance: true
+    enforceGovernanceHeader: false
+    allowDirectKeys: false
+    maxRequestBodySizeMb: 100
+    enableLitellmFallbacks: false
+    prometheusLabels: []
+  
+  # Provider configurations (add your provider keys here)
+  # You can specify API keys directly or use env.VAR_NAME syntax to reference environment variables
+  # When using existingSecret in providerSecrets, the keys will be injected as env vars and
+  # you should use env.VAR_NAME syntax in the value field
+  providers: {}
+    # openai:
+    #   keys:
+    #     - value: "sk-..."           # Direct value
+    #       weight: 1
+    #     - value: "env.OPENAI_KEY"   # Reference to environment variable
+    #       weight: 1
+    # anthropic:
+    #   keys:
+    #     - value: "sk-ant-..."
+    #       weight: 1
+  
+  # Provider secrets - use existing Kubernetes secrets for provider API keys
+  # These will be injected as environment variables that can be referenced in providers config
+  providerSecrets: {}
+    # openai:
+    #   existingSecret: "my-openai-secret"
+    #   key: "api-key"
+    #   envVar: "OPENAI_API_KEY"  # Environment variable name to inject
+    # anthropic:
+    #   existingSecret: "my-anthropic-secret"
+    #   key: "api-key"
+    #   envVar: "ANTHROPIC_API_KEY"
+  
+  # MCP (Model Context Protocol) configuration
+  mcp:
+    enabled: false
+    clientConfigs: []
+      # - name: "example-mcp"
+      #   connectionType: "stdio"
+      #   stdioConfig:
+      #     command: "/path/to/mcp/server"
+      #     args: []
+      #     envs: []
+  
+  # Plugins configuration
+  plugins:
+    telemetry:
+      enabled: false
+      config: {}
+    
+    logging:
+      enabled: false
+      config: {}
+    
+    governance:
+      enabled: false
+      config:
+        is_vk_mandatory: false
+    
+    maxim:
+      enabled: false
+      config:
+        api_key: ""
+        log_repo_id: ""
+      # Use existing Kubernetes secret for API key (takes precedence over config.api_key)
+      secretRef:
+        name: ""
+        key: "api-key"
+    
+    semanticCache:
+      enabled: false
+      config:
+        provider: "openai"
+        keys: []
+        embedding_model: "text-embedding-3-small"
+        dimension: 1536
+        threshold: 0.8
+        ttl: "5m"
+        conversation_history_threshold: 3
+        cache_by_model: true
+        cache_by_provider: true
+        exclude_system_prompt: false
+    
+    otel:
+      enabled: false
+      config:
+        service_name: "bifrost"
+        collector_url: ""
+        trace_type: "otel"
+        protocol: "grpc"
+
+# Storage configuration
+storage:
+  # Storage mode: sqlite or postgres
+  # This determines what config_store and logs_store use
+  mode: sqlite  # Options: sqlite, postgres
+  
+  # Persistent volume for SQLite databases (when mode is sqlite)
+  persistence:
+    enabled: true
+    # storageClass: "-"  # Use default storage class
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    # existingClaim: ""  # Use an existing PVC
+  
+  # Configuration store settings
+  configStore:
+    enabled: true
+    # type is derived from storage.mode, but can be overridden
+    # type: sqlite  # Options: sqlite, postgres
+  
+  # Logs store settings
+  logsStore:
+    enabled: true
+    # type is derived from storage.mode, but can be overridden
+    # type: sqlite  # Options: sqlite, postgres
+
+# PostgreSQL configuration (when storage.mode is postgres)
+postgresql:
+  # Deploy PostgreSQL as part of this chart
+  enabled: false
+  
+  # Use external PostgreSQL instance
+  external:
+    enabled: false
+    host: ""
+    port: 5432
+    user: bifrost
+    password: ""
+    database: bifrost
+    sslMode: disable
+    # Use existing Kubernetes secret for password (takes precedence over password field)
+    existingSecret: ""
+    passwordKey: "password"
+  
+  # PostgreSQL image configuration
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  
+  # PostgreSQL subchart configuration (when postgresql.enabled is true)
+  auth:
+    username: bifrost
+    password: bifrost_password
+    database: bifrost
+  
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+    
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+  
+  metrics:
+    enabled: false
+
+# Vector store configuration
+vectorStore:
+  # Enable vector store for semantic caching
+  enabled: false
+  type: none  # Options: none, weaviate, redis, qdrant
+  
+  # Weaviate configuration
+  weaviate:
+    # Deploy Weaviate as part of this chart
+    enabled: false
+    
+    # Use external Weaviate instance
+    external:
+      enabled: false
+      scheme: http
+      host: ""
+      apiKey: ""
+      grpcHost: ""
+      grpcSecured: false
+      # Use existing Kubernetes secret for API key (takes precedence over apiKey field)
+      existingSecret: ""
+      apiKeyKey: "api-key"
+    
+    # Weaviate subchart configuration (when weaviate.enabled is true)
+    replicas: 1
+    
+    image:
+      repository: semitechnologies/weaviate
+      tag: "1.24.1"
+    
+    persistence:
+      enabled: true
+      size: 10Gi
+    
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    
+    env:
+      QUERY_DEFAULTS_LIMIT: "25"
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: "node1"
+  
+  # Redis configuration
+  redis:
+    # Deploy Redis as part of this chart
+    enabled: false
+    
+    # Use external Redis instance
+    external:
+      enabled: false
+      host: ""
+      port: 6379
+      password: ""
+      database: 0
+      # Use existing Kubernetes secret for password (takes precedence over password field)
+      existingSecret: ""
+      passwordKey: "password"
+    
+    # Redis image configuration
+    image:
+      repository: redis
+      tag: "7-alpine"
+      pullPolicy: IfNotPresent
+    
+    # Redis subchart configuration (when redis.enabled is true)
+    auth:
+      enabled: true
+      password: "redis_password"
+    
+    master:
+      persistence:
+        enabled: true
+        size: 8Gi
+      
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 250m
+          memory: 256Mi
+    
+    metrics:
+      enabled: false
+
+  # Qdrant configuration
+  qdrant:
+    # Deploy Qdrant as part of this chart
+    enabled: false
+
+    # Use external Qdrant instance
+    external:
+      enabled: false
+      host: ""
+      port: 6334
+      apiKey: ""
+      useTls: false
+      # Use existing Kubernetes secret for API key (takes precedence over apiKey field)
+      existingSecret: ""
+      apiKeyKey: "api-key"
+
+    # Qdrant image configuration
+    image:
+      repository: qdrant/qdrant
+      tag: "v1.16.0"
+      pullPolicy: IfNotPresent
+
+    # Qdrant subchart configuration (when qdrant.enabled is true)
+    persistence:
+      enabled: true
+      size: 10Gi
+
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+
+# Environment variables
+env: []
+  # - name: CUSTOM_ENV_VAR
+  #   value: "value"
+
+# Environment variables from secrets/configmaps
+envFrom: []
+  # - secretRef:
+  #     name: my-secret
+  # - configMapRef:
+  #     name: my-configmap
+
