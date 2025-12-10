@@ -1,10 +1,9 @@
-// Package providers implements various LLM providers and their utility functions.
+// Package apertus implements the Apertus provider for the Bifrost framework.
 // This file contains the Apertus provider implementation.
-package providers
+package apertus
 
 import (
 	"context"
-	"net/http"
 	"strings"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 type ApertusProvider struct {
 	logger               schemas.Logger                // Logger for provider operations
 	client               *fasthttp.Client              // HTTP client for API requests
-	streamClient         *http.Client                  // HTTP client for streaming requests
 	networkConfig        schemas.NetworkConfig         // Network configuration including extra headers
 	sendBackRawResponse  bool                          // Whether to include raw response in BifrostResponse
 	customProviderConfig *schemas.CustomProviderConfig // Custom provider config
@@ -32,14 +30,11 @@ func NewApertusProvider(config *schemas.ProviderConfig, logger schemas.Logger) *
 	config.CheckAndSetDefaults()
 
 	client := &fasthttp.Client{
-		ReadTimeout:     time.Second * time.Duration(config.NetworkConfig.DefaultRequestTimeoutInSeconds),
-		WriteTimeout:    time.Second * time.Duration(config.NetworkConfig.DefaultRequestTimeoutInSeconds),
-		MaxConnsPerHost: config.ConcurrencyAndBufferSize.Concurrency,
-	}
-
-	// Initialize streaming HTTP client
-	streamClient := &http.Client{
-		Timeout: time.Second * time.Duration(config.NetworkConfig.DefaultRequestTimeoutInSeconds),
+		ReadTimeout:         time.Second * time.Duration(config.NetworkConfig.DefaultRequestTimeoutInSeconds),
+		WriteTimeout:        time.Second * time.Duration(config.NetworkConfig.DefaultRequestTimeoutInSeconds),
+		MaxConnsPerHost:     5000,
+		MaxIdleConnDuration: 60 * time.Second,
+		MaxConnWaitTimeout:  10 * time.Second,
 	}
 
 	// Configure proxy if provided
@@ -54,7 +49,6 @@ func NewApertusProvider(config *schemas.ProviderConfig, logger schemas.Logger) *
 	return &ApertusProvider{
 		logger:               logger,
 		client:               client,
-		streamClient:         streamClient,
 		networkConfig:        config.NetworkConfig,
 		sendBackRawResponse:  config.SendBackRawResponse,
 		customProviderConfig: config.CustomProviderConfig,
@@ -73,6 +67,13 @@ func (provider *ApertusProvider) getBaseURL(key schemas.Key) string {
 		return strings.TrimRight(key.ApertusKeyConfig.Endpoint, "/")
 	}
 	return provider.networkConfig.BaseURL
+}
+
+// buildRequestURL constructs the full request URL using the provider's configuration.
+// It uses the key's custom endpoint if configured, then applies any custom request path overrides.
+func (provider *ApertusProvider) buildRequestURL(ctx context.Context, key schemas.Key, defaultPath string, requestType schemas.RequestType) string {
+	baseURL := provider.getBaseURL(key)
+	return baseURL + providerUtils.GetRequestPath(ctx, defaultPath, provider.customProviderConfig, requestType)
 }
 
 // ListModels returns a static list of models configured for the keys.
@@ -129,12 +130,12 @@ func (provider *ApertusProvider) TextCompletion(ctx context.Context, key schemas
 	return openai.HandleOpenAITextCompletionRequest(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/completions",
+		provider.buildRequestURL(ctx, key, "/v1/completions", schemas.TextCompletionRequest),
 		request,
 		key,
 		provider.networkConfig.ExtraHeaders,
 		provider.GetProviderKey(),
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.logger,
 	)
 }
@@ -147,11 +148,11 @@ func (provider *ApertusProvider) TextCompletionStream(ctx context.Context, postH
 	return openai.HandleOpenAITextCompletionStreaming(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/completions",
+		provider.buildRequestURL(ctx, key, "/v1/completions", schemas.TextCompletionStreamRequest),
 		request,
 		map[string]string{"Authorization": "Bearer " + key.Value},
 		provider.networkConfig.ExtraHeaders,
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		postHookRunner,
 		nil, // postResponseConverter
@@ -168,11 +169,11 @@ func (provider *ApertusProvider) ChatCompletion(ctx context.Context, key schemas
 	return openai.HandleOpenAIChatCompletionRequest(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/chat/completions",
+		provider.buildRequestURL(ctx, key, "/v1/chat/completions", schemas.ChatCompletionRequest),
 		request,
 		key,
 		provider.networkConfig.ExtraHeaders,
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		provider.logger,
 	)
@@ -187,14 +188,15 @@ func (provider *ApertusProvider) ChatCompletionStream(ctx context.Context, postH
 	return openai.HandleOpenAIChatCompletionStreaming(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/chat/completions",
+		provider.buildRequestURL(ctx, key, "/v1/chat/completions", schemas.ChatCompletionStreamRequest),
 		request,
 		map[string]string{"Authorization": "Bearer " + key.Value},
 		provider.networkConfig.ExtraHeaders,
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		postHookRunner,
 		nil, // customRequestConverter
+		nil, // postRequestConverter
 		nil, // postResponseConverter
 		provider.logger,
 	)
@@ -209,11 +211,11 @@ func (provider *ApertusProvider) Responses(ctx context.Context, key schemas.Key,
 	return openai.HandleOpenAIResponsesRequest(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/responses",
+		provider.buildRequestURL(ctx, key, "/v1/responses", schemas.ResponsesRequest),
 		request,
 		key,
 		provider.networkConfig.ExtraHeaders,
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		provider.logger,
 	)
@@ -228,11 +230,11 @@ func (provider *ApertusProvider) ResponsesStream(ctx context.Context, postHookRu
 	return openai.HandleOpenAIResponsesStreaming(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/responses",
+		provider.buildRequestURL(ctx, key, "/v1/responses", schemas.ResponsesStreamRequest),
 		request,
 		map[string]string{"Authorization": "Bearer " + key.Value},
 		provider.networkConfig.ExtraHeaders,
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		postHookRunner,
 		nil, // postRequestConverter
@@ -250,12 +252,12 @@ func (provider *ApertusProvider) Embedding(ctx context.Context, key schemas.Key,
 	return openai.HandleOpenAIEmbeddingRequest(
 		ctx,
 		provider.client,
-		provider.getBaseURL(key)+"/v1/embeddings",
+		provider.buildRequestURL(ctx, key, "/v1/embeddings", schemas.EmbeddingRequest),
 		request,
 		key,
 		provider.networkConfig.ExtraHeaders,
 		provider.GetProviderKey(),
-		provider.sendBackRawResponse,
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.logger,
 	)
 }

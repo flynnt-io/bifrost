@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/providers/anthropic"
+	"github.com/maximhq/bifrost/core/providers/apertus"
 	"github.com/maximhq/bifrost/core/providers/azure"
 	"github.com/maximhq/bifrost/core/providers/bedrock"
 	"github.com/maximhq/bifrost/core/providers/cerebras"
