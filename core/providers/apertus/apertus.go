@@ -4,6 +4,7 @@ package apertus
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -76,6 +77,18 @@ func (provider *ApertusProvider) buildRequestURL(ctx context.Context, key schema
 	return baseURL + providerUtils.GetRequestPath(ctx, defaultPath, provider.customProviderConfig, requestType)
 }
 
+// getModelName returns the mapped model name if a mapping exists, otherwise returns the original model name.
+// This allows transparent model name mapping without requiring configuration (fallback to original).
+func (provider *ApertusProvider) getModelName(key schemas.Key, userModel string) string {
+	if key.ApertusKeyConfig != nil && key.ApertusKeyConfig.ModelNameMappings != nil {
+		if backendModel, ok := key.ApertusKeyConfig.ModelNameMappings[userModel]; ok {
+			provider.logger.Debug(fmt.Sprintf("Apertus: Mapped model '%s' to '%s'", userModel, backendModel))
+			return backendModel
+		}
+	}
+	return userModel
+}
+
 // ListModels returns a static list of models configured for the keys.
 // Unlike other providers, Apertus does not call the /v1/models API endpoint.
 // Instead, it returns the models configured in the key configuration.
@@ -127,7 +140,15 @@ func (provider *ApertusProvider) TextCompletion(ctx context.Context, key schemas
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionRequest); err != nil {
 		return nil, err
 	}
-	return openai.HandleOpenAITextCompletionRequest(
+
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	response, err := openai.HandleOpenAITextCompletionRequest(
 		ctx,
 		provider.client,
 		provider.buildRequestURL(ctx, key, "/v1/completions", schemas.TextCompletionRequest),
@@ -138,6 +159,14 @@ func (provider *ApertusProvider) TextCompletion(ctx context.Context, key schemas
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.logger,
 	)
+
+	// Set ModelRequested and ModelDeployment for metrics
+	if response != nil {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+	}
+
+	return response, err
 }
 
 // TextCompletionStream performs a streaming text completion request to Apertus API.
@@ -145,6 +174,21 @@ func (provider *ApertusProvider) TextCompletionStream(ctx context.Context, postH
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionStreamRequest); err != nil {
 		return nil, err
 	}
+
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	// Create post-response converter to set ModelRequested and ModelDeployment
+	postResponseConverter := func(response *schemas.BifrostTextCompletionResponse) *schemas.BifrostTextCompletionResponse {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+		return response
+	}
+
 	return openai.HandleOpenAITextCompletionStreaming(
 		ctx,
 		provider.client,
@@ -155,7 +199,7 @@ func (provider *ApertusProvider) TextCompletionStream(ctx context.Context, postH
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		postHookRunner,
-		nil, // postResponseConverter
+		postResponseConverter,
 		provider.logger,
 	)
 }
@@ -166,7 +210,14 @@ func (provider *ApertusProvider) ChatCompletion(ctx context.Context, key schemas
 		return nil, err
 	}
 
-	return openai.HandleOpenAIChatCompletionRequest(
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	response, err := openai.HandleOpenAIChatCompletionRequest(
 		ctx,
 		provider.client,
 		provider.buildRequestURL(ctx, key, "/v1/chat/completions", schemas.ChatCompletionRequest),
@@ -177,12 +228,34 @@ func (provider *ApertusProvider) ChatCompletion(ctx context.Context, key schemas
 		provider.GetProviderKey(),
 		provider.logger,
 	)
+
+	// Set ModelRequested and ModelDeployment for metrics
+	if response != nil {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+	}
+
+	return response, err
 }
 
 // ChatCompletionStream handles streaming for Apertus chat completions.
 func (provider *ApertusProvider) ChatCompletionStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostChatRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ChatCompletionStreamRequest); err != nil {
 		return nil, err
+	}
+
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	// Create post-response converter to set ModelRequested and ModelDeployment
+	postResponseConverter := func(response *schemas.BifrostChatResponse) *schemas.BifrostChatResponse {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+		return response
 	}
 
 	return openai.HandleOpenAIChatCompletionStreaming(
@@ -197,7 +270,7 @@ func (provider *ApertusProvider) ChatCompletionStream(ctx context.Context, postH
 		postHookRunner,
 		nil, // customRequestConverter
 		nil, // postRequestConverter
-		nil, // postResponseConverter
+		postResponseConverter,
 		provider.logger,
 	)
 }
@@ -208,7 +281,14 @@ func (provider *ApertusProvider) Responses(ctx context.Context, key schemas.Key,
 		return nil, err
 	}
 
-	return openai.HandleOpenAIResponsesRequest(
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	response, err := openai.HandleOpenAIResponsesRequest(
 		ctx,
 		provider.client,
 		provider.buildRequestURL(ctx, key, "/v1/responses", schemas.ResponsesRequest),
@@ -219,12 +299,34 @@ func (provider *ApertusProvider) Responses(ctx context.Context, key schemas.Key,
 		provider.GetProviderKey(),
 		provider.logger,
 	)
+
+	// Set ModelRequested and ModelDeployment for metrics
+	if response != nil {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+	}
+
+	return response, err
 }
 
 // ResponsesStream performs a streaming responses request to the Apertus API.
 func (provider *ApertusProvider) ResponsesStream(ctx context.Context, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostResponsesRequest) (chan *schemas.BifrostStream, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ResponsesStreamRequest); err != nil {
 		return nil, err
+	}
+
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	// Create post-response converter to set ModelRequested and ModelDeployment
+	postResponseConverter := func(response *schemas.BifrostResponsesStreamResponse) *schemas.BifrostResponsesStreamResponse {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+		return response
 	}
 
 	return openai.HandleOpenAIResponsesStreaming(
@@ -238,7 +340,7 @@ func (provider *ApertusProvider) ResponsesStream(ctx context.Context, postHookRu
 		provider.GetProviderKey(),
 		postHookRunner,
 		nil, // postRequestConverter
-		nil, // postResponseConverter
+		postResponseConverter,
 		provider.logger,
 	)
 }
@@ -249,7 +351,14 @@ func (provider *ApertusProvider) Embedding(ctx context.Context, key schemas.Key,
 		return nil, err
 	}
 
-	return openai.HandleOpenAIEmbeddingRequest(
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	response, err := openai.HandleOpenAIEmbeddingRequest(
 		ctx,
 		provider.client,
 		provider.buildRequestURL(ctx, key, "/v1/embeddings", schemas.EmbeddingRequest),
@@ -260,6 +369,14 @@ func (provider *ApertusProvider) Embedding(ctx context.Context, key schemas.Key,
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.logger,
 	)
+
+	// Set ModelRequested and ModelDeployment for metrics
+	if response != nil {
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
+	}
+
+	return response, err
 }
 
 // Speech handles non-streaming speech synthesis requests.
@@ -267,6 +384,13 @@ func (provider *ApertusProvider) Speech(ctx context.Context, key schemas.Key, re
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechRequest); err != nil {
 		return nil, err
 	}
+
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
 
 	// Create a temporary OpenAI provider with the custom endpoint using the constructor
 	tempConfig := &schemas.ProviderConfig{
@@ -290,6 +414,9 @@ func (provider *ApertusProvider) Speech(ctx context.Context, key schemas.Key, re
 	}
 	if response != nil {
 		response.ExtraFields.Provider = provider.GetProviderKey()
+		// Set ModelRequested and ModelDeployment for metrics
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
 	}
 	return response, nil
 }
@@ -299,6 +426,9 @@ func (provider *ApertusProvider) SpeechStream(ctx context.Context, postHookRunne
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechStreamRequest); err != nil {
 		return nil, err
 	}
+
+	// Apply model name mapping
+	request.Model = provider.getModelName(key, request.Model)
 
 	// Create a temporary OpenAI provider with the custom endpoint using the constructor
 	tempConfig := &schemas.ProviderConfig{
@@ -323,6 +453,13 @@ func (provider *ApertusProvider) Transcription(ctx context.Context, key schemas.
 		return nil, err
 	}
 
+	// Store original model name before mapping
+	originalModel := request.Model
+
+	// Apply model name mapping
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
 	// Create a temporary OpenAI provider with the custom endpoint using the constructor
 	tempConfig := &schemas.ProviderConfig{
 		NetworkConfig: schemas.NetworkConfig{
@@ -344,6 +481,9 @@ func (provider *ApertusProvider) Transcription(ctx context.Context, key schemas.
 	}
 	if response != nil {
 		response.ExtraFields.Provider = provider.GetProviderKey()
+		// Set ModelRequested and ModelDeployment for metrics
+		response.ExtraFields.ModelRequested = originalModel
+		response.ExtraFields.ModelDeployment = mappedModel
 	}
 	return response, nil
 }
@@ -353,6 +493,9 @@ func (provider *ApertusProvider) TranscriptionStream(ctx context.Context, postHo
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TranscriptionStreamRequest); err != nil {
 		return nil, err
 	}
+
+	// Apply model name mapping
+	request.Model = provider.getModelName(key, request.Model)
 
 	// Create a temporary OpenAI provider with the custom endpoint using the constructor
 	tempConfig := &schemas.ProviderConfig{

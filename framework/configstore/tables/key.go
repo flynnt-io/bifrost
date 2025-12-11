@@ -78,7 +78,8 @@ type TableKey struct {
 	EncryptionStatus string `gorm:"type:varchar(20);default:'plain_text'" json:"-"`
 
 	// Apertus config fields (embedded)
-	ApertusEndpoint *string `gorm:"type:text" json:"apertus_endpoint,omitempty"`
+	ApertusEndpoint              *string `gorm:"type:text" json:"apertus_endpoint,omitempty"`
+	ApertusModelNameMappingsJSON *string `gorm:"type:text" json:"-"` // JSON serialized map[string]string
 
 	// Virtual fields for runtime use (not stored in DB)
 	Models             schemas.WhiteList           `gorm:"-" json:"models"` // ["*"] allows all models; empty denies all (deny-by-default)
@@ -416,8 +417,19 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		} else {
 			k.ApertusEndpoint = nil
 		}
+		if k.ApertusKeyConfig.ModelNameMappings != nil {
+			data, err := json.Marshal(k.ApertusKeyConfig.ModelNameMappings)
+			if err != nil {
+				return err
+			}
+			s := string(data)
+			k.ApertusModelNameMappingsJSON = &s
+		} else {
+			k.ApertusModelNameMappingsJSON = nil
+		}
 	} else {
 		k.ApertusEndpoint = nil
+		k.ApertusModelNameMappingsJSON = nil
 	}
 
 	return nil
@@ -642,10 +654,23 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 	}
 
 	// Reconstruct Apertus config if fields are present
-	if k.ApertusEndpoint != nil {
+	if k.ApertusEndpoint != nil || (k.ApertusModelNameMappingsJSON != nil && *k.ApertusModelNameMappingsJSON != "") {
 		apertusConfig := &schemas.ApertusKeyConfig{
-			Endpoint: *k.ApertusEndpoint,
+			Endpoint: "",
 		}
+
+		if k.ApertusEndpoint != nil {
+			apertusConfig.Endpoint = *k.ApertusEndpoint
+		}
+
+		if k.ApertusModelNameMappingsJSON != nil {
+			var mappings map[string]string
+			if err := json.Unmarshal([]byte(*k.ApertusModelNameMappingsJSON), &mappings); err != nil {
+				return err
+			}
+			apertusConfig.ModelNameMappings = mappings
+		}
+
 		k.ApertusKeyConfig = apertusConfig
 	}
 
