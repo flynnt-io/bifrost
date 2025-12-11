@@ -54,7 +54,8 @@ type BedrockKeyConfig struct {
 // ApertusKeyConfig represents the Apertus-specific configuration.
 // It contains Apertus-specific settings for custom endpoint URLs per key.
 type ApertusKeyConfig struct {
-	Endpoint string `json:"endpoint,omitempty"` // Custom endpoint URL for this key
+	Endpoint          string            `json:"endpoint,omitempty"`            // Custom endpoint URL for this key
+	ModelNameMappings map[string]string `json:"model_name_mappings,omitempty"` // Mapping of user-facing model names to backend model names
 }
 
 // Account defines the interface for managing provider accounts and their configurations.

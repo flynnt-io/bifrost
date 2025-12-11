@@ -353,6 +353,7 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 			)}
 			{isApertus && (
 				<div className="space-y-4">
+					<Separator className="my-6" />
 					<FormField
 						control={control}
 						name={`key.apertus_key_config.endpoint`}
@@ -370,6 +371,43 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 										onBlur={field.onBlur}
 										name={field.name}
 										ref={field.ref}
+									/>
+								</FormControl>
+								<FormMessage />
+							</FormItem>
+						)}
+					/>
+					<FormField
+						control={control}
+						name={`key.apertus_key_config.model_name_mappings`}
+						render={({ field }) => (
+							<FormItem>
+								<FormLabel>Model Name Mappings (Optional)</FormLabel>
+								<FormDescription>JSON object mapping user-facing model names to backend model names</FormDescription>
+								<FormControl>
+									<Textarea
+										placeholder='{"gpt-4o": "real-backend-model-name", "claude-3-opus": "actual-model-id"}'
+										value={typeof field.value === "string" ? field.value : JSON.stringify(field.value || {}, null, 2)}
+										onChange={(e) => {
+											form.clearErrors("key.apertus_key_config.model_name_mappings");
+											field.onChange(e.target.value);
+										}}
+										onBlur={(e) => {
+											const value = e.target.value.trim();
+											if (value) {
+												try {
+													const parsed = JSON.parse(value);
+													if (typeof parsed === "object" && parsed !== null) {
+														field.onChange(parsed);
+													}
+												} catch {
+													// Keep as string for validation on submit
+												}
+											}
+											field.onBlur();
+										}}
+										rows={3}
+										className="max-w-full font-mono text-sm wrap-anywhere"
 									/>
 								</FormControl>
 								<FormMessage />

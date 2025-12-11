@@ -69,6 +69,17 @@ export const DefaultBedrockKeyConfig: BedrockKeyConfig = {
 	deployments: {},
 } as const satisfies Required<BedrockKeyConfig>;
 
+// ApertusKeyConfig matching Go's schemas.ApertusKeyConfig
+export interface ApertusKeyConfig {
+	endpoint?: string;
+	model_name_mappings?: Record<string, string> | string; // Allow string during editing
+}
+
+export const DefaultApertusKeyConfig: ApertusKeyConfig = {
+	endpoint: "",
+	model_name_mappings: {},
+} as const satisfies Required<ApertusKeyConfig>;
+
 // Key structure matching Go's schemas.Key
 export interface ModelProviderKey {
 	id: string;
@@ -79,6 +90,7 @@ export interface ModelProviderKey {
 	azure_key_config?: AzureKeyConfig;
 	vertex_key_config?: VertexKeyConfig;
 	bedrock_key_config?: BedrockKeyConfig;
+	apertus_key_config?: ApertusKeyConfig;
 }
 
 // Default ModelProviderKey
