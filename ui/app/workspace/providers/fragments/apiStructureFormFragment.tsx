@@ -49,6 +49,7 @@ export function ApiStructureFormFragment({ provider }: Props) {
 				speech_stream: provider.custom_provider_config?.allowed_requests?.speech_stream ?? true,
 				transcription: provider.custom_provider_config?.allowed_requests?.transcription ?? true,
 				transcription_stream: provider.custom_provider_config?.allowed_requests?.transcription_stream ?? true,
+				count_tokens: provider.custom_provider_config?.allowed_requests?.count_tokens ?? true,
 				list_models: provider.custom_provider_config?.allowed_requests?.list_models ?? true,
 			},
 			request_path_overrides: provider.custom_provider_config?.request_path_overrides ?? undefined,
@@ -77,6 +78,7 @@ export function ApiStructureFormFragment({ provider }: Props) {
 			.unwrap()
 			.then(() => {
 				toast.success("Provider configuration updated successfully");
+				form.reset(data);
 			})
 			.catch((err) => {
 				toast.error("Failed to update provider configuration", {
@@ -112,6 +114,7 @@ export function ApiStructureFormFragment({ provider }: Props) {
 										<SelectItem value="bedrock">AWS Bedrock</SelectItem>
 										<SelectItem value="cohere">Cohere</SelectItem>
 										<SelectItem value="gemini">Gemini</SelectItem>
+										<SelectItem value="replicate">Replicate</SelectItem>
 									</SelectContent>
 								</Select>
 								<FormDescription>The underlying provider this custom provider will use</FormDescription>
@@ -132,7 +135,7 @@ export function ApiStructureFormFragment({ provider }: Props) {
 											</label>
 											<p className="text-muted-foreground text-sm">Whether the custom provider requires a key</p>
 										</div>
-										<Switch id="drop-excess-requests" size="md" checked={field.value} onCheckedChange={field.onChange} />
+										<Switch id="drop-excess-requests" size="md" checked={field.value} onCheckedChange={field.onChange} disabled={!hasUpdateProviderAccess} />
 									</div>
 								</FormItem>
 							)}
@@ -141,7 +144,7 @@ export function ApiStructureFormFragment({ provider }: Props) {
 				</div>
 
 				{/* Allowed Requests Configuration */}
-				<AllowedRequestsFields control={form.control} providerType={form.watch("base_provider_type") as BaseProvider} />
+				<AllowedRequestsFields control={form.control} providerType={form.watch("base_provider_type") as BaseProvider} disabled={!hasUpdateProviderAccess} />
 
 				{/* Form Actions */}
 				<div className="flex justify-end space-x-2 py-2">

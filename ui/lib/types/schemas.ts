@@ -12,12 +12,23 @@ export const customProviderNameSchema = z.string().min(1, "Custom provider name 
 // Model provider name schema (union of known and custom providers)
 export const modelProviderNameSchema = z.union([knownProviderSchema, customProviderNameSchema]);
 
+// EnvVar schema - matches the Go EnvVar type from schemas/env.go
+export const envVarSchema = z.object({
+	value: z.string().optional(),
+	env_var: z.string().optional(),
+	from_env: z.boolean().optional(),
+});
+
 // Azure key config schema
 export const azureKeyConfigSchema = z
 	.object({
-		endpoint: z.url("Must be a valid URL"),
+		endpoint: envVarSchema,
 		deployments: z.union([z.record(z.string(), z.string()), z.string()]).optional(),
-		api_version: z.string().optional(),
+		api_version: envVarSchema.optional(),
+		client_id: envVarSchema.optional(),
+		client_secret: envVarSchema.optional(),
+		tenant_id: envVarSchema.optional(),
+		scopes: z.array(z.string()).optional(),
 	})
 	.refine(
 		(data) => {
@@ -51,10 +62,10 @@ export const azureKeyConfigSchema = z
 // Vertex key config schema
 export const vertexKeyConfigSchema = z
 	.object({
-		project_id: z.string().min(1, "Project ID is required"),
-		project_number: z.string().optional(),
-		region: z.string().min(1, "Region is required"),
-		auth_credentials: z.string().optional(),
+		project_id: envVarSchema,
+		project_number: envVarSchema.optional(),
+		region: envVarSchema,
+		auth_credentials: envVarSchema.optional(),
 		deployments: z.union([z.record(z.string(), z.string()), z.string()]).optional(),
 	})
 	.refine(
@@ -86,15 +97,27 @@ export const vertexKeyConfigSchema = z
 		},
 	);
 
+// S3 bucket configuration for Bedrock batch operations
+export const s3BucketConfigSchema = z.object({
+	bucket_name: z.string().min(1, "Bucket name is required"),
+	prefix: z.string().optional(),
+	is_default: z.boolean().optional(),
+});
+
+export const batchS3ConfigSchema = z.object({
+	buckets: z.array(s3BucketConfigSchema).optional(),
+});
+
 // Bedrock key config schema
 export const bedrockKeyConfigSchema = z
 	.object({
-		access_key: z.string().min(1, "Access key is required").optional(),
-		secret_key: z.string().min(1, "Secret key is required").optional(),
-		session_token: z.string().optional(),
-		region: z.string().min(1, "Region is required"),
-		arn: z.string().optional(),
+		access_key: envVarSchema.optional(),
+		secret_key: envVarSchema.optional(),
+		session_token: envVarSchema.optional(),
+		region: envVarSchema.optional(),
+		arn: envVarSchema.optional(),
 		deployments: z.union([z.record(z.string(), z.string()), z.string()]).optional(),
+		batch_s3_config: batchS3ConfigSchema.optional(),
 	})
 	.refine(
 		(data) => {
@@ -124,16 +147,29 @@ export const bedrockKeyConfigSchema = z
 			path: ["deployments"],
 		},
 	);
+
+// Replicate key config schema
+export const replicateKeyConfigSchema = z.object({
+	deployments: z.union([z.record(z.string(), z.string()), z.string()]).optional(),
+});
+
+// VLLM key config schema
+export const vllmKeyConfigSchema = z.object({
+	url: envVarSchema.refine((v) => !!v.value?.trim() || !!v.env_var?.trim(), {
+		message: "Server URL is required",
+	}),
+	model_name: z.string().trim().min(1, "Model name is required"),
+});
 
 // Model provider key schema
 export const modelProviderKeySchema = z
 	.object({
 		id: z.string().min(1, "Id is required"),
 		name: z.string().min(1, "Name is required"),
-		value: z.string().optional(),
+		value: envVarSchema.optional(),
 		models: z.array(z.string()).default([]).optional(),
 		weight: z.union([
-			z.number().min(0.1, "Weight must be greater than 0.1").max(1, "Weight must be less than 1"),
+			z.number().min(0, "Weight must be equal to or greater than 0").max(1, "Weight must be equal to or less than 1"),
 			z
 				.string()
 				.transform((val) => {
@@ -150,20 +186,23 @@ export const modelProviderKeySchema = z
 					}
 					return num;
 				})
-				.pipe(z.number().min(0.1, "Weight must be greater than 0.1").max(1, "Weight must be less than 1")),
+				.pipe(z.number().min(0, "Weight must be equal to or greater than 0").max(1, "Weight must be equal to or less than 1")),
 		]),
 		azure_key_config: azureKeyConfigSchema.optional(),
 		vertex_key_config: vertexKeyConfigSchema.optional(),
 		bedrock_key_config: bedrockKeyConfigSchema.optional(),
+		replicate_key_config: replicateKeyConfigSchema.optional(),
+		vllm_key_config: vllmKeyConfigSchema.optional(),
+		use_for_batch_api: z.boolean().optional(),
 	})
 	.refine(
 		(data) => {
-			// If bedrock_key_config or azure_key_config is present, value is not required
-			if (data.bedrock_key_config || data.azure_key_config || data.vertex_key_config) {
+			// If bedrock_key_config, azure_key_config, vertex_key_config, or vllm_key_config is present, value is not required
+			if (data.bedrock_key_config || data.azure_key_config || data.vertex_key_config || data.vllm_key_config) {
 				return true;
 			}
 			// Otherwise, value is required
-			return data.value && data.value.length > 0;
+			return data.value?.value && data.value?.value?.length > 0;
 		},
 		{
 			message: "Value is required",
@@ -207,7 +246,7 @@ export const networkFormConfigSchema = z
 		default_request_timeout_in_seconds: z.coerce
 			.number("Timeout must be a number")
 			.min(1, "Timeout must be greater than 0 seconds")
-			.max(3600, "Timeout must be less than 3600 seconds"),
+			.max(172800, "Timeout must be less than 172800 seconds i.e. 48 hours"),
 		max_retries: z.coerce
 			.number("Max retries must be a number")
 			.min(0, "Max retries must be greater than 0")
@@ -242,6 +281,7 @@ export const proxyConfigSchema = z
 		url: z.url("Must be a valid URL"),
 		username: z.string().optional(),
 		password: z.string().optional(),
+		ca_cert_pem: z.string().optional(),
 	})
 	.refine((data) => !(data.type === "http" || data.type === "socks5") || (data.url && data.url.trim().length > 0), {
 		message: "Proxy URL is required when using HTTP or SOCKS5 proxy",
@@ -269,6 +309,7 @@ export const proxyFormConfigSchema = z
 		url: z.string().optional(),
 		username: z.string().optional(),
 		password: z.string().optional(),
+		ca_cert_pem: z.string().optional(),
 	})
 	.refine(
 		(data) => {
@@ -319,6 +360,19 @@ export const allowedRequestsSchema = z.object({
 	speech_stream: z.boolean(),
 	transcription: z.boolean(),
 	transcription_stream: z.boolean(),
+	image_generation: z.boolean(),
+	image_generation_stream: z.boolean(),
+	image_edit: z.boolean(),
+	image_edit_stream: z.boolean(),
+	image_variation: z.boolean(),
+	rerank: z.boolean(),
+	video_generation: z.boolean(),
+	video_retrieve: z.boolean(),
+	video_download: z.boolean(),
+	video_delete: z.boolean(),
+	video_list: z.boolean(),
+	video_remix: z.boolean(),
+	count_tokens: z.boolean(),
 	list_models: z.boolean(),
 });
 
@@ -363,14 +417,96 @@ export const formCustomProviderConfigSchema = z
 			path: ["is_key_less"],
 		},
 	);
+
+export const providerPricingOverrideMatchTypeSchema = z.enum(["exact", "wildcard", "regex"]);
+
+export const providerPricingOverrideRequestTypeSchema = z.enum([
+	"text_completion",
+	"text_completion_stream",
+	"chat_completion",
+	"chat_completion_stream",
+	"responses",
+	"responses_stream",
+	"embedding",
+	"rerank",
+	"speech",
+	"speech_stream",
+	"transcription",
+	"transcription_stream",
+	"image_generation",
+	"image_generation_stream",
+]);
+
+export const providerPricingOverrideSchema = z
+	.object({
+		model_pattern: z.string().min(1, "Model pattern is required"),
+		match_type: providerPricingOverrideMatchTypeSchema,
+		request_types: z.array(providerPricingOverrideRequestTypeSchema).optional(),
+		input_cost_per_token: z.number().min(0).optional(),
+		output_cost_per_token: z.number().min(0).optional(),
+		input_cost_per_video_per_second: z.number().min(0).optional(),
+		input_cost_per_audio_per_second: z.number().min(0).optional(),
+		input_cost_per_character: z.number().min(0).optional(),
+		output_cost_per_character: z.number().min(0).optional(),
+		input_cost_per_token_above_128k_tokens: z.number().min(0).optional(),
+		input_cost_per_character_above_128k_tokens: z.number().min(0).optional(),
+		input_cost_per_image_above_128k_tokens: z.number().min(0).optional(),
+		input_cost_per_video_per_second_above_128k_tokens: z.number().min(0).optional(),
+		input_cost_per_audio_per_second_above_128k_tokens: z.number().min(0).optional(),
+		output_cost_per_token_above_128k_tokens: z.number().min(0).optional(),
+		output_cost_per_character_above_128k_tokens: z.number().min(0).optional(),
+		input_cost_per_token_above_200k_tokens: z.number().min(0).optional(),
+		output_cost_per_token_above_200k_tokens: z.number().min(0).optional(),
+		cache_creation_input_token_cost_above_200k_tokens: z.number().min(0).optional(),
+		cache_read_input_token_cost_above_200k_tokens: z.number().min(0).optional(),
+		cache_read_input_token_cost: z.number().min(0).optional(),
+		cache_creation_input_token_cost: z.number().min(0).optional(),
+		input_cost_per_token_batches: z.number().min(0).optional(),
+		output_cost_per_token_batches: z.number().min(0).optional(),
+		input_cost_per_image_token: z.number().min(0).optional(),
+		output_cost_per_image_token: z.number().min(0).optional(),
+		input_cost_per_image: z.number().min(0).optional(),
+		output_cost_per_image: z.number().min(0).optional(),
+		cache_read_input_image_token_cost: z.number().min(0).optional(),
+	})
+	.superRefine((data, ctx) => {
+		if (data.match_type === "exact" && data.model_pattern.includes("*")) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["model_pattern"],
+				message: "Exact match patterns cannot include '*'",
+			});
+		}
+		if (data.match_type === "wildcard" && !data.model_pattern.includes("*")) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["model_pattern"],
+				message: "Wildcard patterns must include '*'",
+			});
+		}
+		if (data.match_type === "regex") {
+			try {
+				new RegExp(data.model_pattern);
+			} catch {
+				ctx.addIssue({
+					code: "custom",
+					path: ["model_pattern"],
+					message: "Invalid regex pattern",
+				});
+			}
+		}
+	});
+
 // Full model provider config schema
 export const modelProviderConfigSchema = z.object({
 	keys: z.array(modelProviderKeySchema).min(1, "At least one key is required"),
 	network_config: networkConfigSchema.optional(),
 	concurrency_and_buffer_size: concurrencyAndBufferSizeSchema.optional(),
 	proxy_config: proxyConfigSchema.optional(),
+	send_back_raw_request: z.boolean().optional(),
 	send_back_raw_response: z.boolean().optional(),
 	custom_provider_config: customProviderConfigSchema.optional(),
+	pricing_overrides: z.array(providerPricingOverrideSchema).optional(),
 });
 
 // Model provider schema
@@ -384,8 +520,10 @@ export const formModelProviderConfigSchema = z.object({
 	network_config: networkConfigSchema.optional(),
 	concurrency_and_buffer_size: concurrencyAndBufferSizeSchema.optional(),
 	proxy_config: proxyConfigSchema.optional(),
+	send_back_raw_request: z.boolean().optional(),
 	send_back_raw_response: z.boolean().optional(),
 	custom_provider_config: formCustomProviderConfigSchema.optional(),
+	pricing_overrides: z.array(providerPricingOverrideSchema).optional(),
 });
 
 // Flexible model provider schema for form data - allows any string for name
@@ -400,8 +538,10 @@ export const addProviderRequestSchema = z.object({
 	network_config: networkConfigSchema.optional(),
 	concurrency_and_buffer_size: concurrencyAndBufferSizeSchema.optional(),
 	proxy_config: proxyConfigSchema.optional(),
+	send_back_raw_request: z.boolean().optional(),
 	send_back_raw_response: z.boolean().optional(),
 	custom_provider_config: customProviderConfigSchema.optional(),
+	pricing_overrides: z.array(providerPricingOverrideSchema).optional(),
 });
 
 // Update provider request schema
@@ -410,8 +550,10 @@ export const updateProviderRequestSchema = z.object({
 	network_config: networkConfigSchema,
 	concurrency_and_buffer_size: concurrencyAndBufferSizeSchema,
 	proxy_config: proxyConfigSchema,
+	send_back_raw_request: z.boolean().optional(),
 	send_back_raw_response: z.boolean().optional(),
 	custom_provider_config: customProviderConfigSchema.optional(),
+	pricing_overrides: z.array(providerPricingOverrideSchema).optional(),
 });
 
 // Cache config schema
@@ -436,11 +578,13 @@ export const coreConfigSchema = z.object({
 	prometheus_labels: z.array(z.string()).default([]),
 	enable_logging: z.boolean().default(true),
 	disable_content_logging: z.boolean().default(false),
-	enable_governance: z.boolean().default(false),
-	enforce_governance_header: z.boolean().default(false),
+	enforce_auth_on_inference: z.boolean().default(false),
 	allow_direct_keys: z.boolean().default(false),
 	allowed_origins: z.array(z.string()).default(["*"]),
 	max_request_body_size_mb: z.number().min(1).default(100),
+	mcp_agent_depth: z.number().min(1).default(10),
+	mcp_tool_execution_timeout: z.number().min(1).default(30),
+	mcp_code_mode_binding_level: z.enum(["server", "tool"]).default("server"),
 });
 
 // Bifrost config schema
@@ -467,26 +611,38 @@ export const networkOnlyFormSchema = z.object({
 	network_config: networkFormConfigSchema.optional(),
 });
 
-// Performance form schema for the PerformanceFormFragment
+// Performance form schema for the PerformanceFormFragment (concurrency/buffer only; raw request/response are in Debugging tab)
 export const performanceFormSchema = z.object({
-	concurrency_and_buffer_size: z.object({
-		concurrency: z.coerce
-			.number("Concurrency must be a number")
-			.min(1, "Concurrency must be greater than 0")
-			.max(100000, "Concurrency must be less than 100000"),
-		buffer_size: z.coerce
-			.number("Buffer size must be a number")
-			.min(1, "Buffer size must be greater than 0")
-			.max(100000, "Buffer size must be less than 100000"),
-	}),
+	concurrency_and_buffer_size: z
+		.object({
+			concurrency: z
+				.number({ error: "Concurrency must be a number" })
+				.min(1, "Concurrency must be greater than 0")
+				.max(100000, "Concurrency must be less than 100000"),
+			buffer_size: z
+				.number({ error: "Buffer size must be a number" })
+				.min(1, "Buffer size must be greater than 0")
+				.max(100000, "Buffer size must be less than 100000"),
+		})
+		.refine((data) => data.concurrency <= data.buffer_size, {
+			message: "Concurrency must be less than or equal to buffer size",
+			path: ["concurrency"],
+		}),
+});
+
+// Debugging tab (raw request/response toggles)
+export const debuggingFormSchema = z.object({
+	send_back_raw_request: z.boolean(),
 	send_back_raw_response: z.boolean(),
 });
+
+export type DebuggingFormSchema = z.infer<typeof debuggingFormSchema>;
 
 // OTEL Configuration Schema
 export const otelConfigSchema = z
 	.object({
 		service_name: z.string().optional(),
-		collector_url: z.string().min(1, "Collector address is required"),
+		collector_url: z.string().default(""),
 		trace_type: z
 			.enum(["otel", "genai_extension", "vercel", "arize_otel"], {
 				message: "Please select a trace type",
@@ -498,88 +654,221 @@ export const otelConfigSchema = z
 				message: "Please select a protocol",
 			})
 			.default("http"),
+		// TLS configuration
+		tls_ca_cert: z.string().optional(),
+		insecure: z.boolean().default(true),
+		// Metrics push configuration
+		metrics_enabled: z.boolean().default(false),
+		metrics_endpoint: z.string().optional(),
+		metrics_push_interval: z.number().int().min(1).max(300).default(15),
 	})
 	.superRefine((data, ctx) => {
-		const value = (data.collector_url || "").trim();
-		if (!value) {
-			ctx.addIssue({
-				code: "custom",
-				path: ["collector_url"],
-				message: "Collector address is required",
-			});
-			return;
-		}
+		const protocol = data.protocol;
+		const hostPortRegex = /^(?!https?:\/\/)([a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\]|\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/;
 
-		if (data.protocol === "http") {
+		// Helper to validate URL format
+		const validateHttpUrl = (url: string, path: string[]) => {
 			try {
-				const u = new URL(value);
+				const u = new URL(url);
 				if (!(u.protocol === "http:" || u.protocol === "https:")) {
 					ctx.addIssue({
 						code: "custom",
-						path: ["collector_url"],
+						path,
+						message: "Must be a valid HTTP or HTTPS URL",
+					});
+					return false;
+				}
+				return true;
+			} catch {
+				ctx.addIssue({
+					code: "custom",
+					path,
+					message: "Must be a valid HTTP or HTTPS URL",
+				});
+				return false;
+			}
+		};
+
+		// Helper to validate host:port format
+		const validateHostPort = (value: string, path: string[], example: string) => {
+			const match = value.match(hostPortRegex);
+			if (!match) {
+				ctx.addIssue({
+					code: "custom",
+					path,
+					message: `Must be in the format <host>:<port> for gRPC (e.g. ${example})`,
+				});
+				return false;
+			}
+			const port = Number(match[2]);
+			if (!(port >= 1 && port <= 65535)) {
+				ctx.addIssue({
+					code: "custom",
+					path,
+					message: "Port must be between 1 and 65535",
+				});
+				return false;
+			}
+			return true;
+		};
+
+		// Validate collector_url format (emptiness check is at form level, gated by enabled)
+		const collectorUrl = (data.collector_url || "").trim();
+		if (collectorUrl && protocol === "http") {
+			validateHttpUrl(collectorUrl, ["collector_url"]);
+		} else if (collectorUrl && protocol === "grpc") {
+			validateHostPort(collectorUrl, ["collector_url"], "otel-collector:4317");
+		}
+
+		// Validate metrics_endpoint when metrics_enabled is true
+		if (data.metrics_enabled) {
+			const metricsEndpoint = (data.metrics_endpoint || "").trim();
+			if (!metricsEndpoint) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["metrics_endpoint"],
+					message: "Metrics endpoint is required when metrics push is enabled",
+				});
+			} else if (protocol === "http") {
+				validateHttpUrl(metricsEndpoint, ["metrics_endpoint"]);
+			} else if (protocol === "grpc") {
+				validateHostPort(metricsEndpoint, ["metrics_endpoint"], "otel-collector:4317");
+			}
+		}
+	});
+
+// OTEL form schema for the OtelFormFragment
+export const otelFormSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		otel_config: otelConfigSchema,
+	})
+	.superRefine((data, ctx) => {
+		if (data.enabled) {
+			const collectorUrl = (data.otel_config.collector_url || "").trim();
+			if (!collectorUrl) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["otel_config", "collector_url"],
+					message: "Collector address is required",
+				});
+			}
+		}
+	});
+
+// Maxim Configuration Schema
+export const maximConfigSchema = z.object({
+	api_key: z.string().default(""),
+	log_repo_id: z.string().optional(),
+});
+
+// Maxim form schema for the MaximFormFragment
+export const maximFormSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		maxim_config: maximConfigSchema,
+	})
+	.superRefine((data, ctx) => {
+		if (data.enabled) {
+			const apiKey = (data.maxim_config.api_key || "").trim();
+			if (!apiKey) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["maxim_config", "api_key"],
+					message: "API key is required",
+				});
+			} else if (!apiKey.startsWith("sk_mx_")) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["maxim_config", "api_key"],
+					message: "API key must start with 'sk_mx_'",
+				});
+			}
+		}
+	});
+
+// Prometheus Push Gateway Configuration Schema
+export const prometheusConfigSchema = z
+	.object({
+		push_gateway_url: z.string().optional(),
+		job_name: z.string().default("bifrost"),
+		instance_id: z.string().optional(),
+		push_interval: z.number().min(1).max(300).default(15),
+		basic_auth_username: z.string().optional(),
+		basic_auth_password: z.string().optional(),
+	})
+	.superRefine((data, ctx) => {
+		// Validate push_gateway_url format
+		const url = (data.push_gateway_url || "").trim();
+		if (url) {
+			try {
+				const u = new URL(url);
+				if (!(u.protocol === "http:" || u.protocol === "https:")) {
+					ctx.addIssue({
+						code: "custom",
+						path: ["push_gateway_url"],
 						message: "Must be a valid HTTP or HTTPS URL",
 					});
 				}
 			} catch {
 				ctx.addIssue({
 					code: "custom",
-					path: ["collector_url"],
-					message: "Must be a valid HTTP or HTTPS URL",
+					path: ["push_gateway_url"],
+					message: "Must be a valid URL (e.g., http://pushgateway:9091)",
 				});
 			}
-			return;
 		}
 
-		if (data.protocol === "grpc") {
-			// Only allow host:port format, reject HTTP URLs
-			const hostPortRegex = /^(?!https?:\/\/)([a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\]|\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/;
-			const match = value.match(hostPortRegex);
-			if (!match) {
+		// Validate basic auth: if one credential is provided, both must be provided
+		const hasUsername = !!data.basic_auth_username?.trim();
+		const hasPassword = !!data.basic_auth_password?.trim();
+		if (hasUsername && !hasPassword) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["basic_auth_password"],
+				message: "Password is required when username is provided",
+			});
+		}
+		if (hasPassword && !hasUsername) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["basic_auth_username"],
+				message: "Username is required when password is provided",
+			});
+		}
+	});
+
+// Prometheus form schema for the PrometheusFormFragment
+export const prometheusFormSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		prometheus_config: prometheusConfigSchema,
+	})
+	.superRefine((data, ctx) => {
+		// When enabled, push_gateway_url is required
+		if (data.enabled) {
+			const url = (data.prometheus_config.push_gateway_url || "").trim();
+			if (!url) {
 				ctx.addIssue({
 					code: "custom",
-					path: ["collector_url"],
-					message: "Must be in the format <host>:<port> for gRPC (e.g. otel-collector:4317)",
-				});
-				return;
-			}
-			const port = Number(match[2]);
-			if (!(port >= 1 && port <= 65535)) {
-				ctx.addIssue({
-					code: "custom",
-					path: ["collector_url"],
-					message: "Port must be between 1 and 65535",
+					path: ["prometheus_config", "push_gateway_url"],
+					message: "Push Gateway URL is required when enabled",
 				});
 			}
 		}
 	});
 
-// OTEL form schema for the OtelFormFragment
-export const otelFormSchema = z.object({
-	enabled: z.boolean().default(false),
-	otel_config: otelConfigSchema,
-});
-
-// Maxim Configuration Schema
-export const maximConfigSchema = z.object({
-	api_key: z
-		.string()
-		.min(1, "API key is required")
-		.refine((key) => key.startsWith("sk_mx_"), {
-			message: "API key must start with 'sk_mx_'",
-		}),
-	log_repo_id: z.string().optional(),
-});
-
-// Maxim form schema for the MaximFormFragment
-export const maximFormSchema = z.object({
-	enabled: z.boolean().default(false),
-	maxim_config: maximConfigSchema,
-});
-
 // MCP Client update schema
 export const mcpClientUpdateSchema = z.object({
-	name: z.string().min(1, "Name is required"),
-	headers: z.record(z.string(), z.string()).optional(),
+	is_code_mode_client: z.boolean().optional(),
+	is_ping_available: z.boolean().optional(),
+	name: z
+		.string()
+		.min(1, "Name is required")
+		.refine((val) => !val.includes("-"), { message: "Client name cannot contain hyphens" })
+		.refine((val) => !val.includes(" "), { message: "Client name cannot contain spaces" })
+		.refine((val) => !/^[0-9]/.test(val), { message: "Client name cannot start with a number" }),
+	headers: z.record(z.string(), envVarSchema).optional().nullable(),
 	tools_to_execute: z
 		.array(z.string())
 		.optional()
@@ -598,10 +887,30 @@ export const mcpClientUpdateSchema = z.object({
 			},
 			{ message: "Duplicate tool names are not allowed" },
 		),
+	tools_to_auto_execute: z
+		.array(z.string())
+		.optional()
+		.refine(
+			(tools) => {
+				if (!tools || tools.length === 0) return true;
+				const hasWildcard = tools.includes("*");
+				return !hasWildcard || tools.length === 1;
+			},
+			{ message: "Wildcard '*' cannot be combined with other tool names" },
+		)
+		.refine(
+			(tools) => {
+				if (!tools) return true;
+				return tools.length === new Set(tools).size;
+			},
+			{ message: "Duplicate tool names are not allowed" },
+		),
+	tool_pricing: z.record(z.string(), z.number().min(0, "Cost must be non-negative")).optional(),
+	tool_sync_interval: z.number().optional(), // -1 = disabled, 0 = use global, >0 = custom interval in minutes
 });
 
 // Global proxy type schema
-export const globalProxyTypeSchema = z.enum(['http', 'socks5', 'tcp']);
+export const globalProxyTypeSchema = z.enum(["http", "socks5", "tcp"]);
 
 // Global proxy configuration schema
 export const globalProxyConfigSchema = z
@@ -611,6 +920,7 @@ export const globalProxyConfigSchema = z
 		url: z.string(),
 		username: z.string().optional(),
 		password: z.string().optional(),
+		ca_cert_pem: z.string().optional(),
 		no_proxy: z.string().optional(),
 		timeout: z.number().min(0).optional(),
 		skip_tls_verify: z.boolean().optional(),
@@ -627,8 +937,8 @@ export const globalProxyConfigSchema = z
 			return true;
 		},
 		{
-			message: 'Proxy URL is required when proxy is enabled',
-			path: ['url'],
+			message: "Proxy URL is required when proxy is enabled",
+			path: ["url"],
 		},
 	)
 	.refine(
@@ -645,8 +955,8 @@ export const globalProxyConfigSchema = z
 			return true;
 		},
 		{
-			message: 'Must be a valid URL (e.g., http://proxy.example.com:8080)',
-			path: ['url'],
+			message: "Must be a valid URL (e.g., http://proxy.example.com:8080)",
+			path: ["url"],
 		},
 	);
 
@@ -655,7 +965,39 @@ export const globalProxyFormSchema = z.object({
 	proxy_config: globalProxyConfigSchema,
 });
 
+// Global header filter configuration schema
+// Controls which headers with the x-bf-eh-* prefix are forwarded to LLM providers
+export const globalHeaderFilterConfigSchema = z.object({
+	allowlist: z.array(z.string()).optional(), // If non-empty, only these headers are allowed
+	denylist: z.array(z.string()).optional(), // Headers to always block
+});
+
+// Global header filter form schema for the HeaderFilterView
+export const globalHeaderFilterFormSchema = z.object({
+	header_filter_config: globalHeaderFilterConfigSchema,
+});
+
+// Routing rule creation schema
+export const routingRuleSchema = z
+	.object({
+		name: z.string().min(1, "Rule name is required").max(255, "Rule name must be less than 255 characters"),
+		description: z.string().max(1000, "Description must be less than 1000 characters").optional(),
+		cel_expression: z.string().optional(),
+		provider: z.string().min(1, "Provider is required"),
+		model: z.string().optional(),
+		fallbacks: z.array(z.string()).optional().default([]),
+		scope: z.enum(["global", "team", "customer", "virtual_key"]),
+		scope_id: z.string().optional(),
+		priority: z.number().min(0, "Priority must be 0 or greater").max(1000, "Priority must be 1000 or less"),
+		enabled: z.boolean().default(true),
+	})
+	.refine((data) => data.scope === "global" || (data.scope_id != null && data.scope_id.trim() !== ""), {
+		message: "Scope ID is required when scope is not global",
+		path: ["scope_id"],
+	});
+
 // Export type inference helpers
+export type EnvVar = z.infer<typeof envVarSchema>;
 export type MCPClientUpdateSchema = z.infer<typeof mcpClientUpdateSchema>;
 export type ModelProviderKeySchema = z.infer<typeof modelProviderKeySchema>;
 export type NetworkConfigSchema = z.infer<typeof networkConfigSchema>;
@@ -667,8 +1009,13 @@ export type OtelConfigSchema = z.infer<typeof otelConfigSchema>;
 export type OtelFormSchema = z.infer<typeof otelFormSchema>;
 export type MaximConfigSchema = z.infer<typeof maximConfigSchema>;
 export type MaximFormSchema = z.infer<typeof maximFormSchema>;
+export type PrometheusConfigSchema = z.infer<typeof prometheusConfigSchema>;
+export type PrometheusFormSchema = z.infer<typeof prometheusFormSchema>;
 export type NetworkOnlyFormSchema = z.infer<typeof networkOnlyFormSchema>;
 export type PerformanceFormSchema = z.infer<typeof performanceFormSchema>;
 export type CustomProviderConfigSchema = z.infer<typeof customProviderConfigSchema>;
 export type GlobalProxyConfigSchema = z.infer<typeof globalProxyConfigSchema>;
 export type GlobalProxyFormSchema = z.infer<typeof globalProxyFormSchema>;
+export type GlobalHeaderFilterConfigSchema = z.infer<typeof globalHeaderFilterConfigSchema>;
+export type GlobalHeaderFilterFormSchema = z.infer<typeof globalHeaderFilterFormSchema>;
+export type RoutingRuleSchema = z.infer<typeof routingRuleSchema>;

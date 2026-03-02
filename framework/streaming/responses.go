@@ -191,6 +191,28 @@ func deepCopyResponsesMessage(original schemas.ResponsesMessage) schemas.Respons
 		}
 	}
 
+	// Deep copy ResponsesReasoning if present
+	if original.ResponsesReasoning != nil {
+		copy.ResponsesReasoning = &schemas.ResponsesReasoning{}
+
+		// Deep copy Summary slice
+		if original.ResponsesReasoning.Summary != nil {
+			copy.ResponsesReasoning.Summary = make([]schemas.ResponsesReasoningSummary, len(original.ResponsesReasoning.Summary))
+			for i, summary := range original.ResponsesReasoning.Summary {
+				copy.ResponsesReasoning.Summary[i] = schemas.ResponsesReasoningSummary{
+					Type: summary.Type,
+					Text: summary.Text,
+				}
+			}
+		}
+
+		// Deep copy EncryptedContent if present
+		if original.ResponsesReasoning.EncryptedContent != nil {
+			copyEncrypted := *original.ResponsesReasoning.EncryptedContent
+			copy.ResponsesReasoning.EncryptedContent = &copyEncrypted
+		}
+	}
+
 	if original.ResponsesToolMessage != nil {
 		copy.ResponsesToolMessage = &schemas.ResponsesToolMessage{}
 
@@ -444,12 +466,14 @@ func (a *Accumulator) buildCompleteMessageFromResponsesStreamChunks(chunks []*Re
 		switch resp.Type {
 		case schemas.ResponsesStreamResponseTypeOutputItemAdded:
 			// Always append new items - this fixes multiple function calls issue
+			// Deep copy to prevent shared pointer mutation when deltas are appended
 			if resp.Item != nil {
-				messages = append(messages, *resp.Item)
+				messages = append(messages, deepCopyResponsesMessage(*resp.Item))
 			}
 
 		case schemas.ResponsesStreamResponseTypeContentPartAdded:
 			// Add content part to the most recent message, create message if none exists
+			// Deep copy to prevent shared pointer mutation
 			if resp.Part != nil {
 				if len(messages) == 0 {
 					messages = append(messages, createNewMessage())
@@ -462,7 +486,7 @@ func (a *Accumulator) buildCompleteMessageFromResponsesStreamChunks(chunks []*Re
 				if lastMsg.Content.ContentBlocks == nil {
 					lastMsg.Content.ContentBlocks = make([]schemas.ResponsesMessageContentBlock, 0)
 				}
-				lastMsg.Content.ContentBlocks = append(lastMsg.Content.ContentBlocks, *resp.Part)
+				lastMsg.Content.ContentBlocks = append(lastMsg.Content.ContentBlocks, deepCopyResponsesMessageContentBlock(*resp.Part))
 			}
 
 		case schemas.ResponsesStreamResponseTypeOutputTextDelta:
@@ -487,12 +511,78 @@ func (a *Accumulator) buildCompleteMessageFromResponsesStreamChunks(chunks []*Re
 			if len(messages) == 0 {
 				messages = append(messages, createNewMessage())
 			}
+			// Deep copy to prevent shared pointer mutation when arguments are appended
 			if resp.Item != nil {
-				messages = append(messages, *resp.Item)
+				messages = append(messages, deepCopyResponsesMessage(*resp.Item))
 			}
-			// Append arguments to the most recent message
+			// Route arguments delta to the correct function call message by ItemID,
+			// falling back to last message only when no ItemID is present.
+			// If ItemID is present but unmatched, create a new stub message to avoid
+			// merging parallel tool call argument deltas into the wrong call.
 			if resp.Delta != nil && len(messages) > 0 {
-				a.appendFunctionArgumentsDeltaToResponsesMessage(&messages[len(messages)-1], *resp.Delta)
+				targetIdx := len(messages) - 1
+				if resp.ItemID != nil {
+					targetIdx = -1
+					for i := len(messages) - 1; i >= 0; i-- {
+						if messages[i].ID != nil && *messages[i].ID == *resp.ItemID {
+							targetIdx = i
+							break
+						}
+					}
+					if targetIdx == -1 {
+						// ItemID present but no matching message — create a stub to hold the delta
+						id := *resp.ItemID
+						messages = append(messages, schemas.ResponsesMessage{
+							ID: &id,
+						})
+						targetIdx = len(messages) - 1
+					}
+				}
+				a.appendFunctionArgumentsDeltaToResponsesMessage(&messages[targetIdx], *resp.Delta)
+			}
+
+		case schemas.ResponsesStreamResponseTypeReasoningSummaryTextDelta:
+			// Create new reasoning message if none exists, or find existing reasoning message to append delta to
+			if (resp.Delta != nil || resp.Signature != nil) && resp.ItemID != nil {
+				var targetMessage *schemas.ResponsesMessage
+
+				// Find the reasoning message by ItemID
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].ID != nil && *messages[i].ID == *resp.ItemID {
+						targetMessage = &messages[i]
+						break
+					}
+				}
+
+				// If no message found, create a new reasoning message
+				if targetMessage == nil {
+					// Deep copy ItemID to prevent shared pointer mutation
+					var copyID *string
+					if resp.ItemID != nil {
+						id := *resp.ItemID
+						copyID = &id
+					}
+					newMessage := schemas.ResponsesMessage{
+						ID:   copyID,
+						Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+						Role: schemas.Ptr(schemas.ResponsesInputMessageRoleAssistant),
+						ResponsesReasoning: &schemas.ResponsesReasoning{
+							Summary: []schemas.ResponsesReasoningSummary{},
+						},
+					}
+					messages = append(messages, newMessage)
+					targetMessage = &messages[len(messages)-1]
+				}
+
+				// Handle text delta
+				if resp.Delta != nil {
+					a.appendReasoningDeltaToResponsesMessage(targetMessage, *resp.Delta, resp.ContentIndex)
+				}
+
+				// Handle signature delta
+				if resp.Signature != nil {
+					a.appendReasoningSignatureToResponsesMessage(targetMessage, *resp.Signature, resp.ContentIndex)
+				}
 			}
 		}
 	}
@@ -585,33 +675,139 @@ func (a *Accumulator) appendFunctionArgumentsDeltaToResponsesMessage(message *sc
 	}
 }
 
+// appendReasoningDeltaToResponsesMessage appends reasoning delta to a responses message
+func (a *Accumulator) appendReasoningDeltaToResponsesMessage(message *schemas.ResponsesMessage, delta string, contentIndex *int) {
+	// Handle reasoning content in two ways:
+	// 1. Content blocks (for reasoning_text content blocks)
+	// 2. ResponsesReasoning.Summary (for reasoning summary accumulation)
+
+	// If we have a content index, this is reasoning content in content blocks
+	if contentIndex != nil {
+		if message.Content == nil {
+			message.Content = &schemas.ResponsesMessageContent{}
+		}
+
+		// If we don't have content blocks yet, create them
+		if message.Content.ContentBlocks == nil {
+			message.Content.ContentBlocks = make([]schemas.ResponsesMessageContentBlock, *contentIndex+1)
+		}
+
+		// Ensure we have enough content blocks
+		for len(message.Content.ContentBlocks) <= *contentIndex {
+			message.Content.ContentBlocks = append(message.Content.ContentBlocks, schemas.ResponsesMessageContentBlock{})
+		}
+
+		// Initialize the content block if needed
+		if message.Content.ContentBlocks[*contentIndex].Type == "" {
+			message.Content.ContentBlocks[*contentIndex].Type = schemas.ResponsesOutputMessageContentTypeReasoning
+		}
+
+		// Append to existing reasoning text or create new text
+		if message.Content.ContentBlocks[*contentIndex].Text == nil {
+			message.Content.ContentBlocks[*contentIndex].Text = &delta
+		} else {
+			*message.Content.ContentBlocks[*contentIndex].Text += delta
+		}
+	} else {
+		// No content index - this is reasoning summary accumulation
+		if message.ResponsesReasoning == nil {
+			message.ResponsesReasoning = &schemas.ResponsesReasoning{
+				Summary: []schemas.ResponsesReasoningSummary{},
+			}
+		}
+
+		// For now, accumulate into a single summary entry
+		// In the future, this could be enhanced to handle multiple summary entries
+		if len(message.ResponsesReasoning.Summary) == 0 {
+			message.ResponsesReasoning.Summary = append(message.ResponsesReasoning.Summary, schemas.ResponsesReasoningSummary{
+				Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+				Text: delta,
+			})
+		} else {
+			// Append to the first (and typically only) summary entry
+			message.ResponsesReasoning.Summary[0].Text += delta
+		}
+	}
+}
+
+// appendReasoningSignatureToResponsesMessage appends reasoning signature to a responses message
+func (a *Accumulator) appendReasoningSignatureToResponsesMessage(message *schemas.ResponsesMessage, signature string, contentIndex *int) {
+	// Handle signature content in content blocks or ResponsesReasoning.EncryptedContent
+
+	// If we have a content index, this is signature content in content blocks
+	if contentIndex != nil {
+		if message.Content == nil {
+			message.Content = &schemas.ResponsesMessageContent{}
+		}
+
+		// If we don't have content blocks yet, create them
+		if message.Content.ContentBlocks == nil {
+			message.Content.ContentBlocks = make([]schemas.ResponsesMessageContentBlock, *contentIndex+1)
+		}
+
+		// Ensure we have enough content blocks
+		for len(message.Content.ContentBlocks) <= *contentIndex {
+			message.Content.ContentBlocks = append(message.Content.ContentBlocks, schemas.ResponsesMessageContentBlock{})
+		}
+
+		// Initialize the content block if needed
+		if message.Content.ContentBlocks[*contentIndex].Type == "" {
+			message.Content.ContentBlocks[*contentIndex].Type = schemas.ResponsesOutputMessageContentTypeReasoning
+		}
+
+		// Set or append signature to the content block
+		if message.Content.ContentBlocks[*contentIndex].Signature == nil {
+			message.Content.ContentBlocks[*contentIndex].Signature = &signature
+		} else {
+			*message.Content.ContentBlocks[*contentIndex].Signature += signature
+		}
+	} else {
+		// No content index - this is encrypted content at the reasoning level
+		if message.ResponsesReasoning == nil {
+			message.ResponsesReasoning = &schemas.ResponsesReasoning{
+				Summary: []schemas.ResponsesReasoningSummary{},
+			}
+		}
+
+		// Set or append to encrypted content
+		if message.ResponsesReasoning.EncryptedContent == nil {
+			message.ResponsesReasoning.EncryptedContent = &signature
+		} else {
+			*message.ResponsesReasoning.EncryptedContent += signature
+		}
+	}
+}
+
 // processAccumulatedResponsesStreamingChunks processes all accumulated responses streaming chunks in order
 func (a *Accumulator) processAccumulatedResponsesStreamingChunks(requestID string, respErr *schemas.BifrostError, isFinalChunk bool) (*AccumulatedData, error) {
 	accumulator := a.getOrCreateStreamAccumulator(requestID)
 	// Lock the accumulator
 	accumulator.mu.Lock()
-	defer func() {
-		if isFinalChunk {
-			// Cleanup BEFORE unlocking to prevent other goroutines from accessing chunks being returned to pool
-			a.cleanupStreamAccumulator(requestID)
-		}
-		accumulator.mu.Unlock()
-	}()
+	defer accumulator.mu.Unlock()
+	// Note: Cleanup is handled by CleanupStreamAccumulator when refcount reaches 0
+	// This is called from completeDeferredSpan after streaming ends
+
+	// Calculate Time to First Token (TTFT) in milliseconds
+	var ttft int64
+	if !accumulator.StartTimestamp.IsZero() && !accumulator.FirstChunkTimestamp.IsZero() {
+		ttft = accumulator.FirstChunkTimestamp.Sub(accumulator.StartTimestamp).Nanoseconds() / 1e6
+	}
 
 	// Initialize accumulated data
 	data := &AccumulatedData{
-		RequestID:      requestID,
-		Status:         "success",
-		Stream:         true,
-		StartTimestamp: accumulator.StartTimestamp,
-		EndTimestamp:   accumulator.FinalTimestamp,
-		Latency:        0,
-		OutputMessages: nil,
-		ToolCalls:      nil,
-		ErrorDetails:   respErr,
-		TokenUsage:     nil,
-		CacheDebug:     nil,
-		Cost:           nil,
+		RequestID:        requestID,
+		Status:           "success",
+		Stream:           true,
+		StartTimestamp:   accumulator.StartTimestamp,
+		EndTimestamp:     accumulator.FinalTimestamp,
+		Latency:          0,
+		TimeToFirstToken: ttft,
+		OutputMessages:   nil,
+		ToolCalls:        nil,
+		ErrorDetails:     respErr,
+		TokenUsage:       nil,
+		CacheDebug:       nil,
+		Cost:             nil,
 	}
 
 	// Build complete messages from accumulated chunks
@@ -639,25 +835,35 @@ func (a *Accumulator) processAccumulatedResponsesStreamingChunks(requestID strin
 
 	data.ErrorDetails = respErr
 
-	// Update token usage from final chunk if available
-	if len(accumulator.ResponsesStreamChunks) > 0 {
-		lastChunk := accumulator.ResponsesStreamChunks[len(accumulator.ResponsesStreamChunks)-1]
+	// Update metadata from the chunk with highest index (contains TokenUsage, Cost, FinishReason)
+	if lastChunk := accumulator.getLastResponsesChunkLocked(); lastChunk != nil {
 		if lastChunk.TokenUsage != nil {
 			data.TokenUsage = lastChunk.TokenUsage
 		}
-		// Handle cache debug
 		if lastChunk.SemanticCacheDebug != nil {
 			data.CacheDebug = lastChunk.SemanticCacheDebug
 		}
-	}
-
-	// Update cost from final chunk if available
-	if len(accumulator.ResponsesStreamChunks) > 0 {
-		lastChunk := accumulator.ResponsesStreamChunks[len(accumulator.ResponsesStreamChunks)-1]
 		if lastChunk.Cost != nil {
 			data.Cost = lastChunk.Cost
 		}
 		data.FinishReason = lastChunk.FinishReason
+	}
+
+	// Accumulate raw response
+	if len(accumulator.ResponsesStreamChunks) > 0 {
+		// Sort chunks by chunk index
+		sort.Slice(accumulator.ResponsesStreamChunks, func(i, j int) bool {
+			return accumulator.ResponsesStreamChunks[i].ChunkIndex < accumulator.ResponsesStreamChunks[j].ChunkIndex
+		})
+		for _, chunk := range accumulator.ResponsesStreamChunks {
+			if chunk.RawResponse != nil {
+				if data.RawResponse == nil {
+					data.RawResponse = bifrost.Ptr(*chunk.RawResponse)
+				} else {
+					*data.RawResponse += "\n\n" + *chunk.RawResponse
+				}
+			}
+		}
 	}
 
 	return data, nil
@@ -667,84 +873,14 @@ func (a *Accumulator) processAccumulatedResponsesStreamingChunks(requestID strin
 func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostContext, result *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*ProcessedStreamResponse, error) {
 	a.logger.Debug("[streaming] processing responses streaming response")
 
-	// Extract request ID from context
-	requestID, ok := (*ctx).Value(schemas.BifrostContextKeyRequestID).(string)
+	// Extract accumulator ID from context
+	requestID, ok := getAccumulatorID(ctx)
 	if !ok || requestID == "" {
-		return nil, fmt.Errorf("request-id not found in context or is empty")
+		return nil, fmt.Errorf("accumulator-id not found in context or is empty")
 	}
 
 	_, provider, model := bifrost.GetResponseFields(result, bifrostErr)
 
-	accumulator := a.getOrCreateStreamAccumulator(requestID)
-	accumulator.mu.Lock()
-	startTimestamp := accumulator.StartTimestamp
-	endTimestamp := accumulator.FinalTimestamp
-	accumulator.mu.Unlock()
-
-	// For OpenAI-compatible providers, the last chunk already contains the whole accumulated response
-	// so just return it as is
-	if provider == schemas.OpenAI || provider == schemas.OpenRouter || (provider == schemas.Azure && !schemas.IsAnthropicModel(model)) {
-		isFinalChunk := bifrost.IsFinalChunk(ctx)
-		if isFinalChunk {
-			// For OpenAI, the final chunk contains the complete response
-			// Extract the complete response and return it
-			if result != nil && result.ResponsesStreamResponse != nil {
-				// Build the complete response from the final chunk
-				data := &AccumulatedData{
-					RequestID:      requestID,
-					Status:         "success",
-					Stream:         true,
-					StartTimestamp: startTimestamp,
-					EndTimestamp:   endTimestamp,
-					Latency:        result.GetExtraFields().Latency,
-					ErrorDetails:   bifrostErr,
-				}
-
-				if bifrostErr != nil {
-					data.Status = "error"
-				}
-
-				// Extract the complete response from the stream response
-				if result.ResponsesStreamResponse.Response != nil {
-					data.OutputMessages = result.ResponsesStreamResponse.Response.Output
-					if result.ResponsesStreamResponse.Response.Usage != nil {
-						// Convert ResponsesResponseUsage to schemas.LLMUsage
-						data.TokenUsage = &schemas.BifrostLLMUsage{
-							PromptTokens:     result.ResponsesStreamResponse.Response.Usage.InputTokens,
-							CompletionTokens: result.ResponsesStreamResponse.Response.Usage.OutputTokens,
-							TotalTokens:      result.ResponsesStreamResponse.Response.Usage.TotalTokens,
-						}
-					}
-				}
-
-				if a.pricingManager != nil {
-					cost := a.pricingManager.CalculateCostWithCacheDebug(result)
-					data.Cost = bifrost.Ptr(cost)
-				}
-
-				return &ProcessedStreamResponse{
-					Type:       StreamResponseTypeFinal,
-					RequestID:  requestID,
-					StreamType: StreamTypeResponses,
-					Provider:   provider,
-					Model:      model,
-					Data:       data,
-				}, nil
-			}
-		}
-
-		// For non-final chunks from OpenAI, just pass through
-		return &ProcessedStreamResponse{
-			Type:       StreamResponseTypeDelta,
-			RequestID:  requestID,
-			StreamType: StreamTypeResponses,
-			Provider:   provider,
-			Model:      model,
-			Data:       nil, // No accumulated data for delta responses
-		}, nil
-	}
-
-	// For non-OpenAI providers, use the accumulation logic
 	isFinalChunk := bifrost.IsFinalChunk(ctx)
 	chunk := a.getResponsesStreamChunk()
 	chunk.Timestamp = time.Now()
@@ -753,6 +889,9 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 	if bifrostErr != nil {
 		chunk.FinishReason = bifrost.Ptr("error")
 	} else if result != nil && result.ResponsesStreamResponse != nil {
+		if result.ResponsesStreamResponse.ExtraFields.RawResponse != nil {
+			chunk.RawResponse = bifrost.Ptr(fmt.Sprintf("%v", result.ResponsesStreamResponse.ExtraFields.RawResponse))
+		}
 		// Store a deep copy of the stream response to prevent shared data mutation between plugins
 		chunk.StreamResponse = deepCopyResponsesStreamResponse(result.ResponsesStreamResponse)
 		// Extract token usage from stream response if available
@@ -762,6 +901,7 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 				PromptTokens:     result.ResponsesStreamResponse.Response.Usage.InputTokens,
 				CompletionTokens: result.ResponsesStreamResponse.Response.Usage.OutputTokens,
 				TotalTokens:      result.ResponsesStreamResponse.Response.Usage.TotalTokens,
+				Cost:             result.ResponsesStreamResponse.Response.Usage.Cost,
 			}
 		}
 		chunk.ChunkIndex = result.ResponsesStreamResponse.ExtraFields.ChunkIndex
@@ -779,39 +919,40 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 	}
 
 	// If this is the final chunk, process accumulated chunks
+	// Always return data on final chunk - multiple plugins may need the result
 	if isFinalChunk {
-		shouldProcess := false
-		// Get the accumulator to check if processing has already been triggered
+		// Get the accumulator and mark as complete (idempotent)
 		accumulator := a.getOrCreateStreamAccumulator(requestID)
 		accumulator.mu.Lock()
-		shouldProcess = !accumulator.IsComplete
-		// Mark as complete when we're about to process
-		if shouldProcess {
+		if !accumulator.IsComplete {
 			accumulator.IsComplete = true
 		}
 		accumulator.mu.Unlock()
 
-		if shouldProcess {
-			data, processErr := a.processAccumulatedResponsesStreamingChunks(requestID, bifrostErr, isFinalChunk)
-			if processErr != nil {
-				a.logger.Error("failed to process accumulated responses chunks for request %s: %v", requestID, processErr)
-				return nil, processErr
-			}
-
-			return &ProcessedStreamResponse{
-				Type:       StreamResponseTypeFinal,
-				RequestID:  requestID,
-				StreamType: StreamTypeResponses,
-				Provider:   provider,
-				Model:      model,
-				Data:       data,
-			}, nil
+		// Always process and return data on final chunk
+		// Multiple plugins can call this - the processing is idempotent
+		data, processErr := a.processAccumulatedResponsesStreamingChunks(requestID, bifrostErr, isFinalChunk)
+		if processErr != nil {
+			a.logger.Error("failed to process accumulated responses chunks for request %s: %v", requestID, processErr)
+			return nil, processErr
 		}
-		return nil, nil
+
+		var rawRequest interface{}
+		if result != nil && result.ResponsesStreamResponse != nil && result.ResponsesStreamResponse.ExtraFields.RawRequest != nil {
+			rawRequest = result.ResponsesStreamResponse.ExtraFields.RawRequest
+		}
+
+		return &ProcessedStreamResponse{
+			RequestID:  requestID,
+			StreamType: StreamTypeResponses,
+			Provider:   provider,
+			Model:      model,
+			Data:       data,
+			RawRequest: &rawRequest,
+		}, nil
 	}
 
 	return &ProcessedStreamResponse{
-		Type:       StreamResponseTypeDelta,
 		RequestID:  requestID,
 		StreamType: StreamTypeResponses,
 		Provider:   provider,

@@ -3,29 +3,80 @@
 package utils
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/maximhq/bifrost/core/network"
 	schemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttpproxy"
 )
 
-var logger schemas.Logger
+// sortedAPI is a sonic encoder/decoder that sorts map keys during marshaling.
+// This ensures deterministic JSON output for map[string]interface{} values,
+// which is critical for LLM prompt caching (e.g., Anthropic cache keying).
+var sortedAPI = sonic.Config{SortMapKeys: true}.Froze()
 
+// MarshalSorted marshals v to JSON with map keys sorted alphabetically.
+func MarshalSorted(v interface{}) ([]byte, error) {
+	return sortedAPI.Marshal(v)
+}
+
+// MarshalSortedIndent marshals v to indented JSON with map keys sorted alphabetically.
+func MarshalSortedIndent(v interface{}, prefix, indent string) ([]byte, error) {
+	return sortedAPI.MarshalIndent(v, prefix, indent)
+}
+
+// logger is the global logger for the provider utils (thread-safe via atomic.Pointer).
+var logger atomic.Pointer[schemas.Logger]
+
+// noopLogger is a no-op implementation of schemas.Logger.
+type noopLogger struct{}
+
+func (noopLogger) Debug(string, ...any)                   {}
+func (noopLogger) Info(string, ...any)                    {}
+func (noopLogger) Warn(string, ...any)                    {}
+func (noopLogger) Error(string, ...any)                   {}
+func (noopLogger) Fatal(string, ...any)                   {}
+func (noopLogger) SetLevel(schemas.LogLevel)              {}
+func (noopLogger) SetOutputType(schemas.LoggerOutputType) {}
+func (noopLogger) LogHTTPRequest(schemas.LogLevel, string) schemas.LogEventBuilder {
+	return schemas.NoopLogEvent
+}
+
+// Initialize with noop logger
+func init() {
+	var noop schemas.Logger = &noopLogger{}
+	logger.Store(&noop)
+}
+
+// SetLogger sets the logger for the provider utils (thread-safe).
 func SetLogger(l schemas.Logger) {
-	logger = l
+	logger.Store(&l)
+}
+
+// getLogger returns the current logger (thread-safe).
+func getLogger() schemas.Logger {
+	return *logger.Load()
 }
 
 var UnsupportedSpeechStreamModels = []string{"tts-1", "tts-1-hd"}
@@ -74,8 +125,26 @@ func MakeRequestWithContext(ctx context.Context, client *fasthttp.Client, req *f
 					},
 				}
 			}
+			// Check for timeout errors first before checking net.OpError to avoid misclassification
 			if errors.Is(err, fasthttp.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 				return latency, NewBifrostOperationError(schemas.ErrProviderRequestTimedOut, err, "")
+			}
+			// Check if error implements net.Error and has Timeout() == true
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				return latency, NewBifrostOperationError(schemas.ErrProviderRequestTimedOut, err, "")
+			}
+			// Check for DNS lookup and network errors after timeout checks
+			var opErr *net.OpError
+			var dnsErr *net.DNSError
+			if errors.As(err, &opErr) || errors.As(err, &dnsErr) {
+				return latency, &schemas.BifrostError{
+					IsBifrostError: false,
+					Error: &schemas.ErrorField{
+						Message: schemas.ErrProviderNetworkError,
+						Error:   err,
+					},
+				}
 			}
 			// The HTTP request itself failed (e.g., connection error, fasthttp timeout).
 			return latency, &schemas.BifrostError{
@@ -92,6 +161,73 @@ func MakeRequestWithContext(ctx context.Context, client *fasthttp.Client, req *f
 	}
 }
 
+// Deprecated: ConfigureRetry is now handled internally by ConfigureDialer.
+// This function is kept for backward compatibility but is no longer needed.
+func ConfigureRetry(client *fasthttp.Client) *fasthttp.Client {
+	client.RetryIfErr = network.StaleConnectionRetryIfErr
+	return client
+}
+
+// ConfigureDialer configures the client's connection behavior:
+//  1. Sets up the stale-connection retry policy (see network.StaleConnectionRetryIfErr).
+//  2. Wraps the Dial function to enable TCP keepalive on all connections,
+//     proactively detecting dead connections before fasthttp tries to reuse them.
+//
+// Must be called AFTER ConfigureProxy (which may set client.Dial to a proxy
+// dialer), so the keepalive wrapper composes on top of the proxy connection.
+//
+// Keepalive parameters:
+//   - Idle 10s: first probe after 10s of inactivity (well under the 30s MaxIdleConnDuration)
+//   - Interval 5s: subsequent probes every 5s
+//   - Count 3: close after 3 failed probes
+//
+// Dead connections are detected within ~25s (10 + 5*3), before the 30s
+// MaxIdleConnDuration expires and the connection is reused.
+func ConfigureDialer(client *fasthttp.Client) *fasthttp.Client {
+	// Configure stale-connection retry policy
+	client.RetryIfErr = network.StaleConnectionRetryIfErr
+
+	existingDial := client.Dial
+	existingDialTimeout := client.DialTimeout
+
+	keepAliveCfg := net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     10 * time.Second,
+		Interval: 5 * time.Second,
+		Count:    3,
+	}
+
+	client.Dial = func(addr string) (net.Conn, error) {
+		var conn net.Conn
+		var err error
+
+		switch {
+		case existingDial != nil:
+			// Proxy or custom dial function is set — use it, then enable keepalive
+			conn, err = existingDial(addr)
+		case existingDialTimeout != nil:
+			// Preserve dial-timeout behavior
+			conn, err = existingDialTimeout(addr, client.ReadTimeout)
+		default:
+			conn, err = (&net.Dialer{
+				Timeout:         client.ReadTimeout,
+				KeepAliveConfig: keepAliveCfg,
+			}).Dial("tcp", addr)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		// Enable TCP keepalive on the connection
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetKeepAliveConfig(keepAliveCfg)
+		}
+		return conn, nil
+	}
+
+	return client
+}
+
 // ConfigureProxy sets up a proxy for the fasthttp client based on the provided configuration.
 // It supports HTTP, SOCKS5, and environment-based proxy configurations.
 // Returns the configured client or the original client if proxy configuration is invalid.
@@ -101,20 +237,30 @@ func ConfigureProxy(client *fasthttp.Client, proxyConfig *schemas.ProxyConfig, l
 	}
 
 	var dialFunc fasthttp.DialFunc
-
 	// Create the appropriate proxy based on type
 	switch proxyConfig.Type {
 	case schemas.NoProxy:
 		return client
 	case schemas.HTTPProxy:
 		if proxyConfig.URL == "" {
-			logger.Warn("Warning: HTTP proxy URL is required for setting up proxy")
+			getLogger().Warn("Warning: HTTP proxy URL is required for setting up proxy")
 			return client
 		}
-		dialFunc = fasthttpproxy.FasthttpHTTPDialer(proxyConfig.URL)
+		proxyURL := proxyConfig.URL
+		if proxyConfig.Username != "" && proxyConfig.Password != "" {
+			parsedURL, err := url.Parse(proxyConfig.URL)
+			if err != nil {
+				getLogger().Warn("Invalid proxy configuration: invalid HTTP proxy URL")
+				return client
+			}
+			// Set user and password in the parsed URL
+			parsedURL.User = url.UserPassword(proxyConfig.Username, proxyConfig.Password)
+			proxyURL = parsedURL.String()
+		}
+		dialFunc = fasthttpproxy.FasthttpHTTPDialer(proxyURL)
 	case schemas.Socks5Proxy:
 		if proxyConfig.URL == "" {
-			logger.Warn("Warning: SOCKS5 proxy URL is required for setting up proxy")
+			getLogger().Warn("Warning: SOCKS5 proxy URL is required for setting up proxy")
 			return client
 		}
 		proxyURL := proxyConfig.URL
@@ -122,7 +268,7 @@ func ConfigureProxy(client *fasthttp.Client, proxyConfig *schemas.ProxyConfig, l
 		if proxyConfig.Username != "" && proxyConfig.Password != "" {
 			parsedURL, err := url.Parse(proxyConfig.URL)
 			if err != nil {
-				logger.Warn("Invalid proxy configuration: invalid SOCKS5 proxy URL")
+				getLogger().Warn("Invalid proxy configuration: invalid SOCKS5 proxy URL")
 				return client
 			}
 			// Set user and password in the parsed URL
@@ -134,7 +280,7 @@ func ConfigureProxy(client *fasthttp.Client, proxyConfig *schemas.ProxyConfig, l
 		// Use environment variables for proxy configuration
 		dialFunc = fasthttpproxy.FasthttpProxyHTTPDialer()
 	default:
-		logger.Warn(fmt.Sprintf("Invalid proxy configuration: unsupported proxy type: %s", proxyConfig.Type))
+		getLogger().Warn("Invalid proxy configuration: unsupported proxy type: %s", proxyConfig.Type)
 		return client
 	}
 
@@ -142,7 +288,38 @@ func ConfigureProxy(client *fasthttp.Client, proxyConfig *schemas.ProxyConfig, l
 		client.Dial = dialFunc
 	}
 
+	// Configure custom CA certificate if provided
+	if proxyConfig.CACertPEM != "" {
+		tlsConfig, err := createTLSConfigWithCA(proxyConfig.CACertPEM)
+		if err != nil {
+			getLogger().Warn("Failed to configure custom CA certificate: %v", err)
+		} else {
+			client.TLSConfig = tlsConfig
+		}
+	}
+
 	return client
+}
+
+// createTLSConfigWithCA creates a TLS configuration with a custom CA certificate
+// appended to the system root CA pool.
+func createTLSConfigWithCA(caCertPEM string) (*tls.Config, error) {
+	// Get the system root CA pool
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil {
+		// If we can't get system certs, create a new pool
+		rootCAs = x509.NewCertPool()
+	}
+
+	// Append the custom CA certificate
+	if !rootCAs.AppendCertsFromPEM([]byte(caCertPEM)) {
+		return nil, fmt.Errorf("failed to parse CA certificate PEM")
+	}
+
+	return &tls.Config{
+		RootCAs:    rootCAs,
+		MinVersion: tls.VersionTLS12,
+	}, nil
 }
 
 // hopByHopHeaders are HTTP/1.1 headers that must not be forwarded by proxies.
@@ -172,16 +349,11 @@ func filterHeaders(headers map[string][]string) map[string][]string {
 // SetExtraHeaders sets additional headers from NetworkConfig to the fasthttp request.
 // This allows users to configure custom headers for their provider requests.
 // Header keys are canonicalized using textproto.CanonicalMIMEHeaderKey to avoid duplicates.
-// The Authorization header is excluded for security reasons.
 // It accepts a list of headers (all canonicalized) to skip for security reasons.
 // Headers are only set if they don't already exist on the request to avoid overwriting important headers.
 func SetExtraHeaders(ctx context.Context, req *fasthttp.Request, extraHeaders map[string]string, skipHeaders []string) {
 	for key, value := range extraHeaders {
 		canonicalKey := textproto.CanonicalMIMEHeaderKey(key)
-		// Skip Authorization header for security reasons
-		if key == "Authorization" {
-			continue
-		}
 		if skipHeaders != nil {
 			if slices.Contains(skipHeaders, key) {
 				continue
@@ -192,7 +364,6 @@ func SetExtraHeaders(ctx context.Context, req *fasthttp.Request, extraHeaders ma
 			req.Header.Set(canonicalKey, value)
 		}
 	}
-
 	// Give priority to extra headers in the context
 	if extraHeaders, ok := (ctx).Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string); ok {
 		for k, values := range filterHeaders(extraHeaders) {
@@ -216,26 +387,41 @@ func GetPathFromContext(ctx context.Context, defaultPath string) string {
 }
 
 // GetRequestPath gets the request path from the context, if it exists, checking for path overrides in the custom provider config.
-func GetRequestPath(ctx context.Context, defaultPath string, customProviderConfig *schemas.CustomProviderConfig, requestType schemas.RequestType) string {
-	// If path set in context, return it
+// It returns the resolved value and a boolean indicating whether the value is a full absolute URL.
+// If the boolean is false, the returned string is a path (leading slash ensured).
+func GetRequestPath(ctx context.Context, defaultPath string, customProviderConfig *schemas.CustomProviderConfig, requestType schemas.RequestType) (string, bool) {
+	// If path/url set in context, return it.
 	if pathInContext, ok := ctx.Value(schemas.BifrostContextKeyURLPath).(string); ok {
-		return pathInContext
+		trimmed := strings.TrimSpace(pathInContext)
+		if u, err := url.Parse(trimmed); err == nil && u != nil && u.IsAbs() && u.Host != "" {
+			return trimmed, true
+		}
+		return trimmed, false
 	}
-	// If path override set in custom provider config, return it
+
+	// If path override set in custom provider config, return it.
 	if customProviderConfig != nil && customProviderConfig.RequestPathOverrides != nil {
 		if raw, ok := customProviderConfig.RequestPathOverrides[requestType]; ok {
-			pathOverride := strings.TrimSpace(raw)
-			if pathOverride == "" {
-				return defaultPath
+			override := strings.TrimSpace(raw)
+			if override == "" {
+				return defaultPath, false
 			}
-			if !strings.HasPrefix(pathOverride, "/") {
-				pathOverride = "/" + pathOverride
+
+			// Treat absolute URLs with scheme+host as full URLs.
+			if u, err := url.Parse(override); err == nil && u != nil && u.IsAbs() && u.Host != "" {
+				return override, true
 			}
-			return pathOverride
+
+			// Otherwise treat as a path override (ensure leading slash).
+			if !strings.HasPrefix(override, "/") {
+				override = "/" + override
+			}
+			return override, false
 		}
 	}
-	// Return default path
-	return defaultPath
+
+	// Return default path.
+	return defaultPath, false
 }
 
 type RequestBodyGetter interface {
@@ -250,7 +436,26 @@ func CheckAndGetRawRequestBody(ctx context.Context, request RequestBodyGetter) (
 	return nil, false
 }
 
-type RequestBodyConverter func() (any, error)
+type RequestBodyWithExtraParams interface {
+	GetExtraParams() map[string]interface{}
+}
+
+type RequestBodyConverter func() (RequestBodyWithExtraParams, error)
+
+// MergeExtraParams merges extraParams into jsonMap, handling nested maps recursively.
+func MergeExtraParams(jsonMap map[string]interface{}, extraParams map[string]interface{}) {
+	for k, v := range extraParams {
+		if existingVal, exists := jsonMap[k]; exists {
+			if existingMap, ok := existingVal.(map[string]interface{}); ok {
+				if newMap, ok := v.(map[string]interface{}); ok {
+					MergeExtraParams(existingMap, newMap)
+					continue
+				}
+			}
+		}
+		jsonMap[k] = v
+	}
+}
 
 // CheckContextAndGetRequestBody checks if the raw request body should be used, and returns it if it exists.
 func CheckContextAndGetRequestBody(ctx context.Context, request RequestBodyGetter, requestConverter RequestBodyConverter, providerType schemas.ModelProvider) ([]byte, *schemas.BifrostError) {
@@ -263,9 +468,29 @@ func CheckContextAndGetRequestBody(ctx context.Context, request RequestBodyGette
 		if convertedBody == nil {
 			return nil, NewBifrostOperationError("request body is not provided", nil, providerType)
 		}
-		jsonBody, err := sonic.Marshal(convertedBody)
+
+		jsonBody, err := sonic.MarshalIndent(convertedBody, "", "  ")
 		if err != nil {
 			return nil, NewBifrostOperationError(schemas.ErrProviderRequestMarshal, err, providerType)
+		}
+		// Merge ExtraParams into the JSON if passthrough is enabled
+		if ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams) != nil && ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams) == true {
+			extraParams := convertedBody.GetExtraParams()
+			if len(extraParams) > 0 {
+				var jsonMap map[string]interface{}
+				if err := sonic.Unmarshal(jsonBody, &jsonMap); err != nil {
+					return nil, NewBifrostOperationError(schemas.ErrProviderRequestMarshal, err, providerType)
+				}
+
+				// Merge ExtraParams recursively (handles nested maps)
+				MergeExtraParams(jsonMap, extraParams)
+
+				// Re-marshal the merged map
+				jsonBody, err = MarshalSortedIndent(jsonMap, "", "  ")
+				if err != nil {
+					return nil, NewBifrostOperationError(schemas.ErrProviderRequestMarshal, err, providerType)
+				}
+			}
 		}
 		return jsonBody, nil
 	} else {
@@ -281,10 +506,6 @@ func CheckContextAndGetRequestBody(ctx context.Context, request RequestBodyGette
 func SetExtraHeadersHTTP(ctx context.Context, req *http.Request, extraHeaders map[string]string, skipHeaders []string) {
 	for key, value := range extraHeaders {
 		canonicalKey := textproto.CanonicalMIMEHeaderKey(key)
-		// Skip Authorization header for security reasons
-		if key == "Authorization" {
-			continue
-		}
 		if skipHeaders != nil {
 			if slices.Contains(skipHeaders, key) {
 				continue
@@ -313,54 +534,211 @@ func SetExtraHeadersHTTP(ctx context.Context, req *http.Request, extraHeaders ma
 // HandleProviderAPIError processes error responses from provider APIs.
 // It attempts to unmarshal the error response and returns a BifrostError
 // with the appropriate status code and error information.
-// errorResp must be a pointer to the target struct for unmarshaling.
+// HTML detection only runs if JSON parsing fails to avoid expensive regex operations
+// on responses that are almost certainly valid JSON. errorResp must be a pointer to
+// the target struct for unmarshaling.
 func HandleProviderAPIError(resp *fasthttp.Response, errorResp any) *schemas.BifrostError {
 	statusCode := resp.StatusCode()
 
-	if err := sonic.Unmarshal(resp.Body(), errorResp); err != nil {
-		rawResponse := resp.Body()
-		message := fmt.Sprintf("provider API error: %s", string(rawResponse))
+	// Decode body
+	decodedBody, err := CheckAndDecodeBody(resp)
+	if err != nil {
+		// Decode failed - still capture raw body for RawResponse
+		rawBody := resp.Body()
+		var rawErrorResponse interface{}
+		if len(rawBody) > 0 {
+			// Try to unmarshal, but if that fails, store as string
+			if unmarshalErr := sonic.Unmarshal(rawBody, &rawErrorResponse); unmarshalErr != nil {
+				rawErrorResponse = string(rawBody)
+			}
+		}
+
 		return &schemas.BifrostError{
 			IsBifrostError: false,
 			StatusCode:     &statusCode,
 			Error: &schemas.ErrorField{
-				Message: message,
+				Message: err.Error(),
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RawResponse: rawErrorResponse,
 			},
 		}
 	}
 
+	// Try to unmarshal decoded body for RawResponse
+	var rawErrorResponse interface{}
+	if err := sonic.Unmarshal(decodedBody, &rawErrorResponse); err != nil {
+		// Store raw body as string for RawResponse when JSON parsing fails
+		// Continue to HTML detection and proper error handling below
+		rawErrorResponse = string(decodedBody)
+	}
+
+	// Check for empty response
+	trimmed := strings.TrimSpace(string(decodedBody))
+	if len(trimmed) == 0 {
+		return &schemas.BifrostError{
+			IsBifrostError: false,
+			StatusCode:     &statusCode,
+			Error: &schemas.ErrorField{
+				Message: schemas.ErrProviderResponseEmpty,
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RawResponse: rawErrorResponse,
+			},
+		}
+	}
+
+	// Try JSON parsing first
+	if err := sonic.Unmarshal(decodedBody, errorResp); err == nil {
+		// JSON parsing succeeded, return success
+		return &schemas.BifrostError{
+			IsBifrostError: false,
+			StatusCode:     &statusCode,
+			Error:          &schemas.ErrorField{},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RawResponse: rawErrorResponse,
+			},
+		}
+	}
+
+	// JSON parsing failed - now check if it's an HTML response (expensive operation)
+	if IsHTMLResponse(resp, decodedBody) {
+		return &schemas.BifrostError{
+			IsBifrostError: false,
+			StatusCode:     &statusCode,
+			Error: &schemas.ErrorField{
+				Message: schemas.ErrProviderResponseHTML,
+				Error:   errors.New(string(decodedBody)),
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RawResponse: rawErrorResponse,
+			},
+		}
+	}
+
+	// Not HTML either - return raw response as error message
+	message := fmt.Sprintf("provider API error: %s", string(decodedBody))
 	return &schemas.BifrostError{
 		IsBifrostError: false,
 		StatusCode:     &statusCode,
-		Error:          &schemas.ErrorField{},
+		Error: &schemas.ErrorField{
+			Message: message,
+		},
+		ExtraFields: schemas.BifrostErrorExtraFields{
+			RawResponse: rawErrorResponse,
+		},
 	}
+}
+
+// EnrichError attaches the raw request and response to a BifrostError.
+// Returns the request and response from provider embedded in BifrostError.ExtraFields.
+func EnrichError(
+	ctx *schemas.BifrostContext,
+	bifrostErr *schemas.BifrostError,
+	requestBody []byte,
+	responseBody []byte,
+	sendBackRawRequest bool,
+	sendBackRawResponse bool,
+) *schemas.BifrostError {
+	if bifrostErr == nil {
+		return bifrostErr
+	}
+
+	if ShouldSendBackRawRequest(ctx, sendBackRawRequest) && len(requestBody) > 0 {
+		var rawRequest interface{}
+		if err := sonic.Unmarshal(requestBody, &rawRequest); err != nil {
+			getLogger().Warn("Failed to parse raw request for error: %v", err)
+			return bifrostErr
+		}
+		bifrostErr.ExtraFields.RawRequest = rawRequest
+	} else {
+		bifrostErr.ExtraFields.RawRequest = nil
+	}
+
+	if ShouldSendBackRawResponse(ctx, sendBackRawResponse) {
+		if len(responseBody) > 0 {
+			// We have a responseBody to set
+			var rawResponse interface{}
+			if err := sonic.Unmarshal(responseBody, &rawResponse); err != nil {
+				getLogger().Warn("Failed to parse raw response for error: %v", err)
+				return bifrostErr
+			}
+			bifrostErr.ExtraFields.RawResponse = rawResponse
+		}
+	} else {
+		bifrostErr.ExtraFields.RawResponse = nil
+	}
+
+	return bifrostErr
 }
 
 // HandleProviderResponse handles common response parsing logic for provider responses.
 // It attempts to parse the response body into the provided response type
 // and returns either the parsed response or a BifrostError if parsing fails.
 // If sendBackRawResponse is true, it returns the raw response interface, otherwise nil.
-func HandleProviderResponse[T any](responseBody []byte, response *T, sendBackRawResponse bool) (interface{}, *schemas.BifrostError) {
-	var rawResponse interface{}
+// HTML detection only runs if JSON parsing fails to avoid expensive regex operations
+// on responses that are almost certainly valid JSON.
+func HandleProviderResponse[T any](responseBody []byte, response *T, requestBody []byte, sendBackRawRequest bool, sendBackRawResponse bool) (rawRequest interface{}, rawResponse interface{}, bifrostErr *schemas.BifrostError) {
+	// Check for empty response
+	trimmed := strings.TrimSpace(string(responseBody))
+	if len(trimmed) == 0 {
+		return nil, nil, &schemas.BifrostError{
+			IsBifrostError: true,
+			Error: &schemas.ErrorField{
+				Message: schemas.ErrProviderResponseEmpty,
+			},
+		}
+	}
 
 	var wg sync.WaitGroup
-	var structuredErr, rawErr error
+	var structuredErr, rawRequestErr, rawResponseErr error
 
-	wg.Add(2)
+	// Skip raw request capture if requestBody is nil (e.g., for GET requests)
+	shouldCaptureRawRequest := sendBackRawRequest && requestBody != nil
+
+	// Count goroutines to spawn
+	numGoroutines := 1 // Always unmarshal structured response
+	if shouldCaptureRawRequest {
+		numGoroutines++
+	}
+	if sendBackRawResponse {
+		numGoroutines++
+	}
+
+	wg.Add(numGoroutines)
 	go func() {
 		defer wg.Done()
 		structuredErr = sonic.Unmarshal(responseBody, response)
 	}()
-	go func() {
-		defer wg.Done()
-		if sendBackRawResponse {
-			rawErr = sonic.Unmarshal(responseBody, &rawResponse)
-		}
-	}()
+
+	if shouldCaptureRawRequest {
+		go func() {
+			defer wg.Done()
+			rawRequestErr = sonic.Unmarshal(requestBody, &rawRequest)
+		}()
+	}
+
+	if sendBackRawResponse {
+		go func() {
+			defer wg.Done()
+			rawResponseErr = sonic.Unmarshal(responseBody, &rawResponse)
+		}()
+	}
 	wg.Wait()
 
 	if structuredErr != nil {
-		return nil, &schemas.BifrostError{
+		// JSON parsing failed - check if it's an HTML response (expensive operation)
+		if IsHTMLResponse(nil, responseBody) {
+			return nil, nil, &schemas.BifrostError{
+				IsBifrostError: false,
+				Error: &schemas.ErrorField{
+					Message: schemas.ErrProviderResponseHTML,
+					Error:   errors.New(string(responseBody)),
+				},
+			}
+		}
+
+		return nil, nil, &schemas.BifrostError{
 			IsBifrostError: true,
 			Error: &schemas.ErrorField{
 				Message: schemas.ErrProviderResponseUnmarshal,
@@ -369,21 +747,52 @@ func HandleProviderResponse[T any](responseBody []byte, response *T, sendBackRaw
 		}
 	}
 
-	if sendBackRawResponse {
-		if rawErr != nil {
-			return nil, &schemas.BifrostError{
+	if shouldCaptureRawRequest {
+		if rawRequestErr != nil {
+			return nil, nil, &schemas.BifrostError{
 				IsBifrostError: true,
 				Error: &schemas.ErrorField{
-					Message: schemas.ErrProviderRawResponseUnmarshal,
-					Error:   rawErr,
+					Message: schemas.ErrProviderRawRequestUnmarshal,
+					Error:   rawRequestErr,
 				},
 			}
 		}
-
-		return rawResponse, nil
+		if sendBackRawResponse && rawResponseErr != nil {
+			return nil, nil, &schemas.BifrostError{
+				IsBifrostError: true,
+				Error: &schemas.ErrorField{
+					Message: schemas.ErrProviderRawResponseUnmarshal,
+					Error:   rawResponseErr,
+				},
+			}
+		}
+		return rawRequest, rawResponse, nil
 	}
 
-	return nil, nil
+	if sendBackRawResponse {
+		if rawResponseErr != nil {
+			return nil, nil, &schemas.BifrostError{
+				IsBifrostError: true,
+				Error: &schemas.ErrorField{
+					Message: schemas.ErrProviderRawResponseUnmarshal,
+					Error:   rawResponseErr,
+				},
+			}
+		}
+		return rawRequest, rawResponse, nil
+	}
+
+	return nil, nil, nil
+}
+
+// ParseAndSetRawRequest parses the raw request body and sets it in the extra fields.
+func ParseAndSetRawRequest(extraFields *schemas.BifrostResponseExtraFields, jsonBody []byte) {
+	var rawRequest interface{}
+	if err := sonic.Unmarshal(jsonBody, &rawRequest); err != nil {
+		getLogger().Warn("failed to parse raw request: %v", err)
+	} else {
+		extraFields.RawRequest = rawRequest
+	}
 }
 
 // NewUnsupportedOperationError creates a standardized error for unsupported operations.
@@ -393,6 +802,7 @@ func NewUnsupportedOperationError(requestType schemas.RequestType, providerName 
 		IsBifrostError: false,
 		Error: &schemas.ErrorField{
 			Message: fmt.Sprintf("%s is not supported by %s provider", requestType, providerName),
+			Code:    schemas.Ptr("unsupported_operation"),
 		},
 		ExtraFields: schemas.BifrostErrorExtraFields{
 			Provider:    providerName,
@@ -420,14 +830,202 @@ func CheckOperationAllowed(defaultProvider schemas.ModelProvider, config *schema
 }
 
 // CheckAndDecodeBody checks the content encoding and decodes the body accordingly.
+// It returns a copy of the body to avoid race conditions when the response is released
+// back to fasthttp's buffer pool. Uses pooled gzip readers to reduce GC pressure.
 func CheckAndDecodeBody(resp *fasthttp.Response) ([]byte, error) {
 	contentEncoding := strings.ToLower(strings.TrimSpace(string(resp.Header.Peek("Content-Encoding"))))
-	switch contentEncoding {
-	case "gzip":
-		return resp.BodyGunzip()
-	default:
-		return resp.Body(), nil
+	if strings.Contains(contentEncoding, "gzip") {
+		body := resp.Body()
+		if len(body) == 0 {
+			return nil, nil
+		}
+
+		reader := bytes.NewReader(body)
+		gz, err := AcquireGzipReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer ReleaseGzipReader(gz)
+
+		decompressed, err := io.ReadAll(gz)
+		if err != nil {
+			return nil, err
+		}
+		return decompressed, nil
 	}
+	// Copy the body to avoid race conditions when response is released back to pool
+	body := resp.Body()
+	result := make([]byte, len(body))
+	copy(result, body)
+	return result, nil
+}
+
+// IsHTMLResponse checks if the response is HTML by examining the Content-Type header
+// and/or the response body for HTML indicators.
+func IsHTMLResponse(resp *fasthttp.Response, body []byte) bool {
+	// Check Content-Type header first (most reliable indicator)
+	if resp != nil {
+		contentType := strings.ToLower(string(resp.Header.Peek("Content-Type")))
+		if strings.Contains(contentType, "text/html") {
+			return true
+		}
+	}
+
+	// If body is small, it's unlikely to be HTML
+	if len(body) < 20 {
+		return false
+	}
+
+	// Check for HTML indicators in body
+	bodyLower := strings.ToLower(string(body))
+
+	// Look for common HTML tags or DOCTYPE
+	htmlIndicators := []string{
+		"<!doctype html",
+		"<html",
+		"<head",
+		"<body",
+		"<title>",
+		"<h1>",
+		"<h2>",
+		"<h3>",
+		"<p>",
+		"<div",
+	}
+
+	for _, indicator := range htmlIndicators {
+		if strings.Contains(bodyLower, indicator) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Limit body size to prevent ReDoS on very large malicious responses
+const maxBodySize = 32 * 1024 // 32KB
+
+// ExtractHTMLErrorMessage extracts meaningful error information from an HTML response.
+// It attempts to find error messages from title tags, headers, and visible text.
+// UNUSED for now but could be useful in the future
+func ExtractHTMLErrorMessage(body []byte) string {
+	if len(body) > maxBodySize {
+		body = body[:maxBodySize]
+	}
+
+	bodyStr := string(body)
+	bodyLower := strings.ToLower(bodyStr)
+
+	// Try to extract title first
+	if idx := strings.Index(bodyLower, "<title>"); idx != -1 {
+		endIdx := strings.Index(bodyLower[idx:], "</title>")
+		if endIdx != -1 {
+			title := strings.TrimSpace(bodyStr[idx+7 : idx+endIdx])
+			if title != "" && title != "Error" {
+				return title
+			}
+		}
+	}
+
+	// Try to extract from h1, h2, h3 tags (common for error pages)
+	for _, tag := range []string{"h1", "h2", "h3"} {
+		pattern := fmt.Sprintf("<%s[^>]*>([^<]+)</%s>", tag, tag)
+		re := regexp.MustCompile("(?i)" + pattern)
+		if matches := re.FindStringSubmatch(bodyStr); len(matches) > 1 {
+			msg := strings.TrimSpace(matches[1])
+			if msg != "" {
+				return msg
+			}
+		}
+	}
+
+	// Try to extract from meta description
+	pattern := `<meta\s+name="description"\s+content="([^"]+)"`
+	re := regexp.MustCompile("(?i)" + pattern)
+	if matches := re.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		msg := strings.TrimSpace(matches[1])
+		if msg != "" {
+			return msg
+		}
+	}
+
+	// Extract visible text: remove script and style tags, then extract text
+	// Remove script and style tags and their content
+	re = regexp.MustCompile(`(?i)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>`)
+	cleaned := re.ReplaceAllString(bodyStr, "")
+
+	// Remove HTML tags
+	re = regexp.MustCompile(`<[^>]+>`)
+	cleaned = re.ReplaceAllString(cleaned, " ")
+
+	// Clean up whitespace and get first meaningful sentence
+	sentences := strings.FieldsFunc(cleaned, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+
+	for _, sentence := range sentences {
+		trimmed := strings.TrimSpace(sentence)
+		if len(trimmed) > 10 && len(trimmed) < 500 {
+			// Limit to first 200 chars to avoid very long messages
+			if len(trimmed) > 200 {
+				trimmed = trimmed[:200] + "..."
+			}
+			return trimmed
+		}
+	}
+
+	// If all else fails, return a generic message with status code context
+	return "HTML error response received from provider"
+}
+
+// JSONLParseResult holds parsed items and any line-level errors encountered during parsing.
+type JSONLParseResult struct {
+	Errors []schemas.BatchError
+}
+
+// ParseJSONL parses JSONL data line by line, calling the provided callback for each line.
+// It collects parse errors with line numbers rather than silently skipping failed lines.
+// The callback receives the line bytes and returns an error if parsing fails.
+// This function operates directly on byte slices to avoid unnecessary string conversions.
+func ParseJSONL(data []byte, parseLine func(line []byte) error) JSONLParseResult {
+	result := JSONLParseResult{}
+
+	lineNum := 0
+	start := 0
+
+	for i := 0; i <= len(data); i++ {
+		// Check for newline or end of data
+		if i == len(data) || data[i] == '\n' {
+			lineNum++
+
+			// Extract the line (excluding the newline character)
+			end := i
+			if end > start {
+				line := data[start:end]
+
+				// Trim trailing carriage return for Windows-style line endings
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+
+				// Skip empty lines
+				if len(line) > 0 {
+					if err := parseLine(line); err != nil {
+						lineNumCopy := lineNum
+						result.Errors = append(result.Errors, schemas.BatchError{
+							Code:    "parse_error",
+							Message: err.Error(),
+							Line:    &lineNumCopy,
+						})
+					}
+				}
+			}
+
+			start = i + 1
+		}
+	}
+
+	return result
 }
 
 // NewConfigurationError creates a standardized error for configuration errors.
@@ -478,6 +1076,24 @@ func NewProviderAPIError(message string, err error, statusCode int, providerType
 	}
 }
 
+// RequestMetadata contains metadata about a request for error reporting.
+// This struct is used to pass request context to parseError functions.
+type RequestMetadata struct {
+	Provider    schemas.ModelProvider
+	Model       string
+	RequestType schemas.RequestType
+}
+
+// ShouldSendBackRawRequest checks if the raw request should be sent back.
+// Context overrides are intentionally restricted to asymmetric behavior: a context value can only
+// promote false→true and will not override a true config to false, avoiding accidental suppression.
+func ShouldSendBackRawRequest(ctx context.Context, defaultSendBackRawRequest bool) bool {
+	if sendBackRawRequest, ok := ctx.Value(schemas.BifrostContextKeySendBackRawRequest).(bool); ok && sendBackRawRequest {
+		return sendBackRawRequest
+	}
+	return defaultSendBackRawRequest
+}
+
 // ShouldSendBackRawResponse checks if the raw response should be sent back, and returns it if it exists.
 func ShouldSendBackRawResponse(ctx context.Context, defaultSendBackRawResponse bool) bool {
 	if sendBackRawResponse, ok := ctx.Value(schemas.BifrostContextKeySendBackRawResponse).(bool); ok && sendBackRawResponse {
@@ -487,7 +1103,7 @@ func ShouldSendBackRawResponse(ctx context.Context, defaultSendBackRawResponse b
 }
 
 // SendCreatedEventResponsesChunk sends a ResponsesStreamResponseTypeCreated event.
-func SendCreatedEventResponsesChunk(ctx context.Context, postHookRunner schemas.PostHookRunner, provider schemas.ModelProvider, model string, startTime time.Time, responseChan chan *schemas.BifrostStream) {
+func SendCreatedEventResponsesChunk(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, provider schemas.ModelProvider, model string, startTime time.Time, responseChan chan *schemas.BifrostStreamChunk) {
 	firstChunk := &schemas.BifrostResponsesStreamResponse{
 		Type:           schemas.ResponsesStreamResponseTypeCreated,
 		SequenceNumber: 0,
@@ -508,7 +1124,7 @@ func SendCreatedEventResponsesChunk(ctx context.Context, postHookRunner schemas.
 }
 
 // SendInProgressEventResponsesChunk sends a ResponsesStreamResponseTypeInProgress event
-func SendInProgressEventResponsesChunk(ctx context.Context, postHookRunner schemas.PostHookRunner, provider schemas.ModelProvider, model string, startTime time.Time, responseChan chan *schemas.BifrostStream) {
+func SendInProgressEventResponsesChunk(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, provider schemas.ModelProvider, model string, startTime time.Time, responseChan chan *schemas.BifrostStreamChunk) {
 	chunk := &schemas.BifrostResponsesStreamResponse{
 		Type:           schemas.ResponsesStreamResponseTypeInProgress,
 		SequenceNumber: 1,
@@ -532,26 +1148,41 @@ func SendInProgressEventResponsesChunk(ctx context.Context, postHookRunner schem
 // This utility reduces code duplication across streaming implementations by encapsulating
 // the common pattern of running post hooks, handling errors, and sending responses with
 // proper context cancellation handling.
+// It also completes the deferred LLM span when the final chunk is sent (StreamEndIndicator is true).
 func ProcessAndSendResponse(
-	ctx context.Context,
+	ctx *schemas.BifrostContext,
 	postHookRunner schemas.PostHookRunner,
 	response *schemas.BifrostResponse,
-	responseChan chan *schemas.BifrostStream,
+	responseChan chan *schemas.BifrostStreamChunk,
 ) {
-	// Run post hooks on the response
-	processedResponse, processedError := postHookRunner(&ctx, response, nil)
+	// Accumulate chunk for tracing (common for all providers)
+	if tracer, ok := ctx.Value(schemas.BifrostContextKeyTracer).(schemas.Tracer); ok && tracer != nil {
+		if traceID, ok := ctx.Value(schemas.BifrostContextKeyTraceID).(string); ok && traceID != "" {
+			tracer.AddStreamingChunk(traceID, response)
+		}
+	}
+
+	// Run post hooks on the response (note: accumulated chunks above contain pre-hook data)
+	processedResponse, processedError := postHookRunner(ctx, response, nil)
 
 	if HandleStreamControlSkip(processedError) {
+		// Even if skipping, complete the deferred span if this is the final chunk
+		if isFinalChunk := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator); isFinalChunk != nil {
+			if final, ok := isFinalChunk.(bool); ok && final {
+				completeDeferredSpan(ctx, processedResponse, processedError)
+			}
+		}
 		return
 	}
 
-	streamResponse := &schemas.BifrostStream{}
+	streamResponse := &schemas.BifrostStreamChunk{}
 	if processedResponse != nil {
 		streamResponse.BifrostTextCompletionResponse = processedResponse.TextCompletionResponse
 		streamResponse.BifrostChatResponse = processedResponse.ChatResponse
 		streamResponse.BifrostResponsesStreamResponse = processedResponse.ResponsesStreamResponse
 		streamResponse.BifrostSpeechStreamResponse = processedResponse.SpeechStreamResponse
 		streamResponse.BifrostTranscriptionStreamResponse = processedResponse.TranscriptionStreamResponse
+		streamResponse.BifrostImageGenerationStreamResponse = processedResponse.ImageGenerationStreamResponse
 	}
 	if processedError != nil {
 		streamResponse.BifrostError = processedError
@@ -561,6 +1192,13 @@ func ProcessAndSendResponse(
 	case responseChan <- streamResponse:
 	case <-ctx.Done():
 		return
+	}
+
+	// Check if this is the final chunk and complete deferred span with post-processed data
+	if isFinalChunk := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator); isFinalChunk != nil {
+		if final, ok := isFinalChunk.(bool); ok && final {
+			completeDeferredSpan(ctx, processedResponse, processedError)
+		}
 	}
 }
 
@@ -568,21 +1206,28 @@ func ProcessAndSendResponse(
 // This utility reduces code duplication across streaming implementations by encapsulating
 // the common pattern of running post hooks, handling errors, and sending responses with
 // proper context cancellation handling.
+// It also completes the deferred LLM span when the final chunk is sent (StreamEndIndicator is true).
 func ProcessAndSendBifrostError(
-	ctx context.Context,
+	ctx *schemas.BifrostContext,
 	postHookRunner schemas.PostHookRunner,
 	bifrostErr *schemas.BifrostError,
-	responseChan chan *schemas.BifrostStream,
+	responseChan chan *schemas.BifrostStreamChunk,
 	logger schemas.Logger,
 ) {
-	// Send scanner error through channel
-	processedResponse, processedError := postHookRunner(&ctx, nil, bifrostErr)
+	// Run post hooks first so span reflects post-processed data
+	processedResponse, processedError := postHookRunner(ctx, nil, bifrostErr)
 
 	if HandleStreamControlSkip(processedError) {
+		// Even if skipping, complete the deferred span if this is the final chunk
+		if isFinalChunk := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator); isFinalChunk != nil {
+			if final, ok := isFinalChunk.(bool); ok && final {
+				completeDeferredSpan(ctx, processedResponse, processedError)
+			}
+		}
 		return
 	}
 
-	streamResponse := &schemas.BifrostStream{}
+	streamResponse := &schemas.BifrostStreamChunk{}
 	if processedResponse != nil {
 		streamResponse.BifrostTextCompletionResponse = processedResponse.TextCompletionResponse
 		streamResponse.BifrostChatResponse = processedResponse.ChatResponse
@@ -598,6 +1243,120 @@ func ProcessAndSendBifrostError(
 	case responseChan <- streamResponse:
 	case <-ctx.Done():
 	}
+
+	// Check if this is the final chunk and complete deferred span with post-processed data
+	if isFinalChunk := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator); isFinalChunk != nil {
+		if final, ok := isFinalChunk.(bool); ok && final {
+			completeDeferredSpan(ctx, processedResponse, processedError)
+		}
+	}
+}
+
+// SetupStreamCancellation spawns a goroutine that closes the body stream when
+// the context is cancelled or deadline exceeded, unblocking any blocked Read/Scan operations.
+// Returns a cleanup function that MUST be called when streaming is done to
+// prevent the goroutine from closing the stream during normal operation.
+// Works with both fasthttp's BodyStream() (io.Reader) and net/http's resp.Body (io.ReadCloser).
+func SetupStreamCancellation(ctx context.Context, bodyStream io.Reader, logger schemas.Logger) (cleanup func()) {
+	done := make(chan struct{})
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Context cancelled or deadline exceeded - close the body stream to unblock reads
+			if closer, ok := bodyStream.(io.Closer); ok {
+				if err := closer.Close(); err != nil {
+					getLogger().Debug(fmt.Sprintf("Error closing body stream on context done: %v", err))
+				}
+			}
+		case <-done:
+			// Normal completion - do nothing
+		}
+	}()
+
+	return func() { close(done) }
+}
+
+// HandleStreamCancellation should be called when a streaming goroutine exits
+// due to context cancellation. It ensures proper cleanup by:
+// 1. Checking if StreamEndIndicator was already set (to avoid duplicate handling)
+// 2. Setting StreamEndIndicator to true
+// 3. Sending a cancellation error through PostHook chain
+//
+// This is critical for the logging plugin to update log status from "processing" to "error"
+// when a client disconnects mid-stream.
+func HandleStreamCancellation(
+	ctx *schemas.BifrostContext,
+	postHookRunner schemas.PostHookRunner,
+	responseChan chan *schemas.BifrostStreamChunk,
+	provider schemas.ModelProvider,
+	model string,
+	requestType schemas.RequestType,
+	logger schemas.Logger,
+) {
+	// Check if already handled (StreamEndIndicator already set)
+	if indicator := ctx.GetAndSetValue(schemas.BifrostContextKeyStreamEndIndicator, true); indicator != nil {
+		if set, ok := indicator.(bool); ok && set {
+			return // Already handled
+		}
+	}
+	// Create cancellation error
+	cancelErr := &schemas.BifrostError{
+		StatusCode: schemas.Ptr(499), // Client Closed Request
+		Error: &schemas.ErrorField{
+			Message: "Request cancelled: client disconnected",
+			Type:    schemas.Ptr(schemas.RequestCancelled),
+		},
+		ExtraFields: schemas.BifrostErrorExtraFields{
+			Provider:       provider,
+			ModelRequested: model,
+			RequestType:    requestType,
+		},
+	}
+
+	// Send through PostHook chain - this updates the log to "error" status
+	ProcessAndSendBifrostError(ctx, postHookRunner, cancelErr, responseChan, logger)
+}
+
+// HandleStreamTimeout should be called when a streaming goroutine exits
+// due to context deadline exceeded. It ensures proper cleanup by:
+// 1. Checking if StreamEndIndicator was already set (to avoid duplicate handling)
+// 2. Setting StreamEndIndicator to true
+// 3. Sending a timeout error through PostHook chain
+//
+// This is critical for the logging plugin to update log status from "processing" to "error"
+// when a request times out mid-stream.
+func HandleStreamTimeout(
+	ctx *schemas.BifrostContext,
+	postHookRunner schemas.PostHookRunner,
+	responseChan chan *schemas.BifrostStreamChunk,
+	provider schemas.ModelProvider,
+	model string,
+	requestType schemas.RequestType,
+	logger schemas.Logger,
+) {
+	// Check if already handled (StreamEndIndicator already set)
+	if indicator := ctx.GetAndSetValue(schemas.BifrostContextKeyStreamEndIndicator, true); indicator != nil {
+		if set, ok := indicator.(bool); ok && set {
+			return // Already handled
+		}
+	}
+	// Create timeout error
+	timeoutErr := &schemas.BifrostError{
+		StatusCode: schemas.Ptr(504), // Gateway Timeout
+		Error: &schemas.ErrorField{
+			Message: "Request timed out: deadline exceeded",
+			Type:    schemas.Ptr(schemas.RequestTimedOut),
+		},
+		ExtraFields: schemas.BifrostErrorExtraFields{
+			Provider:       provider,
+			ModelRequested: model,
+			RequestType:    requestType,
+		},
+	}
+
+	// Send through PostHook chain - this updates the log to "error" status
+	ProcessAndSendBifrostError(ctx, postHookRunner, timeoutErr, responseChan, logger)
 }
 
 // ProcessAndSendError handles post-hook processing and sends the error to the channel.
@@ -605,10 +1364,10 @@ func ProcessAndSendBifrostError(
 // the common pattern of running post hooks, handling errors, and sending responses with
 // proper context cancellation handling.
 func ProcessAndSendError(
-	ctx context.Context,
+	ctx *schemas.BifrostContext,
 	postHookRunner schemas.PostHookRunner,
 	err error,
-	responseChan chan *schemas.BifrostStream,
+	responseChan chan *schemas.BifrostStreamChunk,
 	requestType schemas.RequestType,
 	providerName schemas.ModelProvider,
 	model string,
@@ -628,13 +1387,13 @@ func ProcessAndSendError(
 				ModelRequested: model,
 			},
 		}
-	processedResponse, processedError := postHookRunner(&ctx, nil, bifrostError)
+	processedResponse, processedError := postHookRunner(ctx, nil, bifrostError)
 
 	if HandleStreamControlSkip(processedError) {
 		return
 	}
 
-	streamResponse := &schemas.BifrostStream{}
+	streamResponse := &schemas.BifrostStreamChunk{}
 	if processedResponse != nil {
 		streamResponse.BifrostTextCompletionResponse = processedResponse.TextCompletionResponse
 		streamResponse.BifrostChatResponse = processedResponse.ChatResponse
@@ -721,7 +1480,7 @@ func HandleStreamControlSkip(bifrostErr *schemas.BifrostError) bool {
 	}
 	if bifrostErr.StreamControl.SkipStream != nil && *bifrostErr.StreamControl.SkipStream {
 		if bifrostErr.StreamControl.LogError != nil && *bifrostErr.StreamControl.LogError {
-			logger.Warn("Error in stream: " + bifrostErr.Error.Message)
+			getLogger().Warn("Error in stream: " + bifrostErr.Error.Message)
 		}
 		return true
 	}
@@ -745,8 +1504,8 @@ func GetProviderName(defaultProvider schemas.ModelProvider, customConfig *schema
 // after sending the finish_reason. This function helps determine the correct stream termination logic.
 func ProviderSendsDoneMarker(providerName schemas.ModelProvider) bool {
 	switch providerName {
-	case schemas.Cerebras, schemas.Perplexity:
-		// Cerebras and Perplexity don't send [DONE] marker, ends stream after finish_reason
+	case schemas.Cerebras, schemas.Perplexity, schemas.HuggingFace:
+		// Cerebras, Perplexity, and HuggingFace don't send [DONE] marker, ends stream after finish_reason
 		return false
 	default:
 		// Default to expecting [DONE] marker for safety
@@ -765,12 +1524,26 @@ func ProviderIsResponsesAPINative(providerName schemas.ModelProvider) bool {
 
 // ReleaseStreamingResponse releases a streaming response by draining the body stream and releasing the response.
 func ReleaseStreamingResponse(resp *fasthttp.Response) {
-	// Drain any remaining data from the body stream before releasing
-	// This prevents "whitespace in header" errors when the response is reused
-	if resp.BodyStream() != nil {
-		io.Copy(io.Discard, resp.BodyStream())
+	defer func() {
+		if r := recover(); r != nil {
+			getLogger().Error("recovered panic in ReleaseStreamingResponse: %v", r)
+		}
+		// Always release the response to prevent leaks, even after a panic
+		fasthttp.ReleaseResponse(resp)
+	}()
+	// Drain any remaining data from the body stream before releasing.
+	// This prevents "whitespace in header" errors when the connection is reused
+	// (see: https://github.com/valyala/fasthttp/issues/1743).
+	if bodyStream := resp.BodyStream(); bodyStream != nil {
+		if _, err := io.Copy(io.Discard, bodyStream); err != nil {
+			getLogger().Warn("failed to drain streaming response body before release (may cause stale connection reuse): %v", err)
+		}
+		if closer, ok := bodyStream.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				getLogger().Warn("failed to close streaming response body: %v", err)
+			}
+		}
 	}
-	fasthttp.ReleaseResponse(resp)
 }
 
 // GetBifrostResponseForStreamResponse converts the provided responses to a bifrost response.
@@ -780,6 +1553,7 @@ func GetBifrostResponseForStreamResponse(
 	responsesStreamResponse *schemas.BifrostResponsesStreamResponse,
 	speechStreamResponse *schemas.BifrostSpeechStreamResponse,
 	transcriptionStreamResponse *schemas.BifrostTranscriptionStreamResponse,
+	imageGenerationStreamResponse *schemas.BifrostImageGenerationStreamResponse,
 ) *schemas.BifrostResponse {
 	//TODO add bifrost response pooling here
 	bifrostResponse := &schemas.BifrostResponse{}
@@ -800,6 +1574,9 @@ func GetBifrostResponseForStreamResponse(
 	case transcriptionStreamResponse != nil:
 		bifrostResponse.TranscriptionStreamResponse = transcriptionStreamResponse
 		return bifrostResponse
+	case imageGenerationStreamResponse != nil:
+		bifrostResponse.ImageGenerationStreamResponse = imageGenerationStreamResponse
+		return bifrostResponse
 	}
 	return nil
 }
@@ -815,9 +1592,7 @@ func aggregateListModelsResponses(responses []*schemas.BifrostListModelsResponse
 		}
 	}
 
-	if len(responses) == 1 {
-		return responses[0]
-	}
+	// Always apply deduplication, even for single responses
 
 	// Use a map to track unique model IDs for efficient deduplication
 	seenIDs := make(map[string]struct{})
@@ -860,31 +1635,50 @@ func aggregateListModelsResponses(responses []*schemas.BifrostListModelsResponse
 }
 
 // extractSuccessfulListModelsResponses extracts successful responses from a results channel
-// and tracks the last error encountered. This utility reduces code duplication across providers
+// and tracks per-key status information. This utility reduces code duplication across providers
 // for handling multi-key ListModels requests.
 func extractSuccessfulListModelsResponses(
 	results chan schemas.ListModelsByKeyResult,
 	providerName schemas.ModelProvider,
-	logger schemas.Logger,
-) ([]*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+) ([]*schemas.BifrostListModelsResponse, []schemas.KeyStatus, *schemas.BifrostError) {
 	var successfulResponses []*schemas.BifrostListModelsResponse
+	var keyStatuses []schemas.KeyStatus
 	var lastError *schemas.BifrostError
 
 	for result := range results {
 		if result.Err != nil {
-			logger.Debug(fmt.Sprintf("failed to list models with key %s: %s", result.KeyID, result.Err.Error.Message))
+			errMsg := "unknown error"
+			if errorField := result.Err.Error; errorField != nil {
+				if errorField.Message != "" {
+					errMsg = errorField.Message
+				} else if errorField.Error != nil {
+					errMsg = errorField.Error.Error()
+				}
+			}
+			getLogger().Warn(fmt.Sprintf("failed to list models with key %s: %s", result.KeyID, errMsg))
+			keyStatuses = append(keyStatuses, schemas.KeyStatus{
+				KeyID:    result.KeyID,
+				Provider: providerName,
+				Status:   schemas.KeyStatusListModelsFailed,
+				Error:    result.Err,
+			})
 			lastError = result.Err
 			continue
 		}
 
+		keyStatuses = append(keyStatuses, schemas.KeyStatus{
+			KeyID:    result.KeyID,
+			Provider: providerName,
+			Status:   schemas.KeyStatusSuccess,
+		})
 		successfulResponses = append(successfulResponses, result.Response)
 	}
 
 	if len(successfulResponses) == 0 {
 		if lastError != nil {
-			return nil, lastError
+			return nil, keyStatuses, lastError
 		}
-		return nil, &schemas.BifrostError{
+		return nil, keyStatuses, &schemas.BifrostError{
 			IsBifrostError: false,
 			Error: &schemas.ErrorField{
 				Message: "all keys failed to list models",
@@ -896,18 +1690,49 @@ func extractSuccessfulListModelsResponses(
 		}
 	}
 
-	return successfulResponses, nil
+	return successfulResponses, keyStatuses, nil
+}
+
+// HandleKeylessListModelsRequest wraps a list models request for keyless providers
+// and automatically populates the KeyStatuses field with provider-level status tracking.
+// This centralizes the status tracking logic for keyless providers.
+func HandleKeylessListModelsRequest(
+	provider schemas.ModelProvider,
+	listFunc func() (*schemas.BifrostListModelsResponse, *schemas.BifrostError),
+) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+	resp, bifrostErr := listFunc()
+
+	keyStatus := schemas.KeyStatus{
+		KeyID:    "", // Empty for keyless providers
+		Provider: provider,
+	}
+
+	// If request failed, attach status to error
+	if bifrostErr != nil {
+		keyStatus.Status = schemas.KeyStatusListModelsFailed
+		keyStatus.Error = bifrostErr
+		bifrostErr.ExtraFields.KeyStatuses = []schemas.KeyStatus{keyStatus}
+		return nil, bifrostErr
+	}
+
+	// Success case
+	if resp != nil {
+		keyStatus.Status = schemas.KeyStatusSuccess
+		resp.KeyStatuses = []schemas.KeyStatus{keyStatus}
+		return resp, nil
+	}
+
+	return resp, bifrostErr
 }
 
 // HandleMultipleListModelsRequests handles multiple list models requests concurrently for different keys.
 // It launches concurrent requests for all keys and waits for all goroutines to complete.
-// It returns the aggregated response or an error if the request fails.
+// It returns the aggregated response with per-key status information or an error if the request fails.
 func HandleMultipleListModelsRequests(
-	ctx context.Context,
+	ctx *schemas.BifrostContext,
 	keys []schemas.Key,
 	request *schemas.BifrostListModelsRequest,
-	listModelsByKey func(ctx context.Context, key schemas.Key, request *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError),
-	logger schemas.Logger,
+	listModelsByKey func(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError),
 ) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
 	startTime := time.Now()
 
@@ -928,14 +1753,19 @@ func HandleMultipleListModelsRequests(
 	wg.Wait()
 	close(results)
 
-	successfulResponses, err := extractSuccessfulListModelsResponses(results, request.Provider, logger)
+	successfulResponses, keyStatuses, err := extractSuccessfulListModelsResponses(results, request.Provider)
 	if err != nil {
+		// Attach key statuses to error's ExtraFields
+		err.ExtraFields.KeyStatuses = keyStatuses
 		return nil, err
 	}
 
 	// Aggregate all successful responses
 	response := aggregateListModelsResponses(successfulResponses)
 	response = response.ApplyPagination(request.PageSize, request.PageToken)
+
+	// Attach key statuses to response
+	response.KeyStatuses = keyStatuses
 
 	// Set ExtraFields
 	latency := time.Since(startTime)
@@ -944,4 +1774,291 @@ func HandleMultipleListModelsRequests(
 	response.ExtraFields.Latency = latency.Milliseconds()
 
 	return response, nil
+}
+
+// GetRandomString generates a random alphanumeric string of the given length.
+func GetRandomString(length int) string {
+	if length <= 0 {
+		return ""
+	}
+	randomSource := rand.New(rand.NewSource(time.Now().UnixNano()))
+	letters := []rune("abcdef0123456789")
+	b := make([]rune, length)
+	for i := range b {
+		b[i] = letters[randomSource.Intn(len(letters))]
+	}
+	return string(b)
+}
+
+// GetReasoningEffortFromBudgetTokens maps a reasoning token budget to OpenAI reasoning effort.
+// Valid values: none, low, medium, high
+func GetReasoningEffortFromBudgetTokens(
+	budgetTokens int,
+	minBudgetTokens int,
+	maxTokens int,
+) string {
+	if budgetTokens <= 0 {
+		return "none"
+	}
+
+	// Defensive defaults
+	if maxTokens <= 0 {
+		return "medium"
+	}
+
+	// Normalize budget
+	if budgetTokens < minBudgetTokens {
+		budgetTokens = minBudgetTokens
+	}
+	if budgetTokens > maxTokens {
+		budgetTokens = maxTokens
+	}
+
+	// Avoid division by zero
+	if maxTokens <= minBudgetTokens {
+		return "high"
+	}
+
+	ratio := float64(budgetTokens-minBudgetTokens) / float64(maxTokens-minBudgetTokens)
+
+	switch {
+	case ratio <= 0.25:
+		return "low"
+	case ratio <= 0.60:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
+// GetBudgetTokensFromReasoningEffort converts OpenAI reasoning effort
+// into a reasoning token budget.
+// effort ∈ {"none", "minimal", "low", "medium", "high"}
+func GetBudgetTokensFromReasoningEffort(
+	effort string,
+	minBudgetTokens int,
+	maxTokens int,
+) (int, error) {
+	if effort == "none" {
+		return 0, nil
+	}
+
+	if minBudgetTokens > maxTokens {
+		return 0, fmt.Errorf("max_tokens must be greater than %d for reasoning", minBudgetTokens)
+	}
+
+	// Defensive defaults
+	if maxTokens <= minBudgetTokens {
+		return minBudgetTokens, nil
+	}
+
+	var ratio float64
+
+	switch effort {
+	case "minimal":
+		ratio = 0.025
+	case "low":
+		ratio = 0.15
+	case "medium":
+		ratio = 0.425
+	case "high":
+		ratio = 0.80
+	default:
+		// Unknown effort → safe default
+		ratio = 0.425
+	}
+
+	budget := minBudgetTokens + int(ratio*float64(maxTokens-minBudgetTokens))
+
+	return budget, nil
+}
+
+// completeDeferredSpan completes the deferred LLM span for streaming requests.
+// This is called when the final chunk is processed (when StreamEndIndicator is true).
+// It retrieves the deferred span handle from TraceStore using the trace ID from context,
+// populates response attributes from accumulated chunks, and ends the span.
+func completeDeferredSpan(ctx *schemas.BifrostContext, result *schemas.BifrostResponse, err *schemas.BifrostError) {
+	if ctx == nil {
+		return
+	}
+
+	// Get the trace ID from context (this IS available in the provider's goroutine)
+	traceID, ok := ctx.Value(schemas.BifrostContextKeyTraceID).(string)
+	if !ok || traceID == "" {
+		return
+	}
+
+	// Get the tracer from context
+	tracerVal := ctx.Value(schemas.BifrostContextKeyTracer)
+	if tracerVal == nil {
+		return
+	}
+	tracer, ok := tracerVal.(schemas.Tracer)
+	if !ok || tracer == nil {
+		return
+	}
+
+	// Get the deferred span handle from TraceStore using trace ID
+	handle := tracer.GetDeferredSpanHandle(traceID)
+	if handle == nil {
+		return
+	}
+
+	// Set total latency from the final chunk
+	if result != nil {
+		extraFields := result.GetExtraFields()
+		if extraFields.Latency > 0 {
+			tracer.SetAttribute(handle, "gen_ai.response.total_latency_ms", extraFields.Latency)
+		}
+	}
+
+	// Get accumulated response with full data (content, tool calls, reasoning, etc.)
+	// This builds a complete BifrostResponse from all the streaming chunks
+	accumulatedResp, ttftMs, chunkCount := tracer.GetAccumulatedChunks(traceID)
+	if accumulatedResp != nil {
+		// Use accumulated response for attributes (includes full content, tool calls, etc.)
+		tracer.PopulateLLMResponseAttributes(handle, accumulatedResp, err)
+
+		// Set Time to First Token (TTFT) attribute
+		if ttftMs > 0 {
+			tracer.SetAttribute(handle, schemas.AttrTimeToFirstToken, ttftMs)
+		}
+
+		// Set total chunks attribute
+		if chunkCount > 0 {
+			tracer.SetAttribute(handle, schemas.AttrTotalChunks, chunkCount)
+		}
+	} else if result != nil {
+		// Fall back to final chunk if no accumulated data (shouldn't happen normally)
+		tracer.PopulateLLMResponseAttributes(handle, result, err)
+	}
+
+	// Finalize aggregated post-hook spans before ending the LLM span
+	// This creates one span per plugin with average execution time
+	// We need to set the llm.call span ID in context so post-hook spans become its children
+	if finalizer, ok := ctx.Value(schemas.BifrostContextKeyPostHookSpanFinalizer).(func(context.Context)); ok && finalizer != nil {
+		// Get the deferred span ID (the llm.call span) to set as parent for post-hook spans
+		spanID := tracer.GetDeferredSpanID(traceID)
+		if spanID != "" {
+			finalizerCtx := context.WithValue(ctx, schemas.BifrostContextKeySpanID, spanID)
+			finalizer(finalizerCtx)
+		} else {
+			finalizer(ctx)
+		}
+	}
+
+	// End span with appropriate status
+	if err != nil {
+		if err.Error != nil {
+			tracer.SetAttribute(handle, "error", err.Error.Message)
+		}
+		if err.StatusCode != nil {
+			tracer.SetAttribute(handle, "status_code", *err.StatusCode)
+		}
+		tracer.EndSpan(handle, schemas.SpanStatusError, "streaming request failed")
+	} else {
+		tracer.EndSpan(handle, schemas.SpanStatusOk, "")
+	}
+
+	// Clear the deferred span from TraceStore
+	tracer.ClearDeferredSpan(traceID)
+}
+
+// CheckAndSetDefaultProvider checks if the default provider should be used based on the context.
+// It returns the default provider if it should be used, otherwise it returns an empty string.
+// Checks if the direct key is set in the context, or if key selection is skipped.
+// Or if the available providers are set in the context and the default provider is in the list.
+func CheckAndSetDefaultProvider(ctx *schemas.BifrostContext, defaultProvider schemas.ModelProvider) schemas.ModelProvider {
+	if ctx != nil {
+		if ctx.Value(schemas.BifrostContextKeyDirectKey) != nil || ctx.Value(schemas.BifrostContextKeySkipKeySelection) != nil {
+			return defaultProvider
+		}
+		if ctx.Value(schemas.BifrostContextKeyAvailableProviders) != nil {
+			availableProviders, ok := ctx.Value(schemas.BifrostContextKeyAvailableProviders).([]schemas.ModelProvider)
+			if !ok || len(availableProviders) == 0 {
+				return ""
+			}
+			getLogger().Debug("[Provider] Available providers: %v, checking %s", availableProviders, defaultProvider)
+			if slices.Contains(availableProviders, defaultProvider) {
+				return defaultProvider
+			}
+			return ""
+		}
+		return defaultProvider
+	}
+	return defaultProvider
+}
+
+// gzipReaderPool reuses gzip.Reader instances across requests to reduce GC pressure.
+var gzipReaderPool = sync.Pool{
+	New: func() any {
+		return &gzip.Reader{}
+	},
+}
+
+// AcquireGzipReader gets a gzip.Reader from the pool and resets it to read from r,
+// or creates a new one if the pool is empty or reset fails.
+func AcquireGzipReader(r io.Reader) (*gzip.Reader, error) {
+	if v := gzipReaderPool.Get(); v != nil {
+		gz := v.(*gzip.Reader)
+		if err := gz.Reset(r); err == nil {
+			return gz, nil
+		}
+		// Reset failed, return to pool to avoid leaking
+		gzipReaderPool.Put(gz)
+	}
+	return gzip.NewReader(r)
+}
+
+// ReleaseGzipReader closes and returns a gzip.Reader to the pool.
+func ReleaseGzipReader(gz *gzip.Reader) {
+	if gz != nil {
+		gz.Close()
+		gzipReaderPool.Put(gz)
+	}
+}
+
+// decompressBodyStreamIfGzip checks Content-Encoding for gzip and wraps the stream
+// with on-the-fly decompression using a pooled gzip.Reader. Clears Content-Encoding
+// header so downstream consumers don't double-decompress. Returns original reader
+// unchanged if not gzip-encoded or if gzip reader creation fails.
+func decompressBodyStreamIfGzip(resp *fasthttp.Response, stream io.Reader) (*gzip.Reader, io.Reader, bool) {
+	ce := strings.ToLower(strings.TrimSpace(string(resp.Header.Peek("Content-Encoding"))))
+	if !strings.Contains(ce, "gzip") {
+		return nil, stream, false
+	}
+	gz, err := AcquireGzipReader(stream)
+	if err != nil {
+		ReleaseGzipReader(gz)
+		return nil, stream, false
+	}
+	resp.Header.Del("Content-Encoding")
+	return gz, gz, true
+}
+
+// DecompressStreamBody returns a reader for consuming the response body, with
+// on-the-fly gzip decompression when Content-Encoding indicates gzip. The response
+// object is NOT modified (no SetBodyStream call), so the original requestStream
+// remains live for proper cleanup by ReleaseStreamingResponse. Clears the
+// Content-Encoding header to prevent double-decompression.
+//
+// Returns:
+//   - io.Reader: the reader to use for scanning (gzip reader if gzip-encoded,
+//     original body stream otherwise).
+//   - func(): cleanup function that releases the gzip reader back to the pool.
+//     Must be called (typically via defer) after streaming is complete.
+func DecompressStreamBody(resp *fasthttp.Response) (io.Reader, func()) {
+	bodyStream := resp.BodyStream()
+	if bodyStream == nil {
+		// Return an empty reader instead of nil to prevent panics in callers
+		// that pass the reader to bufio.NewScanner without nil checks.
+		return bytes.NewReader(nil), func() {}
+	}
+	gz, decompressed, wasGzip := decompressBodyStreamIfGzip(resp, bodyStream)
+	if !wasGzip {
+		return bodyStream, func() {}
+	}
+	return decompressed, func() {
+		ReleaseGzipReader(gz)
+	}
 }

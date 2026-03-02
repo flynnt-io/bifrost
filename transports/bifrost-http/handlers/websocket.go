@@ -11,8 +11,8 @@ import (
 
 	"github.com/fasthttp/router"
 	"github.com/fasthttp/websocket"
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/logstore"
-	"github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -26,7 +26,6 @@ type WebSocketClient struct {
 // WebSocketHandler manages WebSocket connections for real-time updates
 type WebSocketHandler struct {
 	ctx            context.Context
-	logManager     logging.LogManager
 	allowedOrigins []string
 	clients        map[*websocket.Conn]*WebSocketClient
 	mu             sync.RWMutex
@@ -35,10 +34,9 @@ type WebSocketHandler struct {
 }
 
 // NewWebSocketHandler creates a new WebSocket handler instance
-func NewWebSocketHandler(ctx context.Context, logManager logging.LogManager, allowedOrigins []string) *WebSocketHandler {
+func NewWebSocketHandler(ctx context.Context, allowedOrigins []string) *WebSocketHandler {
 	return &WebSocketHandler{
 		ctx:            ctx,
-		logManager:     logManager,
 		allowedOrigins: allowedOrigins,
 		clients:        make(map[*websocket.Conn]*WebSocketClient),
 		stopChan:       make(chan struct{}),
@@ -47,7 +45,7 @@ func NewWebSocketHandler(ctx context.Context, logManager logging.LogManager, all
 }
 
 // RegisterRoutes registers all WebSocket-related routes
-func (h *WebSocketHandler) RegisterRoutes(r *router.Router, middlewares ...lib.BifrostHTTPMiddleware) {
+func (h *WebSocketHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	r.GET("/ws", lib.ChainMiddlewares(h.connectStream, middlewares...))
 }
 
@@ -164,6 +162,11 @@ func (h *WebSocketHandler) sendMessageSafely(client *WebSocketClient, messageTyp
 
 // BroadcastLogUpdate sends a log update to all connected WebSocket clients
 func (h *WebSocketHandler) BroadcastLogUpdate(logEntry *logstore.Log) {
+	// Nil guard to prevent panics
+	if logEntry == nil {
+		return
+	}
+
 	// Add panic recovery to prevent server crashes
 	defer func() {
 		if r := recover(); r != nil {
@@ -194,6 +197,85 @@ func (h *WebSocketHandler) BroadcastLogUpdate(logEntry *logstore.Log) {
 	}
 
 	h.BroadcastMarshaledMessage(data)
+}
+
+// BroadcastMCPLogUpdate sends an MCP tool log update to all connected WebSocket clients
+func (h *WebSocketHandler) BroadcastMCPLogUpdate(logEntry *logstore.MCPToolLog) {
+	// Nil guard to prevent panics
+	if logEntry == nil {
+		return
+	}
+
+	// Add panic recovery to prevent server crashes
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("panic in BroadcastMCPLogUpdate: %v", r)
+		}
+	}()
+
+	// Determine operation type based on log status and timestamp
+	operationType := "update"
+	if logEntry.Status == "processing" && logEntry.CreatedAt.Equal(logEntry.Timestamp) {
+		operationType = "create"
+	}
+
+	message := struct {
+		Type      string               `json:"type"`
+		Operation string               `json:"operation"` // "create" or "update"
+		Payload   *logstore.MCPToolLog `json:"payload"`
+	}{
+		Type:      "mcp_log",
+		Operation: operationType,
+		Payload:   logEntry,
+	}
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		logger.Error("failed to marshal MCP log entry: %v", err)
+		return
+	}
+
+	h.BroadcastMarshaledMessage(data)
+}
+
+// BroadcastUpdatesToClients sends a store update notification to all connected WebSocket clients
+// The tags parameter should match RTK Query tagTypes (e.g., "Providers", "VirtualKeys", "MCPClients")
+func (h *WebSocketHandler) BroadcastUpdatesToClients(tags []string) {
+	message := struct {
+		Type string   `json:"type"`
+		Tags []string `json:"tags"`
+	}{
+		Type: "store_update",
+		Tags: tags,
+	}
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		logger.Error("failed to marshal store update: %v", err)
+		return
+	}
+
+	h.BroadcastMarshaledMessage(data)
+}
+
+// BroadcastEvent sends a typed event to all connected WebSocket clients.
+// Any subsystem can use this to push real-time updates to the frontend.
+func (h *WebSocketHandler) BroadcastEvent(eventType string, data interface{}) {
+	message := struct {
+		Type string      `json:"type"`
+		Data interface{} `json:"data"`
+	}{
+		Type: eventType,
+		Data: data,
+	}
+
+	bytes, err := json.Marshal(message)
+	if err != nil {
+		logger.Error("failed to marshal event %s: %v", eventType, err)
+		return
+	}
+
+	h.BroadcastMarshaledMessage(bytes)
 }
 
 // BroadcastMarshaledMessage sends an adaptive routing update to all connected WebSocket clients

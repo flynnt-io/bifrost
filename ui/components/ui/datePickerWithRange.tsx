@@ -39,6 +39,8 @@ interface DateTimePickerWithRangeProps extends DatePickerWithRangeProps {
 	disabledAfter?: Date;
 	open?: boolean;
 	onOpenChange?: (open: boolean) => void;
+	/** Optional data-testid for the trigger button (e.g. for E2E tests) */
+	triggerTestId?: string;
 }
 
 export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
@@ -115,6 +117,7 @@ export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
 					<Button
 						id="date"
 						variant="outline"
+						data-testid={props.triggerTestId}
 						className={cn(
 							!predefinedPeriod && "w-[360px]",
 							predefinedPeriod && "w-[140px]",
@@ -186,7 +189,7 @@ export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
 										className=""
 										value={timeValue?.from}
 										onChange={(v) => {
-											if (!date || !date.from) return
+											if (!date || !date.from) return;
 											if (v) setTimeValue({ from: v, to: timeValue.to });
 											const from = new Date(date.from);
 											if (v) from.setHours(v.hour, v.minute);
@@ -209,7 +212,7 @@ export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
 										className=""
 										value={timeValue?.to}
 										onChange={(v) => {
-											if (!date || !date.to) return
+											if (!date || !date.to) return;
 											if (v) setTimeValue({ ...timeValue, to: v });
 											const to = new Date(date.to);
 											if (v) to.setHours(v.hour, v.minute);
@@ -230,7 +233,7 @@ export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
 							<div className="flex w-[150px] flex-col gap-1 border-l py-2 pr-3 pl-2">
 								{props.preDefinedPeriods.map((period) => (
 									<Button
-										className={cn("text-md w-full", predefinedPeriod === period.value && "bg-background-brand-dark text-white")}
+										className={cn("w-full text-start text-sm", predefinedPeriod === period.value && "bg-primary text-primary-foreground")}
 										variant="ghost"
 										key={period.value}
 										onClick={(e) => {
@@ -251,11 +254,11 @@ export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
 							<Button
 								className="ml-auto"
 								onClick={(e) => {
-									if (!date || !date.from || !date.to) return
+									if (!date || !date.from || !date.to) return;
 									onTrigger(e, {
 										from: { date: date.from, time: timeValue.from },
 										to: { date: date.to, time: timeValue.to },
-									})
+									});
 								}}
 							>
 								{triggerLabel}

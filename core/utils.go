@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	schemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/core/mcp"
+	"github.com/maximhq/bifrost/core/schemas"
 )
 
 // Define a set of retryable status codes
@@ -47,25 +48,66 @@ var rateLimitPatterns = []string{
 	"concurrent requests limit",
 }
 
+// dynamicallyConfigurableProviders is the list of providers that can be dynamically configured.
+// Excluding providers that require extra configuration (e.g. Ollama, SGL, vLLM).
+var dynamicallyConfigurableProviders = []schemas.ModelProvider{
+	schemas.Anthropic,
+	schemas.Azure,
+	schemas.Bedrock,
+	schemas.Cerebras,
+	schemas.Cohere,
+	schemas.Elevenlabs,
+	schemas.Gemini,
+	schemas.Groq,
+	schemas.HuggingFace,
+	schemas.Mistral,
+	schemas.Nebius,
+	schemas.OpenAI,
+	schemas.OpenRouter,
+	schemas.Parasail,
+	schemas.Perplexity,
+	schemas.Vertex,
+	schemas.XAI,
+}
+
+// isModelRequired returns true if the request type requires a model
+func isModelRequired(reqType schemas.RequestType) bool {
+	return reqType == schemas.TextCompletionRequest || reqType == schemas.TextCompletionStreamRequest || reqType == schemas.ChatCompletionRequest || reqType == schemas.ChatCompletionStreamRequest || reqType == schemas.ResponsesRequest || reqType == schemas.ResponsesStreamRequest || reqType == schemas.SpeechRequest || reqType == schemas.SpeechStreamRequest || reqType == schemas.TranscriptionRequest || reqType == schemas.TranscriptionStreamRequest || reqType == schemas.EmbeddingRequest || reqType == schemas.ImageGenerationRequest || reqType == schemas.ImageGenerationStreamRequest || reqType == schemas.VideoGenerationRequest
+}
+
 // Ptr returns a pointer to the given value.
 func Ptr[T any](v T) *T {
 	return &v
 }
 
 // providerRequiresKey returns true if the given provider requires an API key for authentication.
-// Some providers like Ollama and SGL are keyless and don't require API keys.
+// Some providers like Ollama, SGL, and vLLM are keyless and don't require API keys.
 func providerRequiresKey(providerKey schemas.ModelProvider, customConfig *schemas.CustomProviderConfig) bool {
 	// Keyless custom providers are not allowed for Bedrock.
 	if customConfig != nil && customConfig.IsKeyLess && customConfig.BaseProviderType != schemas.Bedrock {
 		return false
 	}
-	return providerKey != schemas.Ollama && providerKey != schemas.SGL
+	return !IsKeylessProvider(providerKey)
 }
 
 // canProviderKeyValueBeEmpty returns true if the given provider allows the API key to be empty.
 // Some providers like Vertex and Bedrock have their credentials in additional key configs..
 func canProviderKeyValueBeEmpty(providerKey schemas.ModelProvider) bool {
-	return providerKey == schemas.Vertex || providerKey == schemas.Bedrock
+	return providerKey == schemas.Vertex || providerKey == schemas.Bedrock || providerKey == schemas.VLLM
+}
+
+// hasAzureEntraIDCredentials checks if an Azure key has Entra ID (Service Principal) credentials configured.
+// This allows Azure keys to have an empty API key value when using Entra ID authentication.
+func hasAzureEntraIDCredentials(providerType schemas.ModelProvider, key schemas.Key) bool {
+	if providerType != schemas.Azure || key.AzureKeyConfig == nil {
+		return false
+	}
+	return key.AzureKeyConfig.ClientID != nil &&
+		key.AzureKeyConfig.ClientSecret != nil &&
+		key.AzureKeyConfig.TenantID != nil &&
+		key.AzureKeyConfig.ClientID.GetValue() != "" &&
+		key.AzureKeyConfig.ClientSecret.GetValue() != "" &&
+		key.AzureKeyConfig.TenantID.GetValue() != ""
 }
 
 func isKeySkippingAllowed(providerKey schemas.ModelProvider) bool {
@@ -92,10 +134,9 @@ func validateRequest(req *schemas.BifrostRequest) *schemas.BifrostError {
 	if provider == "" {
 		return newBifrostErrorFromMsg("provider is required")
 	}
-	if model == "" {
+	if isModelRequired(req.RequestType) && model == "" {
 		return newBifrostErrorFromMsg("model is required")
 	}
-
 	return nil
 }
 
@@ -143,12 +184,12 @@ func newBifrostErrorFromMsg(message string) *schemas.BifrostError {
 
 // newBifrostMessageChan creates a channel that sends a bifrost response.
 // It is used to send a bifrost response to the client.
-func newBifrostMessageChan(message *schemas.BifrostResponse) chan *schemas.BifrostStream {
-	ch := make(chan *schemas.BifrostStream)
+func newBifrostMessageChan(message *schemas.BifrostResponse) chan *schemas.BifrostStreamChunk {
+	ch := make(chan *schemas.BifrostStreamChunk)
 
 	go func() {
 		defer close(ch)
-		ch <- &schemas.BifrostStream{
+		ch <- &schemas.BifrostStreamChunk{
 			BifrostTextCompletionResponse:      message.TextCompletionResponse,
 			BifrostChatResponse:                message.ChatResponse,
 			BifrostResponsesStreamResponse:     message.ResponsesStreamResponse,
@@ -189,9 +230,56 @@ func IsStandardProvider(providerKey schemas.ModelProvider) bool {
 	return ok
 }
 
+// IsKeylessProvider reports whether providerKey is a keyless provider.
+func IsKeylessProvider(providerKey schemas.ModelProvider) bool {
+	return providerKey == schemas.Ollama || providerKey == schemas.SGL
+}
+
 // IsStreamRequestType returns true if the given request type is a stream request.
 func IsStreamRequestType(reqType schemas.RequestType) bool {
-	return reqType == schemas.TextCompletionStreamRequest || reqType == schemas.ChatCompletionStreamRequest || reqType == schemas.ResponsesStreamRequest || reqType == schemas.SpeechStreamRequest || reqType == schemas.TranscriptionStreamRequest
+	return reqType == schemas.TextCompletionStreamRequest || reqType == schemas.ChatCompletionStreamRequest || reqType == schemas.ResponsesStreamRequest || reqType == schemas.SpeechStreamRequest || reqType == schemas.TranscriptionStreamRequest || reqType == schemas.ImageGenerationStreamRequest || reqType == schemas.ImageEditStreamRequest
+}
+
+func GetTracerFromContext(ctx *schemas.BifrostContext) (schemas.Tracer, string, error) {
+	tracer, ok := ctx.Value(schemas.BifrostContextKeyTracer).(schemas.Tracer)
+	if !ok || tracer == nil {
+		return nil, "", fmt.Errorf("tracer not found in context")
+	}
+	traceID, ok := ctx.Value(schemas.BifrostContextKeyTraceID).(string)
+	if !ok || traceID == "" {
+		return nil, "", fmt.Errorf("traceID not found in context")
+	}
+	return tracer, traceID, nil
+}
+
+// isBatchRequestType returns true if the given request type is a batch API operation.
+func isBatchRequestType(reqType schemas.RequestType) bool {
+	return reqType == schemas.BatchCreateRequest || reqType == schemas.BatchListRequest || reqType == schemas.BatchRetrieveRequest || reqType == schemas.BatchCancelRequest || reqType == schemas.BatchResultsRequest
+}
+
+// isFileRequestType returns true if the given request type is a file API operation.
+func isFileRequestType(reqType schemas.RequestType) bool {
+	return reqType == schemas.FileUploadRequest || reqType == schemas.FileListRequest || reqType == schemas.FileRetrieveRequest || reqType == schemas.FileDeleteRequest || reqType == schemas.FileContentRequest
+}
+
+// isContainerRequestType returns true if the given request type is a container API operation.
+func isContainerRequestType(reqType schemas.RequestType) bool {
+	return reqType == schemas.ContainerCreateRequest || reqType == schemas.ContainerListRequest ||
+		reqType == schemas.ContainerRetrieveRequest || reqType == schemas.ContainerDeleteRequest ||
+		reqType == schemas.ContainerFileCreateRequest || reqType == schemas.ContainerFileListRequest ||
+		reqType == schemas.ContainerFileRetrieveRequest || reqType == schemas.ContainerFileContentRequest ||
+		reqType == schemas.ContainerFileDeleteRequest
+}
+
+// isModellessVideoRequestType returns true if the given request type is a video request that does not require a model.
+func isModellessVideoRequestType(reqType schemas.RequestType) bool {
+	switch reqType {
+	case schemas.VideoRetrieveRequest, schemas.VideoDownloadRequest, schemas.VideoListRequest,
+		schemas.VideoDeleteRequest, schemas.VideoRemixRequest:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsFinalChunk returns true if the given context is a final chunk.
@@ -218,7 +306,6 @@ func GetResponseFields(result *schemas.BifrostResponse, err *schemas.BifrostErro
 		extraFields := result.GetExtraFields()
 		return extraFields.RequestType, extraFields.Provider, extraFields.ModelRequested
 	}
-
 	return err.ExtraFields.RequestType, err.ExtraFields.Provider, err.ExtraFields.ModelRequested
 }
 
@@ -293,6 +380,16 @@ func GetIntFromContext(ctx context.Context, key any) int {
 		}
 	}
 	return 0
+}
+
+// GetBoolFromContext safely extracts a bool value from context
+func GetBoolFromContext(ctx context.Context, key any) bool {
+	if value := ctx.Value(key); value != nil {
+		if boolValue, ok := value.(bool); ok {
+			return boolValue
+		}
+	}
+	return false
 }
 
 // RedactSensitiveString redacts sensitive information in a string
@@ -381,4 +478,14 @@ func isPrivateIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// sanitizeSpanName sanitizes a span name to remove capital letters and spaces to make it a valid span name
+func sanitizeSpanName(name string) string {
+	return strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+}
+
+// IsCodemodeTool returns true if the given tool name is a codemode tool.
+func IsCodemodeTool(toolName string) bool {
+	return mcp.IsCodeModeTool(toolName)
 }

@@ -122,8 +122,16 @@ if ! grep -q "\"$route\"" docs/docs.json; then
       // Compare each part (major, minor, patch, pre-release, etc.)
       const maxLength = Math.max(partsA.length, partsB.length);
       for (let i = 0; i < maxLength; i++) {
-        const partA = partsA[i] !== undefined ? partsA[i] : 0;
-        const partB = partsB[i] !== undefined ? partsB[i] : 0;
+        // Release vs prerelease: release is newer (no suffix > has suffix)
+        if (partsA[i] === undefined && partsB[i] !== undefined) {
+          return -1; // A (release) comes first in descending order
+        }
+        if (partsB[i] === undefined && partsA[i] !== undefined) {
+          return 1; // B (release) comes first in descending order
+        }
+        
+        const partA = partsA[i];
+        const partB = partsB[i];
         
         // If both are numbers, compare numerically
         if (typeof partA === 'number' && typeof partB === 'number') {
@@ -131,10 +139,20 @@ if ! grep -q "\"$route\"" docs/docs.json; then
             return partB - partA; // Descending order
           }
         } else {
-          // String comparison for pre-release versions
+          // Handle prerelease strings with numeric suffixes (e.g., 'prerelease10')
           const strA = String(partA);
           const strB = String(partB);
-          if (strA !== strB) {
+          const matchA = strA.match(/^([a-zA-Z]+)(\\d+)$/);
+          const matchB = strB.match(/^([a-zA-Z]+)(\\d+)$/);
+          
+          if (matchA && matchB && matchA[1] === matchB[1]) {
+            // Same prefix, compare numbers numerically
+            const numA = parseInt(matchA[2], 10);
+            const numB = parseInt(matchB[2], 10);
+            if (numA !== numB) {
+              return numB - numA; // Descending order
+            }
+          } else if (strA !== strB) {
             return strB.localeCompare(strA); // Descending order
           }
         }
@@ -236,7 +254,18 @@ if ! grep -q "\"$route\"" docs/docs.json; then
 fi
 
 # Pulling again before committing
-git pull origin main
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+  # In detached HEAD state (common in CI), use GITHUB_REF_NAME or default to main
+  CURRENT_BRANCH="${GITHUB_REF_NAME:-main}"
+fi
+
+echo "Pulling latest changes from origin/$CURRENT_BRANCH..."
+if ! git pull origin "$CURRENT_BRANCH"; then
+  echo "❌ Error: git pull origin $CURRENT_BRANCH failed"
+  exit 1
+fi
+
 # Commit and push changes
 git add docs/changelogs/$VERSION.mdx
 git add docs/docs.json
@@ -247,4 +276,4 @@ done
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git commit -m "Adds changelog for $VERSION --skip-pipeline"
-git push origin main
+git push origin "$CURRENT_BRANCH"

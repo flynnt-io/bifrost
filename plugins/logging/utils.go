@@ -10,6 +10,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/framework/streaming"
 )
 
 // KeyPair represents an ID-Name pair for keys
@@ -26,6 +27,18 @@ type LogManager interface {
 	// GetStats calculates statistics for logs matching the given filters
 	GetStats(ctx context.Context, filters *logstore.SearchFilters) (*logstore.SearchStats, error)
 
+	// GetHistogram returns time-bucketed request counts for the given filters
+	GetHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.HistogramResult, error)
+
+	// GetTokenHistogram returns time-bucketed token usage for the given filters
+	GetTokenHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.TokenHistogramResult, error)
+
+	// GetCostHistogram returns time-bucketed cost data with model breakdown for the given filters
+	GetCostHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.CostHistogramResult, error)
+
+	// GetModelHistogram returns time-bucketed model usage with success/error breakdown for the given filters
+	GetModelHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ModelHistogramResult, error)
+
 	// Get the number of dropped requests
 	GetDroppedRequests(ctx context.Context) int64
 
@@ -38,11 +51,39 @@ type LogManager interface {
 	// GetAvailableVirtualKeys returns all unique virtual key ID-Name pairs from logs
 	GetAvailableVirtualKeys(ctx context.Context) []KeyPair
 
+	// GetAvailableRoutingRules returns all unique routing rule ID-Name pairs from logs
+	GetAvailableRoutingRules(ctx context.Context) []KeyPair
+
+	// GetAvailableRoutingEngines returns all unique routing engine types from logs
+	GetAvailableRoutingEngines(ctx context.Context) []string
+
 	// DeleteLog deletes a log entry by its ID
 	DeleteLog(ctx context.Context, id string) error
 
 	// DeleteLogs deletes multiple log entries by their IDs
 	DeleteLogs(ctx context.Context, ids []string) error
+
+	// RecalculateCosts recomputes missing costs for logs matching the filters
+	RecalculateCosts(ctx context.Context, filters *logstore.SearchFilters, limit int) (*RecalculateCostResult, error)
+
+	// MCP Tool Log methods
+	// SearchMCPToolLogs searches for MCP tool log entries based on filters and pagination
+	SearchMCPToolLogs(ctx context.Context, filters *logstore.MCPToolLogSearchFilters, pagination *logstore.PaginationOptions) (*logstore.MCPToolLogSearchResult, error)
+
+	// GetMCPToolLogStats calculates statistics for MCP tool logs matching the given filters
+	GetMCPToolLogStats(ctx context.Context, filters *logstore.MCPToolLogSearchFilters) (*logstore.MCPToolLogStats, error)
+
+	// GetAvailableToolNames returns all unique tool names from MCP tool logs
+	GetAvailableToolNames(ctx context.Context) ([]string, error)
+
+	// GetAvailableServerLabels returns all unique server labels from MCP tool logs
+	GetAvailableServerLabels(ctx context.Context) ([]string, error)
+
+	// GetAvailableMCPVirtualKeys returns all unique virtual key ID-Name pairs from MCP tool logs
+	GetAvailableMCPVirtualKeys(ctx context.Context) []KeyPair
+
+	// DeleteMCPToolLogs deletes multiple MCP tool log entries by their IDs
+	DeleteMCPToolLogs(ctx context.Context, ids []string) error
 }
 
 // PluginLogManager implements LogManager interface wrapping the plugin
@@ -64,6 +105,34 @@ func (p *PluginLogManager) GetStats(ctx context.Context, filters *logstore.Searc
 	return p.plugin.GetStats(ctx, *filters)
 }
 
+func (p *PluginLogManager) GetHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.HistogramResult, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.GetHistogram(ctx, *filters, bucketSizeSeconds)
+}
+
+func (p *PluginLogManager) GetTokenHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.TokenHistogramResult, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.GetTokenHistogram(ctx, *filters, bucketSizeSeconds)
+}
+
+func (p *PluginLogManager) GetCostHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.CostHistogramResult, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.GetCostHistogram(ctx, *filters, bucketSizeSeconds)
+}
+
+func (p *PluginLogManager) GetModelHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ModelHistogramResult, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.GetModelHistogram(ctx, *filters, bucketSizeSeconds)
+}
+
 func (p *PluginLogManager) GetDroppedRequests(ctx context.Context) int64 {
 	return p.plugin.droppedRequests.Load()
 }
@@ -83,6 +152,16 @@ func (p *PluginLogManager) GetAvailableVirtualKeys(ctx context.Context) []KeyPai
 	return p.plugin.GetAvailableVirtualKeys(ctx)
 }
 
+// GetAvailableRoutingRules returns all unique routing rule ID-Name pairs from logs
+func (p *PluginLogManager) GetAvailableRoutingRules(ctx context.Context) []KeyPair {
+	return p.plugin.GetAvailableRoutingRules(ctx)
+}
+
+// GetAvailableRoutingEngines returns all unique routing engine types from logs
+func (p *PluginLogManager) GetAvailableRoutingEngines(ctx context.Context) []string {
+	return p.plugin.GetAvailableRoutingEngines(ctx)
+}
+
 // DeleteLog deletes a log from the log store
 func (p *PluginLogManager) DeleteLog(ctx context.Context, id string) error {
 	if p.plugin == nil || p.plugin.store == nil {
@@ -97,6 +176,61 @@ func (p *PluginLogManager) DeleteLogs(ctx context.Context, ids []string) error {
 		return fmt.Errorf("log store not initialized")
 	}
 	return p.plugin.store.DeleteLogs(ctx, ids)
+}
+
+func (p *PluginLogManager) RecalculateCosts(ctx context.Context, filters *logstore.SearchFilters, limit int) (*RecalculateCostResult, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.RecalculateCosts(ctx, *filters, limit)
+}
+
+// SearchMCPToolLogs searches for MCP tool log entries based on filters and pagination
+func (p *PluginLogManager) SearchMCPToolLogs(ctx context.Context, filters *logstore.MCPToolLogSearchFilters, pagination *logstore.PaginationOptions) (*logstore.MCPToolLogSearchResult, error) {
+	if filters == nil || pagination == nil {
+		return nil, fmt.Errorf("filters and pagination cannot be nil")
+	}
+	return p.plugin.store.SearchMCPToolLogs(ctx, *filters, *pagination)
+}
+
+// GetMCPToolLogStats calculates statistics for MCP tool logs matching the given filters
+func (p *PluginLogManager) GetMCPToolLogStats(ctx context.Context, filters *logstore.MCPToolLogSearchFilters) (*logstore.MCPToolLogStats, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.store.GetMCPToolLogStats(ctx, *filters)
+}
+
+// GetAvailableToolNames returns all unique tool names from MCP tool logs
+func (p *PluginLogManager) GetAvailableToolNames(ctx context.Context) ([]string, error) {
+	if p == nil || p.plugin == nil || p.plugin.store == nil {
+		return []string{}, nil
+	}
+	return p.plugin.store.GetAvailableToolNames(ctx)
+}
+
+// GetAvailableServerLabels returns all unique server labels from MCP tool logs
+func (p *PluginLogManager) GetAvailableServerLabels(ctx context.Context) ([]string, error) {
+	if p == nil || p.plugin == nil || p.plugin.store == nil {
+		return []string{}, nil
+	}
+	return p.plugin.store.GetAvailableServerLabels(ctx)
+}
+
+// GetAvailableMCPVirtualKeys returns all unique virtual key ID-Name pairs from MCP tool logs
+func (p *PluginLogManager) GetAvailableMCPVirtualKeys(ctx context.Context) []KeyPair {
+	if p == nil || p.plugin == nil {
+		return []KeyPair{}
+	}
+	return p.plugin.GetAvailableMCPVirtualKeys(ctx)
+}
+
+// DeleteMCPToolLogs deletes multiple MCP tool log entries by their IDs
+func (p *PluginLogManager) DeleteMCPToolLogs(ctx context.Context, ids []string) error {
+	if p.plugin == nil || p.plugin.store == nil {
+		return fmt.Errorf("log store not initialized")
+	}
+	return p.plugin.store.DeleteMCPToolLogs(ctx, ids)
 }
 
 // GetPluginLogManager returns a LogManager interface for this plugin
@@ -192,25 +326,104 @@ func (p *LoggerPlugin) extractInputHistory(request *schemas.BifrostRequest) ([]s
 			},
 		}, []schemas.ResponsesMessage{}
 	}
+	if request.RerankRequest != nil {
+		query := request.RerankRequest.Query
+		return []schemas.ChatMessage{
+			{
+				Role: schemas.ChatMessageRoleUser,
+				Content: &schemas.ChatMessageContent{
+					ContentStr: &query,
+				},
+			},
+		}, []schemas.ResponsesMessage{}
+	}
+	if request.CountTokensRequest != nil && len(request.CountTokensRequest.Input) > 0 {
+		return []schemas.ChatMessage{}, request.CountTokensRequest.Input
+	}
 	return []schemas.ChatMessage{}, []schemas.ResponsesMessage{}
 }
 
-// getStringFromContext safely extracts a string value from context
-func getStringFromContext(ctx context.Context, key any) string {
-	if value := ctx.Value(key); value != nil {
-		if str, ok := value.(string); ok {
-			return str
-		}
+// convertToProcessedStreamResponse converts a StreamAccumulatorResult to ProcessedStreamResponse
+// for use with the logging plugin's streaming log update functionality.
+func convertToProcessedStreamResponse(result *schemas.StreamAccumulatorResult, requestType schemas.RequestType) *streaming.ProcessedStreamResponse {
+	if result == nil {
+		return nil
 	}
-	return ""
+
+	// Determine stream type from request type
+	var streamType streaming.StreamType
+	switch requestType {
+	case schemas.TextCompletionStreamRequest:
+		streamType = streaming.StreamTypeText
+	case schemas.ChatCompletionStreamRequest:
+		streamType = streaming.StreamTypeChat
+	case schemas.ResponsesStreamRequest:
+		streamType = streaming.StreamTypeResponses
+	case schemas.SpeechStreamRequest:
+		streamType = streaming.StreamTypeAudio
+	case schemas.TranscriptionStreamRequest:
+		streamType = streaming.StreamTypeTranscription
+	case schemas.ImageGenerationStreamRequest:
+		streamType = streaming.StreamTypeImage
+	default:
+		streamType = streaming.StreamTypeChat
+	}
+
+	// Build accumulated data
+	data := &streaming.AccumulatedData{
+		RequestID:             result.RequestID,
+		Model:                 result.Model,
+		Status:                result.Status,
+		Stream:                true,
+		Latency:               result.Latency,
+		TimeToFirstToken:      result.TimeToFirstToken,
+		OutputMessage:         result.OutputMessage,
+		OutputMessages:        result.OutputMessages,
+		ErrorDetails:          result.ErrorDetails,
+		TokenUsage:            result.TokenUsage,
+		Cost:                  result.Cost,
+		AudioOutput:           result.AudioOutput,
+		TranscriptionOutput:   result.TranscriptionOutput,
+		ImageGenerationOutput: result.ImageGenerationOutput,
+		FinishReason:          result.FinishReason,
+		RawResponse:           result.RawResponse,
+	}
+
+	// Handle tool calls if present
+	if result.OutputMessage != nil && result.OutputMessage.ChatAssistantMessage != nil {
+		data.ToolCalls = result.OutputMessage.ChatAssistantMessage.ToolCalls
+	}
+
+	resp := &streaming.ProcessedStreamResponse{
+		RequestID:  result.RequestID,
+		StreamType: streamType,
+		Provider:   result.Provider,
+		Model:      result.Model,
+		Data:       data,
+	}
+
+	if result.RawRequest != nil {
+		rawReq := result.RawRequest
+		resp.RawRequest = &rawReq
+	}
+
+	return resp
 }
 
-// getIntFromContext safely extracts an int value from context
-func getIntFromContext(ctx context.Context, key any) int {
-	if value := ctx.Value(key); value != nil {
-		if intVal, ok := value.(int); ok {
-			return intVal
-		}
+// formatRoutingEngineLogs formats routing engine logs into a human-readable string.
+// Format: [timestamp] [engine] - message
+// Parameters:
+//   - logs: Slice of routing engine log entries
+//
+// Returns:
+//   - string: Formatted log string (empty string if no logs)
+func formatRoutingEngineLogs(logs []schemas.RoutingEngineLogEntry) string {
+	if len(logs) == 0 {
+		return ""
 	}
-	return 0
+	var sb strings.Builder
+	for _, log := range logs {
+		sb.WriteString(fmt.Sprintf("[%d] [%s] - %s\n", log.Timestamp, log.Engine, log.Message))
+	}
+	return sb.String()
 }

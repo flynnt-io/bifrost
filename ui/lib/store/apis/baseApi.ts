@@ -141,6 +141,7 @@ export const baseApi = createApi({
 	baseQuery: baseQueryWithErrorHandling,
 	tagTypes: [
 		"Logs",
+		"MCPLogs",
 		"Providers",
 		"MCPClients",
 		"Config",
@@ -155,6 +156,9 @@ export const baseApi = createApi({
 		"HealthCheck",
 		"DBKeys",
 		"Models",
+		"BaseModels",
+		"ModelConfigs",
+		"ProviderGovernance",
 		"Plugins",
 		"SCIMProviders",
 		"User",
@@ -166,13 +170,19 @@ export const baseApi = createApi({
 		"Resources",
 		"Operations",
 		"Permissions",
+		"APIKeys",
+		"OAuth2Config",
+		"RoutingRules",
+		"MCPToolGroups",
+		"AuditLogs",
+		"UserGovernance",
 	],
 	endpoints: () => ({}),
 });
 
 // Helper function to extract error message from RTK Query error
 export const getErrorMessage = (error: unknown): string => {
-	if(error === undefined || error === null) {
+	if (error === undefined || error === null) {
 		return "An unexpected error occurred";
 	}
 	if (error instanceof Error) {

@@ -26,17 +26,36 @@ TAG_NAME="framework/${VERSION}"
 echo "📦 Releasing framework $VERSION..."
 
 # Ensure we have the latest version
-git pull origin
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+  # In detached HEAD state (common in CI), use GITHUB_REF_NAME or default to main
+  CURRENT_BRANCH="${GITHUB_REF_NAME:-main}"
+fi
+
+echo "Pulling latest changes from origin/$CURRENT_BRANCH..."
+if ! git pull origin "$CURRENT_BRANCH"; then
+  echo "❌ Error: git pull origin $CURRENT_BRANCH failed"
+  exit 1
+fi
+
+# Check for merge conflicts or unexpected working-tree changes
+if ! git diff --quiet; then
+  echo "❌ Error: Unstaged changes detected after pull (possible merge conflict)"
+  git status --short
+  exit 1
+fi
+
+if ! git diff --cached --quiet; then
+  echo "❌ Error: Staged changes detected after pull (unexpected state)"
+  git status --short
+  exit 1
+fi
+
 # Fetching all tags
 git fetch --tags >/dev/null 2>&1 || true
 
-# Get latest core version
-LATEST_CORE_TAG=$(git tag -l "core/v*" | sort -V | tail -1)
-if [ -z "$LATEST_CORE_TAG" ]; then
-  CORE_VERSION="v$(tr -d '\n\r' < core/version)"
-else
-  CORE_VERSION=${LATEST_CORE_TAG#core/}
-fi
+# Get core version from version file
+CORE_VERSION="v$(tr -d '\n\r' < core/version)"
 
 
 # Before starting the test, we need to update hello-word plugin core dependencies
@@ -63,45 +82,7 @@ git add go.mod go.sum
 # Validate framework build
 echo "🔨 Validating framework build..."
 go build ./...
-# Starting dependencies of framework tests
-echo "🔧 Starting dependencies of framework tests..."
-# Use docker compose (v2) if available, fallback to docker-compose (v1)
-if command -v docker-compose >/dev/null 2>&1; then
-  docker-compose -f ../tests/docker-compose.yml up -d
-elif docker compose version >/dev/null 2>&1; then
-  docker compose -f ../tests/docker-compose.yml up -d
-else
-  echo "❌ Neither docker-compose nor docker compose is available"
-  exit 1
-fi
-sleep 20
-go test -coverprofile=coverage.txt -coverpkg=./... ./...
-
-# Upload coverage to Codecov
-if [ -n "${CODECOV_TOKEN:-}" ]; then
-  echo "📊 Uploading coverage to Codecov..."
-  curl -Os https://uploader.codecov.io/latest/linux/codecov
-  chmod +x codecov
-  ./codecov -t "$CODECOV_TOKEN" -f coverage.txt -F framework
-  rm -f codecov coverage.txt
-else
-  echo "ℹ️ CODECOV_TOKEN not set, skipping coverage upload"
-  rm -f coverage.txt
-fi
-
-# Shutting down dependencies
-echo "🔧 Shutting down dependencies of framework tests..."
-# Use docker compose (v2) if available, fallback to docker-compose (v1)
-if command -v docker-compose >/dev/null 2>&1; then
-  docker-compose -f ../tests/docker-compose.yml down
-elif docker compose version >/dev/null 2>&1; then
-  docker compose -f ../tests/docker-compose.yml down
-else
-  echo "❌ Neither docker-compose nor docker compose is available"
-  exit 1
-fi
 cd ..
-
 echo "✅ Framework build validation successful"
 
 # Check if there are any changes to commit
@@ -111,6 +92,10 @@ if ! git diff --cached --quiet; then
   git commit -m "framework: bump core to $CORE_VERSION --skip-pipeline"
   # Push the bump so go.mod/go.sum changes are recorded on the branch
   CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+    # In detached HEAD state (common in CI), use GITHUB_REF_NAME or default to main
+    CURRENT_BRANCH="${GITHUB_REF_NAME:-main}"
+  fi
   git push origin "$CURRENT_BRANCH"
   echo "🔧 Pushed framework bump to $CURRENT_BRANCH"
 else
@@ -136,7 +121,7 @@ if [[ "$PREV_TAG" == "$TAG_NAME" ]]; then
 fi
 echo "🔍 Previous tag: $PREV_TAG"
 
-# Get message of the tag  
+# Get message of the tag
 echo "🔍 Getting previous tag message..."
 PREV_CHANGELOG=$(git tag -l --format='%(contents)' "$PREV_TAG")
 echo "📝 Previous changelog body: $PREV_CHANGELOG"
@@ -191,7 +176,7 @@ else
     --title "$TITLE" \
     --notes "$BODY" \
     ${PRERELEASE_FLAG} ${LATEST_FLAG}
-    
+
 fi
 
 echo "✅ Framework released successfully"

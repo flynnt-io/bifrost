@@ -5,10 +5,24 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
+
+	"cloud.google.com/go/civil"
+	"github.com/bytedance/sonic"
+	"github.com/maximhq/bifrost/core/schemas"
 )
+
+const MinReasoningMaxTokens = 1         // Minimum max tokens for reasoning - used for estimation of effort level
+const DefaultCompletionMaxTokens = 8192 // Default max output tokens for Gemini - used for relative reasoning max token calculation
+const DefaultReasoningMinBudget = 1024  // Default minimum reasoning budget for Gemini
+const DynamicReasoningBudget = -1       // Special value for dynamic reasoning budget in Gemini
+
+// thoughtSignatureSeparator is used to separate the base ID from the thought signature in tool IDs
+const thoughtSignatureSeparator = "_ts_"
 
 type Role string
 
@@ -67,9 +81,28 @@ type GeminiGenerationRequest struct {
 	IsEmbedding       bool                     `json:"-"` // Internal field to track if this is an embedding request
 	IsTranscription   bool                     `json:"-"` // Internal field to track if this is a transcription request
 	IsSpeech          bool                     `json:"-"` // Internal field to track if this is a speech request
+	IsImageGeneration bool                     `json:"-"` // Internal field to track if this is an image generation request
+	IsImageEdit       bool                     `json:"-"` // Internal field to track if this is an image edit request
+	IsCountTokens     bool                     `json:"-"` // Internal field to track if this is a count tokens request
+
+	// Imagen-specific fields for :predict endpoint
+	Instances  []ImagenInstance        `json:"instances,omitempty"`
+	Parameters *GeminiImagenParameters `json:"parameters,omitempty"`
 
 	// Bifrost specific field (only parsed when converting from Provider -> Bifrost request)
-	Fallbacks []string `json:"fallbacks,omitempty"`
+	Fallbacks   []string               `json:"fallbacks,omitempty"`
+	ExtraParams map[string]interface{} `json:"-"` // Optional: Extra parameters
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (r *GeminiGenerationRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
+}
+
+// ImagenInstance represents a single instance in an Imagen request
+type ImagenInstance struct {
+	Prompt          string                 `json:"prompt,omitempty"`
+	ReferenceImages []ImagenReferenceImage `json:"referenceImages,omitempty"`
 }
 
 // IsStreamingRequested implements the StreamingRequest interface
@@ -86,6 +119,40 @@ type SafetySetting struct {
 	Category string `json:"category,omitempty"`
 	// Required. The harm block threshold.
 	Threshold string `json:"threshold,omitempty"`
+}
+
+// SafeExtractSafetySettings safely extracts []SafetySetting from an interface{} with type checking.
+// Handles both direct []SafetySetting and JSON-deserialized []interface{} cases.
+func SafeExtractSafetySettings(value interface{}) ([]SafetySetting, bool) {
+	if value == nil {
+		return nil, false
+	}
+	switch v := value.(type) {
+	case []SafetySetting:
+		return v, true
+	case []interface{}:
+		settings := make([]SafetySetting, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				setting := SafetySetting{}
+				if method, ok := m["method"].(string); ok {
+					setting.Method = method
+				}
+				if category, ok := m["category"].(string); ok {
+					setting.Category = category
+				}
+				if threshold, ok := m["threshold"].(string); ok {
+					setting.Threshold = threshold
+				}
+				settings = append(settings, setting)
+			} else {
+				return nil, false
+			}
+		}
+		return settings, true
+	default:
+		return nil, false
+	}
 }
 
 // FunctionCallingConfig represents function calling configuration.
@@ -217,10 +284,14 @@ type Interval struct {
 }
 
 func (i *Interval) UnmarshalJSON(data []byte) error {
+	// Try both camelCase and snake_case
 	type Alias Interval
 	aux := &struct {
 		StartTime *time.Time `json:"startTime,omitempty"`
 		EndTime   *time.Time `json:"endTime,omitempty"`
+		// snake_case alternatives
+		StartTimeSnake *time.Time `json:"start_time,omitempty"`
+		EndTimeSnake   *time.Time `json:"end_time,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(i),
@@ -230,12 +301,17 @@ func (i *Interval) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	// Prefer camelCase, fallback to snake_case
 	if !reflect.ValueOf(aux.StartTime).IsZero() {
 		i.StartTime = time.Time(*aux.StartTime)
+	} else if !reflect.ValueOf(aux.StartTimeSnake).IsZero() {
+		i.StartTime = time.Time(*aux.StartTimeSnake)
 	}
 
 	if !reflect.ValueOf(aux.EndTime).IsZero() {
 		i.EndTime = time.Time(*aux.EndTime)
+	} else if !reflect.ValueOf(aux.EndTimeSnake).IsZero() {
+		i.EndTime = time.Time(*aux.EndTimeSnake)
 	}
 
 	return nil
@@ -270,6 +346,33 @@ type GoogleSearch struct {
 	// Optional. List of domains to be excluded from the search results.
 	// The default limit is 2000 domains.
 	ExcludeDomains []string `json:"excludeDomains,omitempty"`
+}
+
+// UnmarshalJSON handles both camelCase and snake_case
+func (g *GoogleSearch) UnmarshalJSON(data []byte) error {
+	type Alias GoogleSearch
+	aux := &struct {
+		*Alias
+		// snake_case alternatives
+		TimeRangeFilterSnake *Interval `json:"time_range_filter,omitempty"`
+		ExcludeDomainsSnake  []string  `json:"exclude_domains,omitempty"`
+	}{
+		Alias: (*Alias)(g),
+	}
+
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	// Use snake_case if camelCase wasn't provided
+	if g.TimeRangeFilter == nil && aux.TimeRangeFilterSnake != nil {
+		g.TimeRangeFilter = aux.TimeRangeFilterSnake
+	}
+	if len(g.ExcludeDomains) == 0 && len(aux.ExcludeDomainsSnake) > 0 {
+		g.ExcludeDomains = aux.ExcludeDomainsSnake
+	}
+
+	return nil
 }
 
 // DynamicRetrievalConfig describes the options to customize dynamic retrieval.
@@ -626,6 +729,57 @@ type Tool struct {
 	CodeExecution *ToolCodeExecution `json:"codeExecution,omitempty"`
 }
 
+// UnmarshalJSON handles both camelCase and snake_case
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	type Alias Tool
+	aux := &struct {
+		*Alias
+		// snake_case alternatives for the most commonly used fields
+		FunctionDeclarationsSnake  []*FunctionDeclaration `json:"function_declarations,omitempty"`
+		GoogleSearchSnake          *GoogleSearch          `json:"google_search,omitempty"`
+		GoogleSearchRetrievalSnake *GoogleSearchRetrieval `json:"google_search_retrieval,omitempty"`
+		EnterpriseWebSearchSnake   *EnterpriseWebSearch   `json:"enterprise_web_search,omitempty"`
+		GoogleMapsSnake            *GoogleMaps            `json:"google_maps,omitempty"`
+		URLContextSnake            *URLContext            `json:"url_context,omitempty"`
+		ComputerUseSnake           *ToolComputerUse       `json:"computer_use,omitempty"`
+		CodeExecutionSnake         *ToolCodeExecution     `json:"code_execution,omitempty"`
+	}{
+		Alias: (*Alias)(t),
+	}
+
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	// Use snake_case if camelCase wasn't provided
+	if t.FunctionDeclarations == nil && aux.FunctionDeclarationsSnake != nil {
+		t.FunctionDeclarations = aux.FunctionDeclarationsSnake
+	}
+	if t.GoogleSearch == nil && aux.GoogleSearchSnake != nil {
+		t.GoogleSearch = aux.GoogleSearchSnake
+	}
+	if t.GoogleSearchRetrieval == nil && aux.GoogleSearchRetrievalSnake != nil {
+		t.GoogleSearchRetrieval = aux.GoogleSearchRetrievalSnake
+	}
+	if t.EnterpriseWebSearch == nil && aux.EnterpriseWebSearchSnake != nil {
+		t.EnterpriseWebSearch = aux.EnterpriseWebSearchSnake
+	}
+	if t.GoogleMaps == nil && aux.GoogleMapsSnake != nil {
+		t.GoogleMaps = aux.GoogleMapsSnake
+	}
+	if t.URLContext == nil && aux.URLContextSnake != nil {
+		t.URLContext = aux.URLContextSnake
+	}
+	if t.ComputerUse == nil && aux.ComputerUseSnake != nil {
+		t.ComputerUse = aux.ComputerUseSnake
+	}
+	if t.CodeExecution == nil && aux.CodeExecutionSnake != nil {
+		t.CodeExecution = aux.CodeExecutionSnake
+	}
+
+	return nil
+}
+
 // GenerationConfig represents generation configuration. You can find API default values and more details at https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#generationconfig
 // and https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/content-generation-parameters.
 type GenerationConfig struct {
@@ -907,15 +1061,74 @@ type GenerationConfigThinkingConfig struct {
 	IncludeThoughts bool `json:"includeThoughts,omitempty"`
 	// Optional. Indicates the thinking budget in tokens.
 	ThinkingBudget *int32 `json:"thinkingBudget,omitempty"`
+
+	// Optional. Indicates the thinking level.
+	ThinkingLevel *string `json:"thinkingLevel,omitempty"`
+}
+
+// Gemini API supports Camel case but genai sdk sends thinking fields as snake_case
+// UnmarshalJSON implements custom JSON unmarshaling to support both camelCase and snake_case
+func (tc *GenerationConfigThinkingConfig) UnmarshalJSON(data []byte) error {
+	// Define an auxiliary struct with both camelCase and snake_case tags
+	type Alias struct {
+		IncludeThoughts      *bool   `json:"includeThoughts"`
+		IncludeThoughtsSnake *bool   `json:"include_thoughts"`
+		ThinkingBudget       *int32  `json:"thinkingBudget"`
+		ThinkingBudgetSnake  *int32  `json:"thinking_budget"`
+		ThinkingLevel        *string `json:"thinkingLevel"`
+		ThinkingLevelSnake   *string `json:"thinking_level"`
+	}
+
+	var aux Alias
+	if err := sonic.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	// Prefer camelCase, fall back to snake_case
+	if aux.IncludeThoughts != nil {
+		tc.IncludeThoughts = *aux.IncludeThoughts
+	} else if aux.IncludeThoughtsSnake != nil {
+		tc.IncludeThoughts = *aux.IncludeThoughtsSnake
+	}
+
+	if aux.ThinkingBudget != nil {
+		tc.ThinkingBudget = aux.ThinkingBudget
+	} else if aux.ThinkingBudgetSnake != nil {
+		tc.ThinkingBudget = aux.ThinkingBudgetSnake
+	}
+
+	if aux.ThinkingLevel != nil {
+		tc.ThinkingLevel = aux.ThinkingLevel
+	} else if aux.ThinkingLevelSnake != nil {
+		tc.ThinkingLevel = aux.ThinkingLevelSnake
+	}
+
+	return nil
+}
+
+type GeminiBatchEmbeddingRequest struct {
+	Requests    []GeminiEmbeddingRequest `json:"requests,omitempty"`
+	ExtraParams map[string]interface{}   `json:"-"` // Optional: Extra parameters
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (r *GeminiBatchEmbeddingRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
 }
 
 // GeminiEmbeddingRequest represents a single embedding request in a batch.
 type GeminiEmbeddingRequest struct {
-	Content              *Content `json:"content,omitempty"`
-	TaskType             *string  `json:"taskType,omitempty"`
-	Title                *string  `json:"title,omitempty"`
-	OutputDimensionality *int     `json:"outputDimensionality,omitempty"`
-	Model                string   `json:"model,omitempty"`
+	Content              *Content               `json:"content,omitempty"`
+	TaskType             *string                `json:"taskType,omitempty"`
+	Title                *string                `json:"title,omitempty"`
+	OutputDimensionality *int                   `json:"outputDimensionality,omitempty"`
+	Model                string                 `json:"model,omitempty"`
+	ExtraParams          map[string]interface{} `json:"-"` // Optional: Extra parameters
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (r *GeminiEmbeddingRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
 }
 
 // Content contains the multi-part content of a message.
@@ -959,19 +1172,69 @@ type Part struct {
 	Text string `json:"text,omitempty"`
 }
 
+// UnmarshalJSON implements custom JSON unmarshaling for Part.
+// This handles the thoughtSignature field which can be sent as a base64-encoded string from the Google GenAI SDK.
+func (p *Part) UnmarshalJSON(data []byte) error {
+	type PartAlias struct {
+		VideoMetadata       *VideoMetadata       `json:"videoMetadata,omitempty"`
+		Thought             bool                 `json:"thought,omitempty"`
+		InlineData          *Blob                `json:"inlineData,omitempty"`
+		FileData            *FileData            `json:"fileData,omitempty"`
+		ThoughtSignature    string               `json:"thoughtSignature,omitempty"`
+		CodeExecutionResult *CodeExecutionResult `json:"codeExecutionResult,omitempty"`
+		ExecutableCode      *ExecutableCode      `json:"executableCode,omitempty"`
+		FunctionCall        *FunctionCall        `json:"functionCall,omitempty"`
+		FunctionResponse    *FunctionResponse    `json:"functionResponse,omitempty"`
+		Text                string               `json:"text,omitempty"`
+	}
+
+	var aux PartAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	p.VideoMetadata = aux.VideoMetadata
+	p.Thought = aux.Thought
+	p.InlineData = aux.InlineData
+	p.FileData = aux.FileData
+	p.CodeExecutionResult = aux.CodeExecutionResult
+	p.ExecutableCode = aux.ExecutableCode
+	p.FunctionCall = aux.FunctionCall
+	p.FunctionResponse = aux.FunctionResponse
+	p.Text = aux.Text
+
+	if aux.ThoughtSignature != "" {
+		// Convert URL-safe base64 to standard base64
+		standardBase64 := strings.ReplaceAll(strings.ReplaceAll(aux.ThoughtSignature, "_", "/"), "-", "+")
+		// Add padding if necessary
+		switch len(standardBase64) % 4 {
+		case 2:
+			standardBase64 += "=="
+		case 3:
+			standardBase64 += "="
+		}
+		decoded, err := base64.StdEncoding.DecodeString(standardBase64)
+		if err != nil {
+			return fmt.Errorf("failed to decode base64 thoughtSignature: %v", err)
+		}
+		p.ThoughtSignature = decoded
+	}
+
+	return nil
+}
+
 // Blob represents content blob.
 type Blob struct {
 	// Optional. Display name of the blob. Used to provide a label or filename to distinguish
 	// blobs. This field is not currently used in the Gemini GenerateContent calls.
 	DisplayName string `json:"displayName,omitempty"`
-	// Required. Raw bytes.
-	Data []byte `json:"data,omitempty"`
+	// Required. Base64-encoded string.
+	Data string `json:"data,omitempty"`
 	// Required. The IANA standard MIME type of the source data.
 	MIMEType string `json:"mimeType,omitempty"`
 }
 
-// UnmarshalJSON implements custom JSON unmarshaling for Blob.
-// This handles the data field which can be sent as a base64-encoded string from the Google GenAI SDK.
+// UnmarshalJSON custom unmarshaler for Blob to handle URL-safe base64
 func (b *Blob) UnmarshalJSON(data []byte) error {
 	type BlobAlias struct {
 		DisplayName string `json:"displayName,omitempty"`
@@ -997,36 +1260,12 @@ func (b *Blob) UnmarshalJSON(data []byte) error {
 		case 3:
 			standardBase64 += "="
 		}
-		decoded, err := base64.StdEncoding.DecodeString(standardBase64)
-		if err != nil {
-			return fmt.Errorf("failed to decode base64 data: %v", err)
-		}
-		b.Data = decoded
+		b.Data = standardBase64
+	} else {
+		b.Data = aux.Data
 	}
 
 	return nil
-}
-
-// MarshalJSON implements custom JSON marshaling for Blob.
-// This ensures the data field is properly base64-encoded when sending to the Gemini API.
-func (b Blob) MarshalJSON() ([]byte, error) {
-	type BlobAlias struct {
-		DisplayName string `json:"displayName,omitempty"`
-		Data        string `json:"data,omitempty"`
-		MIMEType    string `json:"mimeType,omitempty"`
-	}
-
-	aux := BlobAlias{
-		DisplayName: b.DisplayName,
-		MIMEType:    b.MIMEType,
-	}
-
-	if len(b.Data) > 0 {
-		// Use standard base64 encoding to match Google GenAI SDK
-		aux.Data = base64.StdEncoding.EncodeToString(b.Data)
-	}
-
-	return json.Marshal(aux)
 }
 
 // VideoMetadata describes how the video in the Part should be used by the model.
@@ -1208,12 +1447,304 @@ type URLContextMetadata struct {
 	URLMetadata []*URLMetadata `json:"urlMetadata,omitempty"`
 }
 
+// Source attributions for content. This data type is not supported in Gemini API.
+type Citation struct {
+	// Output only. End index into the content.
+	EndIndex int32 `json:"endIndex,omitempty"`
+	// Output only. License of the attribution.
+	License string `json:"license,omitempty"`
+	// Output only. Publication date of the attribution.
+	PublicationDate civil.Date `json:"publicationDate,omitempty"`
+	// Output only. Start index into the content.
+	StartIndex int32 `json:"startIndex,omitempty"`
+	// Output only. Title of the attribution.
+	Title string `json:"title,omitempty"`
+	// Output only. URL reference of the attribution.
+	URI string `json:"uri,omitempty"`
+}
+
+type dateJSON civil.Date
+
+func (d *dateJSON) UnmarshalJSON(data []byte) error {
+	m := make(map[string]int)
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("failed to unmarshal date from map: %w", err)
+	}
+
+	if len(m) == 0 {
+		return nil
+	}
+	if _, ok := m["year"]; !ok {
+		return fmt.Errorf("key %q not found", "year")
+	}
+	d.Year = m["year"]
+
+	if month, ok := m["month"]; ok {
+		d.Month = time.Month(month)
+	}
+	if day, ok := m["day"]; ok {
+		d.Day = day
+	}
+	return nil
+}
+
+func (d *dateJSON) MarshalJSON() ([]byte, error) {
+	m := make(map[string]int)
+	if d == nil || (civil.Date)(*d).IsZero() {
+		return json.Marshal(nil)
+	}
+	if d.Year != 0 {
+		m["year"] = d.Year
+	}
+	if d.Month != 0 {
+		m["month"] = int(d.Month)
+	}
+	if d.Day != 0 {
+		m["day"] = d.Day
+	}
+	return json.Marshal(m)
+}
+
+func (c *Citation) UnmarshalJSON(data []byte) error {
+	type Alias Citation
+	aux := &struct {
+		PublicationDate *dateJSON `json:"publicationDate,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	if !reflect.ValueOf(aux.PublicationDate).IsZero() {
+		c.PublicationDate = civil.Date(*aux.PublicationDate)
+	}
+
+	return nil
+}
+
+func (c *Citation) MarshalJSON() ([]byte, error) {
+	type Alias Citation
+	aux := &struct {
+		PublicationDate *dateJSON `json:"publicationDate,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+
+	if !reflect.ValueOf(c.PublicationDate).IsZero() {
+		aux.PublicationDate = (*dateJSON)(&c.PublicationDate)
+	}
+
+	return json.Marshal(aux)
+}
+
+// Citation information when the model quotes another source.
+type CitationMetadata struct {
+	// Optional. Contains citation information when the model directly quotes, at
+	// length, from another source. Can include traditional websites and code
+	// repositories.
+	Citations []*Citation `json:"citations,omitempty"`
+}
+
+// Author attribution for a photo or review. This data type is not supported in Gemini
+// API.
+type GroundingChunkMapsPlaceAnswerSourcesAuthorAttribution struct {
+	// Name of the author of the Photo or Review.
+	DisplayName string `json:"displayName,omitempty"`
+	// Profile photo URI of the author of the Photo or Review.
+	PhotoURI string `json:"photoUri,omitempty"`
+	// URI of the author of the Photo or Review.
+	URI string `json:"uri,omitempty"`
+}
+
+// Encapsulates a review snippet. This data type is not supported in Gemini API.
+type GroundingChunkMapsPlaceAnswerSourcesReviewSnippet struct {
+	// This review's author.
+	AuthorAttribution *GroundingChunkMapsPlaceAnswerSourcesAuthorAttribution `json:"authorAttribution,omitempty"`
+	// A link where users can flag a problem with the review.
+	FlagContentURI string `json:"flagContentUri,omitempty"`
+	// A link to show the review on Google Maps.
+	GoogleMapsURI string `json:"googleMapsUri,omitempty"`
+	// A string of formatted recent time, expressing the review time relative to the current
+	// time in a form appropriate for the language and country.
+	RelativePublishTimeDescription string `json:"relativePublishTimeDescription,omitempty"`
+	// A reference representing this place review which may be used to look up this place
+	// review again.
+	Review string `json:"review,omitempty"`
+	// ID of the review referencing the place.
+	ReviewID string `json:"reviewId,omitempty"`
+	// Title of the review.
+	Title string `json:"title,omitempty"`
+}
+
+// Sources used to generate the place answer. This data type is not supported in Gemini
+// API.
+type GroundingChunkMapsPlaceAnswerSources struct {
+	// A link where users can flag a problem with the generated answer.
+	FlagContentURI string `json:"flagContentUri,omitempty"`
+	// Snippets of reviews that are used to generate the answer.
+	ReviewSnippets []*GroundingChunkMapsPlaceAnswerSourcesReviewSnippet `json:"reviewSnippets,omitempty"`
+}
+
+// Chunk from Google Maps. This data type is not supported in Gemini API.
+type GroundingChunkMaps struct {
+	// Sources used to generate the place answer. This includes review snippets and photos
+	// that were used to generate the answer, as well as uris to flag content.
+	PlaceAnswerSources *GroundingChunkMapsPlaceAnswerSources `json:"placeAnswerSources,omitempty"`
+	// This Place's resource name, in `places/{place_id}` format. Can be used to look up
+	// the Place.
+	PlaceID string `json:"placeId,omitempty"`
+	// Text of the place answer.
+	Text string `json:"text,omitempty"`
+	// Title of the place.
+	Title string `json:"title,omitempty"`
+	// URI reference of the place.
+	URI string `json:"uri,omitempty"`
+}
+
+// Represents where the chunk starts and ends in the document. This data type is not
+// supported in Gemini API.
+type RAGChunkPageSpan struct {
+	// Page where chunk starts in the document. Inclusive. 1-indexed.
+	FirstPage int32 `json:"firstPage,omitempty"`
+	// Page where chunk ends in the document. Inclusive. 1-indexed.
+	LastPage int32 `json:"lastPage,omitempty"`
+}
+
+// A RAGChunk includes the content of a chunk of a RAGFile, and associated metadata.
+// This data type is not supported in Gemini API.
+type RAGChunk struct {
+	// If populated, represents where the chunk starts and ends in the document.
+	PageSpan *RAGChunkPageSpan `json:"pageSpan,omitempty"`
+	// The content of the chunk.
+	Text string `json:"text,omitempty"`
+}
+
+// Chunk from context retrieved by the retrieval tools. This data type is not supported
+// in Gemini API.
+type GroundingChunkRetrievedContext struct {
+	// Output only. The full document name for the referenced Vertex AI Search document.
+	DocumentName string `json:"documentName,omitempty"`
+	// Additional context for the RAG retrieval result. This is only populated when using
+	// the RAG retrieval tool.
+	RAGChunk *RAGChunk `json:"ragChunk,omitempty"`
+	// Text of the attribution.
+	Text string `json:"text,omitempty"`
+	// Title of the attribution.
+	Title string `json:"title,omitempty"`
+	// URI reference of the attribution.
+	URI string `json:"uri,omitempty"`
+}
+
+// Chunk from the web.
+type GroundingChunkWeb struct {
+	// Domain of the (original) URI. This field is not supported in Gemini API.
+	Domain string `json:"domain,omitempty"`
+	// Title of the chunk.
+	Title string `json:"title,omitempty"`
+	// URI reference of the chunk.
+	URI string `json:"uri,omitempty"`
+}
+
+// Grounding chunk.
+type GroundingChunk struct {
+	// Grounding chunk from Google Maps. This field is not supported in Gemini API.
+	Maps *GroundingChunkMaps `json:"maps,omitempty"`
+	// Grounding chunk from context retrieved by the retrieval tools. This field is not
+	// supported in Gemini API.
+	RetrievedContext *GroundingChunkRetrievedContext `json:"retrievedContext,omitempty"`
+	// Grounding chunk from the web.
+	Web *GroundingChunkWeb `json:"web,omitempty"`
+}
+
+// Segment of the content.
+type Segment struct {
+	// Output only. End index in the given Part, measured in bytes. Offset from the start
+	// of the Part, exclusive, starting at zero.
+	EndIndex int32 `json:"endIndex,omitempty"`
+	// Output only. The index of a Part object within its parent Content object.
+	PartIndex int32 `json:"partIndex,omitempty"`
+	// Output only. Start index in the given Part, measured in bytes. Offset from the start
+	// of the Part, inclusive, starting at zero.
+	StartIndex int32 `json:"startIndex,omitempty"`
+	// Output only. The text corresponding to the segment from the response.
+	Text string `json:"text,omitempty"`
+}
+
+// Grounding support.
+type GroundingSupport struct {
+	// Confidence score of the support references. Ranges from 0 to 1. 1 is the most confident.
+	// For Gemini 2.0 and before, this list must have the same size as the grounding_chunk_indices.
+	// For Gemini 2.5 and after, this list will be empty and should be ignored.
+	ConfidenceScores []float32 `json:"confidenceScores,omitempty"`
+	// A list of indices (into 'grounding_chunk') specifying the citations associated with
+	// the claim. For instance [1,3,4] means that grounding_chunk[1], grounding_chunk[3],
+	// grounding_chunk[4] are the retrieved content attributed to the claim.
+	GroundingChunkIndices []int32 `json:"groundingChunkIndices,omitempty"`
+	// Segment of the content this support belongs to.
+	Segment *Segment `json:"segment,omitempty"`
+}
+
+// Metadata related to retrieval in the grounding flow.
+type RetrievalMetadata struct {
+	// Optional. Score indicating how likely information from Google Search could help answer
+	// the prompt. The score is in the range `[0, 1]`, where 0 is the least likely and 1
+	// is the most likely. This score is only populated when Google Search grounding and
+	// dynamic retrieval is enabled. It will be compared to the threshold to determine whether
+	// to trigger Google Search.
+	GoogleSearchDynamicRetrievalScore float32 `json:"googleSearchDynamicRetrievalScore,omitempty"`
+}
+
+// Google search entry point.
+type SearchEntryPoint struct {
+	// Optional. Web content snippet that can be embedded in a web page or an app webview.
+	RenderedContent string `json:"renderedContent,omitempty"`
+	// Optional. Base64 encoded JSON representing array of tuple.
+	SDKBlob []byte `json:"sdkBlob,omitempty"`
+}
+
+// Source content flagging URI for a place or review. This is currently populated only
+// for Google Maps grounding. This data type is not supported in Gemini API.
+type GroundingMetadataSourceFlaggingURI struct {
+	// A link where users can flag a problem with the source (place or review).
+	FlagContentURI string `json:"flagContentUri,omitempty"`
+	// ID of the place or review.
+	SourceID string `json:"sourceId,omitempty"`
+}
+
+// Metadata returned to client when grounding is enabled.
+type GroundingMetadata struct {
+	// Optional. Output only. Resource name of the Google Maps widget context token to be
+	// used with the PlacesContextElement widget to render contextual data. This is populated
+	// only for Google Maps grounding. This field is not supported in Gemini API.
+	GoogleMapsWidgetContextToken string `json:"googleMapsWidgetContextToken,omitempty"`
+	// List of supporting references retrieved from specified grounding source.
+	GroundingChunks []*GroundingChunk `json:"groundingChunks,omitempty"`
+	// Optional. List of grounding support.
+	GroundingSupports []*GroundingSupport `json:"groundingSupports,omitempty"`
+	// Optional. Output only. Retrieval metadata.
+	RetrievalMetadata *RetrievalMetadata `json:"retrievalMetadata,omitempty"`
+	// Optional. Queries executed by the retrieval tools. This field is not supported in
+	// Gemini API.
+	RetrievalQueries []string `json:"retrievalQueries,omitempty"`
+	// Optional. Google search entry for the following-up web searches.
+	SearchEntryPoint *SearchEntryPoint `json:"searchEntryPoint,omitempty"`
+	// Optional. Output only. List of source flagging uris. This is currently populated
+	// only for Google Maps grounding. This field is not supported in Gemini API.
+	SourceFlaggingUris []*GroundingMetadataSourceFlaggingURI `json:"sourceFlaggingUris,omitempty"`
+	// Optional. Web search queries for the following-up web search.
+	WebSearchQueries []string `json:"webSearchQueries,omitempty"`
+}
+
 // Candidate represents a response candidate generated from the model.
 type Candidate struct {
 	// Optional. Contains the multi-part content of the response.
 	Content *Content `json:"content,omitempty"`
 	// Optional. Source attribution of the generated content.
-	CitationMetadata *map[string]any `json:"citationMetadata,omitempty"`
+	CitationMetadata *CitationMetadata `json:"citationMetadata,omitempty"`
 	// Optional. Describes the reason the model stopped generating tokens.
 	FinishMessage string `json:"finishMessage,omitempty"`
 	// Optional. Number of tokens for this candidate.
@@ -1227,7 +1758,7 @@ type Candidate struct {
 	// Output only. Average log probability score of the candidate.
 	AvgLogprobs float64 `json:"avgLogprobs,omitempty"`
 	// Output only. Metadata specifies sources used to ground generated content.
-	GroundingMetadata *map[string]any `json:"groundingMetadata,omitempty"`
+	GroundingMetadata *GroundingMetadata `json:"groundingMetadata,omitempty"`
 	// Output only. Index of the candidate.
 	Index int32 `json:"index,omitempty"`
 	// Output only. Log-likelihood scores for the response tokens and top tokens
@@ -1250,7 +1781,7 @@ type GenerateContentResponsePromptFeedback struct {
 // ModalityTokenCount represents token counting info for a single modality.
 type ModalityTokenCount struct {
 	// Optional. The modality associated with this token count.
-	Modality string `json:"modality,omitempty"`
+	Modality Modality `json:"modality,omitempty"`
 	// Number of tokens.
 	TokenCount int32 `json:"tokenCount,omitempty"`
 }
@@ -1338,30 +1869,22 @@ func (g *GenerateContentResponse) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
-// GeminiChatRequestError represents a Gemini chat completion error response
-type GeminiChatRequestError struct {
-	Error GeminiChatRequestErrorStruct `json:"error"` // Error details following Google API format
-}
-
-// GeminiChatRequestErrorStruct represents the error structure of a Gemini chat completion error response
-type GeminiChatRequestErrorStruct struct {
-	Code    int    `json:"code"`    // HTTP status code
-	Message string `json:"message"` // Error message
-	Status  string `json:"status"`  // Error status string (e.g., "INVALID_REQUEST")
-}
-
 type GeminiGenerationError struct {
-	Error struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Status  string `json:"status"`
-		Details []struct {
-			Type            string `json:"@type"`
-			FieldViolations []struct {
-				Description string `json:"description"`
-			} `json:"fieldViolations"`
-		} `json:"details"`
-	} `json:"error"`
+	Error *GeminiGenerationErrorStruct `json:"error,omitempty"`
+}
+
+type GeminiGenerationErrorStruct struct {
+	Code    int                            `json:"code"`
+	Message string                         `json:"message"`
+	Status  string                         `json:"status"`
+	Details []GeminiGenerationErrorDetails `json:"details"`
+}
+
+type GeminiGenerationErrorDetails struct {
+	Type            string `json:"@type"`
+	FieldViolations []struct {
+		Description string `json:"description"`
+	} `json:"fieldViolations"`
 }
 
 // ==================== MODEL TYPES ====================
@@ -1386,4 +1909,700 @@ type GeminiModel struct {
 type GeminiListModelsResponse struct {
 	Models        []GeminiModel `json:"models"`
 	NextPageToken string        `json:"nextPageToken"`
+}
+
+// ==================== BATCH API TYPES ====================
+// Aligned with official documentation: https://ai.google.dev/gemini-api/docs/batch-api
+
+// GeminiBatchCreateRequest represents the top-level request structure for creating a batch.
+type GeminiBatchCreateRequest struct {
+	Batch GeminiBatchConfig `json:"batch"`
+}
+
+// GeminiBatchConfig represents the batch configuration.
+type GeminiBatchConfig struct {
+	DisplayName string                 `json:"display_name,omitempty"`
+	InputConfig GeminiBatchInputConfig `json:"input_config"`
+}
+
+// GeminiBatchInputConfig represents the input configuration for batch requests.
+// Supports both inline requests and file-based input.
+type GeminiBatchInputConfig struct {
+	Requests *GeminiBatchRequestsWrapper `json:"requests,omitempty"`
+	FileName string                      `json:"file_name,omitempty"`
+}
+
+// GeminiBatchRequestsWrapper wraps the array of batch request items.
+type GeminiBatchRequestsWrapper struct {
+	Requests []GeminiBatchRequestItem `json:"requests"`
+}
+
+// GeminiBatchRequestItem represents a single request in a batch with metadata.
+type GeminiBatchRequestItem struct {
+	Request  GeminiBatchGenerateContentRequest `json:"request"`
+	Metadata *GeminiBatchMetadata              `json:"metadata,omitempty"`
+}
+
+// GeminiBatchGenerateContentRequest represents a GenerateContentRequest for batch.
+type GeminiBatchGenerateContentRequest struct {
+	Contents          []Content         `json:"contents"`
+	GenerationConfig  *GenerationConfig `json:"generationConfig,omitempty"`
+	SafetySettings    []SafetySetting   `json:"safetySettings,omitempty"`
+	SystemInstruction *Content          `json:"systemInstruction,omitempty"`
+}
+
+// GeminiBatchStats represents the stats of a batch job.
+type GeminiBatchStats struct {
+	RequestCount           int `json:"requestCount"`
+	PendingRequestCount    int `json:"pendingRequestCount"`
+	SuccessfulRequestCount int `json:"successfulRequestCount"`
+}
+
+// MarshalJSON implements the json.Marshaler interface.
+func (g *GeminiBatchStats) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		RequestCount           string `json:"requestCount"`
+		PendingRequestCount    string `json:"pendingRequestCount"`
+		SuccessfulRequestCount string `json:"successfulRequestCount"`
+	}{
+		RequestCount:           strconv.Itoa(g.RequestCount),
+		PendingRequestCount:    strconv.Itoa(g.PendingRequestCount),
+		SuccessfulRequestCount: strconv.Itoa(g.SuccessfulRequestCount),
+	})
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+// Gemini API returns these counts as strings, so we need to parse them.
+func (g *GeminiBatchStats) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		RequestCount           string `json:"requestCount"`
+		PendingRequestCount    string `json:"pendingRequestCount"`
+		SuccessfulRequestCount string `json:"successfulRequestCount"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.RequestCount != "" {
+		val, err := strconv.Atoi(raw.RequestCount)
+		if err != nil {
+			return err
+		}
+		g.RequestCount = val
+	}
+	if raw.PendingRequestCount != "" {
+		val, err := strconv.Atoi(raw.PendingRequestCount)
+		if err != nil {
+			return err
+		}
+		g.PendingRequestCount = val
+	}
+	if raw.SuccessfulRequestCount != "" {
+		val, err := strconv.Atoi(raw.SuccessfulRequestCount)
+		if err != nil {
+			return err
+		}
+		g.SuccessfulRequestCount = val
+	}
+	return nil
+}
+
+// GeminiBatchMetadataInputConfig represents the input config in batch job metadata.
+// Note: This uses camelCase (fileName) unlike GeminiBatchInputConfig which uses snake_case (file_name).
+type GeminiBatchMetadataInputConfig struct {
+	FileName string `json:"fileName,omitempty"`
+}
+
+// GeminiBatchMetadataOutputConfig represents the output config in batch job metadata.
+type GeminiBatchMetadataOutputConfig struct {
+	ResponsesFile string `json:"responsesFile,omitempty"`
+}
+
+// GeminiBatchMetadata contains metadata for tracking batch requests.
+type GeminiBatchMetadata struct {
+	Key         string                           `json:"key"`
+	Type        string                           `json:"@type"`
+	Model       string                           `json:"model"`
+	DisplayName string                           `json:"displayName"`
+	InputConfig *GeminiBatchMetadataInputConfig  `json:"inputConfig,omitempty"`
+	Output      *GeminiBatchMetadataOutputConfig `json:"output,omitempty"`
+	CreateTime  string                           `json:"createTime"`
+	EndTime     string                           `json:"endTime,omitempty"`
+	UpdateTime  string                           `json:"updateTime"`
+	BatchStats  *GeminiBatchStats                `json:"batchStats"`
+	State       string                           `json:"state"`
+	Name        string                           `json:"name"`
+}
+
+// GeminiBatchJobResponse represents the response from batch operations.
+type GeminiBatchJobResponse struct {
+	Name     string                `json:"name"` // e.g., "batches/xxx" or full resource name
+	Dest     *GeminiBatchDest      `json:"dest,omitempty"`
+	Error    *GeminiBatchErrorInfo `json:"error,omitempty"`
+	Metadata *GeminiBatchMetadata  `json:"metadata,omitempty"`
+	Done     bool                  `json:"done,omitempty"`
+	Response *GeminiBatchOutput    `json:"response,omitempty"`
+}
+
+// GeminiBatchOutput represents the output of a successful batch job.
+type GeminiBatchOutput struct {
+	Type          string `json:"@type,omitempty"`
+	ResponsesFile string `json:"responsesFile,omitempty"`
+}
+
+// GeminiBatchDest contains the destination/output of a batch job.
+// For inline requests, results are in InlinedResponses.
+// For file-based input, results are in a file referenced by FileName.
+type GeminiBatchDest struct {
+	InlinedResponses []GeminiInlinedResponse `json:"inlinedResponses,omitempty"`
+	FileName         string                  `json:"fileName,omitempty"`
+}
+
+// GeminiInlinedResponse represents a single response in the batch output.
+type GeminiInlinedResponse struct {
+	Response *GenerateContentResponse `json:"response,omitempty"`
+	Error    *GeminiBatchErrorInfo    `json:"error,omitempty"`
+	Metadata *GeminiBatchMetadata     `json:"metadata,omitempty"`
+}
+
+// GeminiBatchErrorInfo represents error information.
+type GeminiBatchErrorInfo struct {
+	Code    int    `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	Status  string `json:"status,omitempty"`
+}
+
+// GeminiBatchFileResultLine represents a single line in the batch results JSONL file.
+// Used when batch results are returned as a file rather than inline responses.
+type GeminiBatchFileResultLine struct {
+	Key      string                   `json:"key,omitempty"`
+	Response *GenerateContentResponse `json:"response,omitempty"`
+	Error    *GeminiBatchErrorInfo    `json:"error,omitempty"`
+}
+
+// GeminiBatchListResponse represents the response from listing batches.
+type GeminiBatchListResponse struct {
+	Operations    []GeminiBatchJobResponse `json:"operations,omitempty"`
+	NextPageToken string                   `json:"nextPageToken,omitempty"`
+}
+
+// Gemini batch job states
+const (
+	GeminiBatchStateUnspecified = "BATCH_STATE_UNSPECIFIED"
+	GeminiBatchStatePending     = "BATCH_STATE_PENDING"
+	GeminiBatchStateRunning     = "BATCH_STATE_RUNNING"
+	GeminiBatchStateSucceeded   = "BATCH_STATE_SUCCEEDED"
+	GeminiBatchStateFailed      = "BATCH_STATE_FAILED"
+	GeminiBatchStateCancelling  = "BATCH_STATE_CANCELLING"
+	GeminiBatchStateCancelled   = "BATCH_STATE_CANCELLED"
+	GeminiBatchStateExpired     = "BATCH_STATE_EXPIRED"
+)
+
+// ==================== FILE TYPES ====================
+
+// GeminiFileUploadRequest represents the request for uploading a file.
+type GeminiFileUploadRequest struct {
+	File     []byte                `json:"-"`        // Raw file content (not serialized)
+	Filename string                `json:"filename"` // Original filename
+	Purpose  string                `json:"purpose"`  // Purpose of the file (e.g., "batch")
+	Provider schemas.ModelProvider `json:"provider"`
+}
+
+// GeminiFileListRequest represents the request for listing files.
+type GeminiFileListRequest struct {
+	Limit int     `json:"limit,omitempty"`
+	After *string `json:"after,omitempty"`
+	Order *string `json:"order,omitempty"`
+}
+
+// GeminiFileRetrieveRequest request represents the request for retrieving a file.
+type GeminiFileRetrieveRequest struct {
+	FileID string `json:"file_id"`
+}
+
+// GeminiFileDeleteRequest request represents the request for deleting a file.
+type GeminiFileDeleteRequest struct {
+	FileID string `json:"file_id"`
+}
+
+// GeminiCountTokensResponse represents the response from Google Gemini's count tokens API.
+type GeminiCountTokensResponse struct {
+	// Response from models.countTokens
+	// TotalTokens is the number of tokens that the Model tokenizes the prompt into.
+	TotalTokens int32 `json:"totalTokens,omitempty"`
+	// Number of tokens in the cached part of the prompt (the cached content).
+	CachedContentTokenCount int32 `json:"cachedContentTokenCount,omitempty"`
+	// Output only. List of modalities that were processed in the request input.
+	PromptTokensDetails []*ModalityTokenCount `json:"promptTokensDetails,omitempty"`
+	// Output only. List of modalities that were processed in the cached content.
+	CacheTokensDetails []*ModalityTokenCount `json:"cacheTokensDetails,omitempty"`
+}
+
+type GeminiImagenRequest struct {
+	Instances   []ImagenInstance       `json:"instances"`
+	Parameters  GeminiImagenParameters `json:"parameters"`
+	ExtraParams map[string]interface{} `json:"-"` // Optional: Extra parameters
+}
+
+func (r *GeminiImagenRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
+}
+
+type GeminiImagenParameters struct {
+	AddWatermark            *bool                `json:"addWatermark,omitempty"`     // Whether to add a watermark to the image
+	SampleCount             *int                 `json:"sampleCount,omitempty"`      // 1 - 4
+	SampleImageSize         *string              `json:"sampleImageSize,omitempty"`  // "1K", "2K"
+	AspectRatio             *string              `json:"aspectRatio,omitempty"`      // "1:1", "3:4", "4:3", "9:16", "16:9"
+	PersonGeneration        *string              `json:"personGeneration,omitempty"` // "dont_allow", "allow_adult", "allow_all"
+	Seed                    *int                 `json:"seed,omitempty"`             // Random seed for reproducibility
+	NegativePrompt          *string              `json:"negativePrompt,omitempty"`   // Negative prompt to exclude certain elements
+	Language                *string              `json:"language,omitempty"`         // Language code for the prompt
+	EnhancePrompt           *bool                `json:"enhancePrompt,omitempty"`    // Whether to enhance the prompt
+	SafetySettings          []SafetySetting      `json:"safetySettings,omitempty"`   // Safety settings for content filtering
+	OutputOptions           *ImagenOutputOptions `json:"outputOptions,omitempty"`    // Output options for image generation
+	BaseSteps               *int                 `json:"baseSteps,omitempty"`        // 1 - 100
+	EditMode                *string              `json:"editMode,omitempty"`
+	GuidanceScale           *int                 `json:"guidanceScale,omitempty"`
+	IncludeRaiReason        *bool                `json:"includeRaiReason,omitempty"`        // Whether to include the RAI filtered reason
+	IncludeSafetyAttributes *bool                `json:"includeSafetyAttributes,omitempty"` // Whether to include safety attributes
+	StorageUri              *string              `json:"storageUri,omitempty"`              // Storage URI for the image
+}
+
+type ImagenOutputOptions struct {
+	MimeType           *string `json:"mimeType,omitempty"`           // Output format for the image generation
+	CompressionQuality *int    `json:"compressionQuality,omitempty"` // 0 - 100
+}
+
+// GeminiImagenPrediction represents an image object from imagen
+type GeminiImagenPrediction struct {
+	BytesBase64Encoded string `json:"bytesBase64Encoded,omitempty"`
+	MimeType           string `json:"mimeType,omitempty"`
+	RaiFilteredReason  string `json:"raiFilteredReason,omitempty"`
+}
+
+// GeminiImagenResponse represents the complete response from imagen
+type GeminiImagenResponse struct {
+	Predictions []GeminiImagenPrediction `json:"predictions"` // List of Imagen predictions
+}
+
+// ImagenReferenceImage represents a reference image for editing
+type ImagenReferenceImage struct {
+	ReferenceType   string                 `json:"referenceType"` // "REFERENCE_TYPE_RAW", "REFERENCE_TYPE_MASK"
+	ReferenceID     int                    `json:"referenceId"`
+	ReferenceImage  ImagenReferenceData    `json:"referenceImage"`
+	MaskImageConfig *ImagenMaskImageConfig `json:"maskImageConfig,omitempty"`
+}
+
+// ImagenReferenceData contains the base64 encoded image data
+type ImagenReferenceData struct {
+	BytesBase64Encoded string `json:"bytesBase64Encoded"`
+}
+
+// ImagenMaskImageConfig contains mask configuration
+type ImagenMaskImageConfig struct {
+	MaskMode    string   `json:"maskMode"`              // "MASK_MODE_USER_PROVIDED", "MASK_MODE_BACKGROUND", "MASK_MODE_FOREGROUND", "MASK_MODE_SEMANTIC"
+	Dilation    *float64 `json:"dilation,omitempty"`    // Range [0, 1]. Percentage of image width to dilate (grow) the mask by
+	MaskClasses []int    `json:"maskClasses,omitempty"` // Mask classes for MASK_MODE_SEMANTIC mode
+}
+
+var GeminiRequestSuffixPaths = []string{
+	":streamGenerateContent",
+	":generateContent",
+	":countTokens",
+	":embedContent",
+	":batchEmbedContents",
+	":predict",
+	":predictLongRunning",
+}
+
+// GeminiVideoGenerationRequest represents the request for Veo video generation
+type GeminiVideoGenerationRequest struct {
+	Model       string                          `json:"model,omitempty"` // Model field for explicit model specification
+	Instances   []GeminiVideoGenerationInstance `json:"instances"`
+	Parameters  *VideoGenerationParameters      `json:"parameters,omitempty"` // Optional parameters including reference images
+	ExtraParams map[string]interface{}          `json:"-"`                    // Optional: Extra parameters
+}
+
+func (r *GeminiVideoGenerationRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
+}
+
+// GeminiVideoGenerationInstance represents a single instance in the video generation request
+// Used in the REST API POST /models/{model}:predictLongRunning
+type GeminiVideoGenerationInstance struct {
+	Prompt          string                     `json:"prompt"`              // Text prompt for video generation
+	Image           *VideoImageData            `json:"image,omitempty"`     // Optional image for image-to-video
+	LastFrame       *VideoImageData            `json:"lastFrame,omitempty"` // Optional last frame for interpolation video
+	Mask            *VideoImageData            `json:"mask,omitempty"`      // Optional mask for image-to-video
+	Video           *VideoGenerationVideoInput `json:"video,omitempty"`     // Optional video for video extension
+	ReferenceImages []VideoReferenceImage      `json:"referenceImages,omitempty"`
+}
+
+// VideoGenerationParameters contains optional parameters for video generation
+type VideoGenerationParameters struct {
+	// Text describing what not to include in the video (Veo 2, 3, 3.1)
+	NegativePrompt *string `json:"negativePrompt,omitempty"`
+
+	// Initial image to animate for image-to-video generation (Veo 2, 3, 3.1)
+	Image *VideoImageData `json:"image,omitempty"`
+
+	// Final image for interpolation video. Must be used with image parameter (Veo 2, 3, 3.1)
+	LastFrame *VideoImageData `json:"lastFrame,omitempty"`
+
+	// Up to three images for style and content references (Veo 3.1 only)
+	ReferenceImages []VideoReferenceImage `json:"referenceImages,omitempty"`
+
+	// Video to be used for video extension (Veo 3.1 only)
+	Video *VideoGenerationVideoInput `json:"video,omitempty"`
+
+	// Video aspect ratio (Veo 2, 3, 3.1)
+	// Options: "16:9" (default), "9:16"
+	AspectRatio *string `json:"aspectRatio,omitempty"`
+
+	// Video resolution (Veo 3, 3.1)
+	// Options: "720p" (default), "1080p" (only 8s duration), "4k" (only 8s duration)
+	// Note: Only "720p" for extension
+	Resolution *string `json:"resolution,omitempty"`
+
+	// Number of samples to generate (Veo 3.1)
+	SampleCount *int `json:"sampleCount,omitempty"`
+
+	// Length of generated video in seconds (Veo 2, 3, 3.1)
+	// Veo 3/3.1: "4", "6", "8" - Must be "8" for extension, reference images, 1080p, and 4k
+	// Veo 2: "5", "6", "8"
+	DurationSeconds *int `json:"durationSeconds,omitempty"`
+
+	// Controls generation of people (Veo 2, 3, 3.1)
+	// Veo 3.1/3 Text-to-video & Extension: "allow_all" only
+	// Veo 3.1/3 Image-to-video, Interpolation, Reference images: "allow_adult" only
+	// Veo 2 Text-to-video: "allow_all", "allow_adult", "dont_allow"
+	// Veo 2 Image-to-video: "allow_adult", "dont_allow"
+	PersonGeneration *string `json:"personGeneration,omitempty"`
+
+	// Number of videos to generate (Veo 3.1)
+	NumberOfVideos *int `json:"numberOfVideos,omitempty"`
+
+	// Random seed for reproducibility (Veo 3, 3.1)
+	Seed *int `json:"seed,omitempty"`
+
+	StorageURI *string `json:"storageURI,omitempty"`
+
+	CompressionQuality *string `json:"compressionQuality,omitempty"`
+
+	// Veo 2 models only
+	EnhancePrompt *bool `json:"enhancePrompt,omitempty"`
+
+	GenerateAudio *bool `json:"generateAudio,omitempty"`
+
+	// Veo 3 image-to-video only
+	ResizeMode *string `json:"resizeMode,omitempty"`
+}
+
+// VideoReferenceImage represents a reference image for video generation
+type VideoReferenceImage struct {
+	Image         VideoImageData `json:"image"`         // Image data
+	ReferenceType string         `json:"referenceType"` // Type of reference (e.g., "asset", "style")
+}
+
+// VideoGenerationVideoInput represents a video from a previous generation for video extension
+type VideoGenerationVideoInput struct {
+	// Video data from a previous generation (contains URI from VideoData response)
+	InlineData *Blob     `json:"inlineData,omitempty"` // Inline base64-encoded video data (if applicable)
+	FileData   *FileData `json:"fileData,omitempty"`   // URI-based video data from previous generation
+	URI        *string   `json:"uri,omitempty"`        // URI of the video
+}
+
+// VideoImageData contains the image data (inline or URI-based)
+type VideoImageData struct {
+	BytesBase64Encoded *string   `json:"bytesBase64Encoded,omitempty"` // Inline base64-encoded image data
+	GCSURI             *string   `json:"gcsUri,omitempty"`             // GCS URI of the image
+	FileData           *FileData `json:"fileData,omitempty"`           // URI-based image data
+	MimeType           *string   `json:"mimeType,omitempty"`           // MIME type of the image
+	MaskMode           *string   `json:"maskMode,omitempty"`           // Mask mode for the image
+}
+
+func (v *VideoImageData) UnmarshalJSON(data []byte) error {
+	type VideoImageDataAlias struct {
+		BytesBase64Encoded *string   `json:"bytesBase64Encoded,omitempty"`
+		GCSURI             *string   `json:"gcsUri,omitempty"`
+		FileData           *FileData `json:"fileData,omitempty"`
+		MimeType           *string   `json:"mimeType,omitempty"`
+		MaskMode           *string   `json:"maskMode,omitempty"`
+	}
+
+	var aux VideoImageDataAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	v.GCSURI = aux.GCSURI
+	v.FileData = aux.FileData
+	v.MimeType = aux.MimeType
+	v.MaskMode = aux.MaskMode
+
+	if aux.BytesBase64Encoded != nil && *aux.BytesBase64Encoded != "" {
+
+		standardBase64 := *aux.BytesBase64Encoded
+
+		// Convert URL-safe base64 → standard base64
+		standardBase64 = strings.ReplaceAll(standardBase64, "_", "/")
+		standardBase64 = strings.ReplaceAll(standardBase64, "-", "+")
+
+		// Fix padding
+		switch len(standardBase64) % 4 {
+		case 2:
+			standardBase64 += "=="
+		case 3:
+			standardBase64 += "="
+		}
+
+		// Validate by decoding
+		decoded, err := base64.StdEncoding.DecodeString(standardBase64)
+		if err != nil {
+			return fmt.Errorf("failed to decode base64 bytesBase64Encoded: %v", err)
+		}
+
+		// Re-encode normalized version (optional but recommended)
+		normalized := base64.StdEncoding.EncodeToString(decoded)
+		v.BytesBase64Encoded = &normalized
+	} else {
+		v.BytesBase64Encoded = aux.BytesBase64Encoded
+	}
+
+	return nil
+}
+
+// A generated video.
+type Video struct {
+	// Optional. Path to another storage.
+	URI string `json:"uri,omitempty"`
+	// Optional. Video bytes.
+	VideoBytes []byte `json:"videoBytes,omitempty"`
+	// Optional. Video encoding, for example ``video/mp4``.
+	MIMEType string `json:"mimeType,omitempty"`
+}
+
+// An image.
+type Image struct {
+	// Optional. The Cloud Storage URI of the image. ``Image`` can contain a value
+	// for this field or the ``image_bytes`` field but not both.
+	GCSURI string `json:"gcsUri,omitempty"`
+	// Optional. The image bytes data. ``Image`` can contain a value for this field
+	// or the ``gcs_uri`` field but not both.
+	ImageBytes []byte `json:"imageBytes,omitempty"`
+	// Optional. The MIME type of the image.
+	MIMEType string `json:"mimeType,omitempty"`
+}
+
+// A set of source input(s) for video generation.
+type GenerateVideosSource struct {
+	// Optional. The text prompt for generating the videos.
+	// Optional if image or video is provided.
+	Prompt string `json:"prompt,omitempty"`
+	// Optional. The input image for generating the videos.
+	// Optional if prompt is provided. Not allowed if video is provided.
+	Image *Image `json:"image,omitempty"`
+	// Optional. The input video for video extension use cases.
+	// Optional if prompt is provided. Not allowed if image is provided.
+	Video *Video `json:"video,omitempty"`
+}
+
+// Enum for the reference type of a video generation reference image.
+type VideoGenerationReferenceType string
+
+const (
+	// A reference image that provides assets to the generated video,
+	// such as the scene, an object, a character, etc.
+	VideoGenerationReferenceTypeAsset VideoGenerationReferenceType = "ASSET"
+	// A reference image that provides aesthetics including colors,
+	// lighting, texture, etc., to be used as the style of the generated video,
+	// such as 'anime', 'photography', 'origami', etc.
+	VideoGenerationReferenceTypeStyle VideoGenerationReferenceType = "STYLE"
+)
+
+// Enum for the mask mode of a video generation mask.
+type VideoGenerationMaskMode string
+
+const (
+	// The image mask contains a masked rectangular region which is
+	// applied on the first frame of the input video. The object described in
+	// the prompt is inserted into this region and will appear in subsequent
+	// frames.
+	VideoGenerationMaskModeInsert VideoGenerationMaskMode = "INSERT"
+	// The image mask is used to determine an object in the
+	// first video frame to track. This object is removed from the video.
+	VideoGenerationMaskModeRemove VideoGenerationMaskMode = "REMOVE"
+	// The image mask is used to determine a region in the
+	// video. Objects in this region will be removed.
+	VideoGenerationMaskModeRemoveStatic VideoGenerationMaskMode = "REMOVE_STATIC"
+	// The image mask contains a masked rectangular region where
+	// the input video will go. The remaining area will be generated. Video
+	// masks are not supported.
+	VideoGenerationMaskModeOutpaint VideoGenerationMaskMode = "OUTPAINT"
+)
+
+// Enum that controls the compression quality of the generated videos.
+type VideoCompressionQuality string
+
+const (
+	// Optimized video compression quality. This will produce videos
+	// with a compressed, smaller file size.
+	VideoCompressionQualityOptimized VideoCompressionQuality = "OPTIMIZED"
+	// Lossless video compression quality. This will produce videos
+	// with a larger file size.
+	VideoCompressionQualityLossless VideoCompressionQuality = "LOSSLESS"
+)
+
+// A reference image for video generation.
+type VideoGenerationReferenceImage struct {
+	// The reference image.
+	Image *Image `json:"image,omitempty"`
+	// The type of the reference image, which defines how the reference
+	// image will be used to generate the video.
+	ReferenceType VideoGenerationReferenceType `json:"referenceType,omitempty"`
+}
+
+// A mask for video generation.
+type VideoGenerationMask struct {
+	// Optional. The image mask to use for generating videos.
+	Image *Image `json:"image,omitempty"`
+	// Describes how the mask will be used. Inpainting masks must
+	// match the aspect ratio of the input video. Outpainting masks can be
+	// either 9:16 or 16:9.
+	MaskMode VideoGenerationMaskMode `json:"maskMode,omitempty"`
+}
+
+// HTTP options to be used in each of the requests.
+type HTTPOptions struct {
+	// Optional. BaseURL specifies the base URL for the API endpoint. If empty, defaults
+	// to "https://generativelanguage.googleapis.com/" for the Gemini API backend, and location-specific
+	// Vertex AI endpoint (e.g., "https://us-central1-aiplatform.googleapis.com/
+	BaseURL string `json:"baseUrl,omitempty"`
+	// Optional. APIVersion specifies the version of the API to use. If empty, defaults
+	// to "v1beta" for Gemini API and "v1beta1" for Vertex AI.
+	APIVersion string `json:"apiVersion,omitempty"`
+	// Optional. Additional HTTP headers to be sent with the request.
+	Headers http.Header `json:"headers,omitempty"`
+	// Optional. Timeout for the request in milliseconds.
+	Timeout *time.Duration `json:"timeout,omitempty"`
+	// Optional. Extra parameters to add to the request body.
+	// The structure must match the backend API's request structure.
+	//   - VertexAI backend API docs: https://cloud.google.com/vertex-ai/docs/reference/rest
+	//   - GeminiAPI backend API docs: https://ai.google.dev/api/rest
+	ExtraBody map[string]any `json:"extraBody,omitempty"`
+	// Optional. A function that allows for request body customization.
+	// It is executed after ExtraBody has been merged, offering more advanced
+	// control over the request body than the static ExtraBody.
+	ExtrasRequestProvider ExtrasRequestProvider `json:"-"`
+}
+
+// ExtrasRequestProvider provides a way to dynamically modify the request body
+// before it is sent. It is a function that takes the request body and returns
+// the modified body. This is useful for advanced scenarios where request
+// parameters need to be added based on logic that cannot
+// be handled by a static map.
+type ExtrasRequestProvider = func(body map[string]any) map[string]any
+
+// You can find API default values and more details at VertexAI: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo-video-generation.
+type GenerateVideosConfig struct {
+	// Optional. Used to override HTTP request options.
+	HTTPOptions *HTTPOptions `json:"httpOptions,omitempty"`
+	// Optional. Number of output videos. If empty, the system will choose a default value.
+	NumberOfVideos int32 `json:"numberOfVideos,omitempty"`
+	// Optional. The GCS bucket where to save the generated videos.
+	OutputGCSURI string `json:"outputGcsUri,omitempty"`
+	// Optional. Frames per second for video generation.
+	FPS *int32 `json:"fps,omitempty"`
+	// Optional. Duration of the clip for video generation in seconds.
+	DurationSeconds *int32 `json:"durationSeconds,omitempty"`
+	// Optional. The RNG seed. If RNG seed is exactly same for each request with
+	// unchanged inputs, the prediction results will be consistent. Otherwise,
+	// a random RNG seed will be used each time to produce a different
+	// result.
+	Seed *int32 `json:"seed,omitempty"`
+	// Optional. The aspect ratio for the generated video. 16:9 (landscape) and
+	// 9:16 (portrait) are supported.
+	AspectRatio string `json:"aspectRatio,omitempty"`
+	// Optional. The resolution for the generated video. 720p and 1080p are
+	// supported.
+	Resolution string `json:"resolution,omitempty"`
+	// Optional. Whether allow to generate person videos, and restrict to specific
+	// ages. Supported values are: dont_allow, allow_adult.
+	PersonGeneration string `json:"personGeneration,omitempty"`
+	// Optional. The pubsub topic where to publish the video generation
+	// progress.
+	PubsubTopic string `json:"pubsubTopic,omitempty"`
+	// Optional. Explicitly state what should not be included in the generated
+	// videos.
+	NegativePrompt string `json:"negativePrompt,omitempty"`
+	// Optional. Whether to use the prompt rewriting logic.
+	EnhancePrompt bool `json:"enhancePrompt,omitempty"`
+	// Optional. Whether to generate audio along with the video.
+	GenerateAudio *bool `json:"generateAudio,omitempty"`
+	// Optional. Image to use as the last frame of generated videos.
+	// Only supported for image to video use cases.
+	LastFrame *Image `json:"lastFrame,omitempty"`
+	// Optional. The images to use as the references to generate the videos.
+	// If this field is provided, the text prompt field must also be provided.
+	// The image, video, or last_frame field are not supported. Each image must
+	// be associated with a type. Veo 2 supports up to 3 asset images *or* 1
+	// style image.
+	ReferenceImages []*VideoGenerationReferenceImage `json:"referenceImages,omitempty"`
+	// Optional. The mask to use for generating videos.
+	Mask *VideoGenerationMask `json:"mask,omitempty"`
+	// Optional. Compression quality of the generated videos.
+	CompressionQuality VideoCompressionQuality `json:"compressionQuality,omitempty"`
+}
+
+// A generated video.
+type GeneratedVideo struct {
+	// Optional. The output video
+	Video *Video `json:"video,omitempty"`
+}
+
+// PredictLongRunning operation response envelope for video generation.
+type GenerateVideosOperationResponse struct {
+	// Type URL for the long-running response payload.
+	Type string `json:"@type,omitempty"`
+	// Current payload shape returned by Gemini for video generation results.
+	GenerateVideoResponse *GenerateVideoResponse `json:"generateVideoResponse,omitempty"`
+	// Backward compatibility for older payloads that returned generatedVideos directly under response.
+	GeneratedVideos []*GeneratedVideo `json:"generatedVideos,omitempty"`
+	// List of generated sample videos in operation retrieve responses.
+	Videos []VideoGenerationResponse `json:"videos,omitempty"`
+}
+
+type VideoGenerationResponse struct {
+	BytesBase64Encoded *string `json:"bytesBase64Encoded"`
+	MIMEType           *string `json:"mimeType"`
+	GCSURI             *string `json:"gcsUri"`
+}
+
+// Response with generated samples for video generation operations.
+type GenerateVideoResponse struct {
+	// List of generated sample videos in operation retrieve responses.
+	GeneratedSamples []*GeneratedVideo `json:"generatedSamples,omitempty"`
+	// Returns if any videos were filtered due to RAI policies.
+	RAIMediaFilteredCount int32 `json:"raiMediaFilteredCount,omitempty"`
+	// Returns RAI failure reasons if any.
+	RAIMediaFilteredReasons []string `json:"raiMediaFilteredReasons,omitempty"`
+}
+
+// A video generation operation.
+type GenerateVideosOperation struct {
+	// The server-assigned name, which is only unique within the same service that originally
+	// returns it. If you use the default HTTP mapping, the `name` should be a resource
+	// name ending with `operations/{unique_id}`.
+	Name string `json:"name,omitempty"`
+	// Optional. Service-specific metadata associated with the operation. It typically contains
+	// progress information and common metadata such as create time. Some services might
+	// not provide such metadata. Any method that returns a long-running operation should
+	// document the metadata type, if any.
+	Metadata map[string]any `json:"metadata,omitempty"`
+	// If the value is `false`, it means the operation is still in progress. If `true`,
+	// the operation is completed, and either `error` or `response` is available.
+	Done bool `json:"done,omitempty"`
+	// Optional. The error result of the operation in case of failure or cancellation.
+	Error map[string]any `json:"error,omitempty"`
+	// Optional. The long-running operation response payload.
+	Response *GenerateVideosOperationResponse `json:"response,omitempty"`
 }

@@ -12,7 +12,7 @@ type CacheHandler struct {
 	plugin *semanticcache.Plugin
 }
 
-func NewCacheHandler(plugin schemas.Plugin) *CacheHandler {
+func NewCacheHandler(plugin schemas.LLMPlugin) *CacheHandler {
 	semanticCachePlugin, ok := plugin.(*semanticcache.Plugin)
 	if !ok {
 		logger.Fatal("Cache handler requires a semantic cache plugin")
@@ -23,7 +23,7 @@ func NewCacheHandler(plugin schemas.Plugin) *CacheHandler {
 	}
 }
 
-func (h *CacheHandler) RegisterRoutes(r *router.Router, middlewares ...lib.BifrostHTTPMiddleware) {
+func (h *CacheHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	r.DELETE("/api/cache/clear/{requestId}", lib.ChainMiddlewares(h.clearCache, middlewares...))
 	r.DELETE("/api/cache/clear-by-key/{cacheKey}", lib.ChainMiddlewares(h.clearCacheByKey, middlewares...))
 }

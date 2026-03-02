@@ -55,7 +55,7 @@ func (a *MyAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schem
 Once providers are configured, you can make requests to any specific provider. This example shows how to send a request directly to Mistral's latest vision model. Bifrost handles the provider-specific API formatting automatically.
 
 ```go
-response, err := client.ChatCompletionRequest(context.Background(), &schemas.BifrostChatRequest{
+response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostChatRequest{
     Provider: schemas.Mistral,
     Model:    "pixtral-12b-latest",
     Input:    messages,
@@ -126,9 +126,9 @@ func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.Mo
 }
 ```
 
-### Custom Network Settings
+### Custom Base URL
 
-Customize the network configuration for each provider, including custom base URLs, extra headers, and timeout settings. This example shows how to use a local OpenAI-compatible server with custom headers for user identification.
+Override the default API endpoint for a provider. This is useful for connecting to self-hosted models, local development servers, or OpenAI-compatible APIs like vLLM, Ollama, or LiteLLM.
 
 ```go
 func (a *MyAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schemas.ProviderConfig, error) {
@@ -136,11 +136,7 @@ func (a *MyAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schem
 	case schemas.OpenAI:
 		return &schemas.ProviderConfig{
 			NetworkConfig: schemas.NetworkConfig{
-				BaseURL: "http://localhost:8000/v1", // Custom openai setup
-				ExtraHeaders: map[string]string{ // Will be included in the request headers
-					"x-user-id": "123",
-				},
-				DefaultRequestTimeoutInSeconds: 30,
+				BaseURL: "http://localhost:8000/v1", // Custom endpoint
 			},
 			ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
 		}, nil
@@ -148,6 +144,10 @@ func (a *MyAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schem
 	return nil, fmt.Errorf("provider %s not supported", provider)
 }
 ```
+
+<Note>
+For self-hosted providers like Ollama and SGL, `BaseURL` is required. For standard providers, it's optional and overrides the default endpoint.
+</Note>
 ### Managing Retries
 
 Configure retry behavior for handling temporary failures and rate limits. This example sets up exponential backoff with up to 5 retries, starting with 1ms delay and capping at 10 seconds - ideal for handling transient network issues.
@@ -196,6 +196,101 @@ func (a *MyAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schem
     return nil, fmt.Errorf("provider %s not supported", provider)
 }
 ```
+
+### Custom Headers
+
+Bifrost supports two ways to add custom headers to provider requests: **static headers** configured at the provider level, and **dynamic headers** passed per-request via context.
+
+#### Static Headers (Provider Level)
+
+Configure headers that are automatically included in every request to a specific provider using `NetworkConfig.ExtraHeaders`:
+
+```go
+func (a *MyAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	switch provider {
+	case schemas.OpenAI:
+		return &schemas.ProviderConfig{
+			NetworkConfig: schemas.NetworkConfig{
+				ExtraHeaders: map[string]string{
+					"x-custom-org":   "my-organization",
+					"x-environment":  "production",
+				},
+			},
+			ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
+		}, nil
+	}
+	return nil, fmt.Errorf("provider %s not supported", provider)
+}
+```
+
+#### Dynamic Headers (Per Request)
+
+Send custom headers with individual requests by adding them to the request context. Headers are automatically propagated to the provider:
+
+```go
+import (
+    "context"
+    "github.com/maximhq/bifrost/core/schemas"
+)
+
+func makeRequestWithCustomHeaders() {
+    // Create base context
+    ctx := context.Background()
+
+    // Add custom headers using BifrostContextKeyExtraHeaders
+    extraHeaders := map[string][]string{
+        "user-id":         {"user-123"},
+        "session-id":      {"session-abc"},
+        "custom-metadata": {"value1", "value2"}, // Multiple values supported
+    }
+    ctx = context.WithValue(ctx, schemas.BifrostContextKeyExtraHeaders, extraHeaders)
+
+    // Make request with custom headers
+    response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostChatRequest{
+        Provider: schemas.OpenAI,
+        Model:    "gpt-4o-mini",
+        Input:    messages,
+    })
+    if err != nil {
+        // Handle error
+    }
+}
+```
+
+**How it works:**
+- Headers are stored as `map[string][]string` in the context
+- Multiple values per header name are supported
+- Header names are case-insensitive and normalized to lowercase
+- Headers are accessible throughout the request lifecycle
+
+**Example use cases:**
+- User identification: `user-id`, `tenant-id`
+- Request tracking: `correlation-id`, `trace-id`
+- Custom metadata: `department`, `cost-center`
+- A/B testing: `experiment-id`, `variant`
+
+#### Security Denylist
+
+Bifrost maintains a security denylist of headers that are never forwarded to providers, regardless of configuration:
+
+```go
+denylist := map[string]bool{
+    "proxy-authorization": true,
+    "cookie":              true,
+    "host":                true,
+    "content-length":      true,
+    "connection":          true,
+    "transfer-encoding":   true,
+
+    // prevent auth/key overrides
+    "x-api-key":      true,
+    "x-goog-api-key": true,
+    "x-bf-api-key":   true,
+    "x-bf-vk":        true,
+}
+```
+
+This denylist is applied to both static and dynamic headers to prevent security vulnerabilities.
 
 ### Setting Up a Proxy
 
@@ -269,6 +364,34 @@ type BifrostResponseExtraFields struct {
 }
 ```
 
+### Send Back Raw Request
+
+Include the original request sent to the provider alongside Bifrost's response. Useful for debugging request transformations and verifying what was actually sent to the provider.
+
+```go
+func (a *MyAccount) GetConfigForProvider(ctx *context.Context, provider schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+    return &schemas.ProviderConfig{
+        NetworkConfig: schemas.DefaultNetworkConfig,
+        ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
+        SendBackRawRequest: true, // Include raw provider request
+    }, nil
+}
+```
+
+When enabled, the raw provider request appears in `ExtraFields.RawRequest`:
+
+```go
+type BifrostResponseExtraFields struct {
+	// ... other fields
+	RawRequest     interface{}        `json:"raw_request,omitempty"`
+	RawResponse    interface{}        `json:"raw_response,omitempty"`
+}
+```
+
+<Tip>
+You can enable both `SendBackRawRequest` and `SendBackRawResponse` together to see the complete request-response cycle for debugging purposes.
+</Tip>
+
 ## Provider-Specific Authentication
 
 Enterprise cloud providers require additional configuration beyond API keys. Configure Azure, AWS Bedrock, and Google Vertex with platform-specific authentication details.
@@ -277,7 +400,9 @@ Enterprise cloud providers require additional configuration beyond API keys. Con
 
 <Tab title="Azure">
 
-Azure requires endpoint URLs, deployment mappings, and API version configuration:
+Azure supports two authentication methods:
+
+**Azure Entra ID (Service Principal)**
 
 ```go
 func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
@@ -285,16 +410,19 @@ func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.Mo
     case schemas.Azure:
         return []schemas.Key{
             {
-                Value:  os.Getenv("AZURE_API_KEY"),
+                Value:  "", // Leave empty for Service Principal auth
                 Models: []string{"gpt-4o", "gpt-4o-mini"},
                 Weight: 1.0,
                 AzureKeyConfig: &schemas.AzureKeyConfig{
-                    Endpoint: os.Getenv("AZURE_ENDPOINT"), // e.g., "https://your-resource.openai.azure.com"
+                    Endpoint:     os.Getenv("AZURE_ENDPOINT"),
+                    ClientID:     bifrost.Ptr(os.Getenv("AZURE_CLIENT_ID")),
+                    ClientSecret: bifrost.Ptr(os.Getenv("AZURE_CLIENT_SECRET")),
+                    TenantID:     bifrost.Ptr(os.Getenv("AZURE_TENANT_ID")),
                     Deployments: map[string]string{
                         "gpt-4o":      "gpt-4o-deployment",
                         "gpt-4o-mini": "gpt-4o-mini-deployment",
                     },
-                    APIVersion: bifrost.Ptr("2024-08-01-preview"), // Azure API version
+                    APIVersion: bifrost.Ptr("2024-08-01-preview"),
                 },
             },
         }, nil
@@ -302,6 +430,38 @@ func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.Mo
     return nil, fmt.Errorf("provider %s not supported", provider)
 }
 ```
+
+**Direct Authentication**
+
+For simpler use cases, provide the authentication credential directly in the `Value` field:
+
+```go
+func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+    switch provider {
+    case schemas.Azure:
+        return []schemas.Key{
+            {
+                Value:  os.Getenv("AZURE_OPENAI_KEY"),
+                Models: []string{"gpt-4o", "gpt-4o-mini"},
+                Weight: 1.0,
+                AzureKeyConfig: &schemas.AzureKeyConfig{
+                    Endpoint: os.Getenv("AZURE_ENDPOINT"),
+                    Deployments: map[string]string{
+                        "gpt-4o":      "gpt-4o-deployment",
+                        "gpt-4o-mini": "gpt-4o-mini-deployment",
+                    },
+                    APIVersion: bifrost.Ptr("2024-08-01-preview"),
+                },
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not supported", provider)
+}
+```
+
+<Note>
+If `ClientID`, `ClientSecret`, and `TenantID` are configured, Service Principal authentication is used. Otherwise, direct authentication with the `Value` field is used.
+</Note>
 
 </Tab>
 

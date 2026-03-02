@@ -190,7 +190,6 @@ interface AsyncMultiSelectProps<T> {
 	/** text to be displayed when static create option */
 	createOptionText?: string;
 	onBlur?: () => void;
-	portalTarget?: HTMLElement;
 
 	/** callback function to be called when input value changes */
 	onInputChange?: (inputValue: string, actionMeta: { action: string }) => void;
@@ -368,20 +367,28 @@ export function AsyncMultiSelect<T>(props: AsyncMultiSelectProps<T>) {
 							}
 							break;
 						case "clear":
-							if (selection) {
+							if (selection && Array.isArray(selection)) {
 								selection = (selection as Option<T>[]).filter((v) => !(v as any)?.isFixed);
 							}
 							break;
 					}
 
-					props.onChange && props.onChange(selection as Option<T>[]);
+					// Normalize selection to array for consistent API
+					// When isSingleSelect is true, react-select returns single object (not array)
+					let normalizedSelection: Option<T>[];
+					if (props.isSingleSelect) {
+						normalizedSelection = selection ? [selection as Option<T>] : [];
+					} else {
+						normalizedSelection = (selection as Option<T>[]) || [];
+					}
+
+					props.onChange && props.onChange(normalizedSelection);
 				}}
 				formatCreateLabel={props.formatCreateLabel}
 				controlShouldRenderValue={props.controlShouldRenderValue ?? true}
 				menuPlacement={props.menuPlacement}
 				blurInputOnSelect={false}
-				menuPortalTarget={props.portalTarget}
-				menuPosition={props.menuPosition}
+				menuPosition={props.menuPosition ?? "fixed"}
 				onInputChange={(newValue, actionMeta) => {
 					if (props.onInputChange) {
 						props.onInputChange(newValue, { action: actionMeta.action });
@@ -414,7 +421,6 @@ export function AsyncMultiSelect<T>(props: AsyncMultiSelectProps<T>) {
 						visibility: "hidden",
 					}),
 					input: (base) => ({ ...base, margin: 0, padding: 0 }),
-					menuPortal: (base) => ({ ...base, zIndex: 51 }),
 					noOptionsMessage: () => ({}),
 					valueContainer: (base) => ({ ...base, padding: 6, gap: 8 }),
 					placeholder: (base) => ({ ...base, marginLeft: 0 }),

@@ -21,10 +21,10 @@ func (baseAccount *BaseAccount) GetConfiguredProviders() ([]schemas.ModelProvide
 // GetKeysForProvider returns a dummy API key configuration for testing.
 // Since we're testing the mocker plugin, these keys should never be used
 // as the plugin intercepts requests before they reach the actual providers.
-func (baseAccount *BaseAccount) GetKeysForProvider(ctx *context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
+func (baseAccount *BaseAccount) GetKeysForProvider(ctx context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
 	return []schemas.Key{
 		{
-			Value:  "dummy-api-key-for-testing", // Dummy key
+			Value:  *schemas.NewEnvVar("dummy-api-key-for-testing"), // Dummy key
 			Models: []string{"gpt-4", "gpt-4-turbo", "claude-3"},
 			Weight: 1.0,
 		},
@@ -52,7 +52,7 @@ func TestMockerPlugin_GetName(t *testing.T) {
 
 // TestMockerPlugin_Disabled tests that disabled plugin doesn't interfere
 func TestMockerPlugin_Disabled(t *testing.T) {
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	config := MockerConfig{
 		Enabled: false,
 	}
@@ -63,9 +63,9 @@ func TestMockerPlugin_Disabled(t *testing.T) {
 
 	account := BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: &account,
-		Plugins: []schemas.Plugin{plugin},
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+		Account:    &account,
+		LLMPlugins: []schemas.LLMPlugin{plugin},
+		Logger:     bifrost.NewDefaultLogger(schemas.LogLevelError),
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost: %v", err)
@@ -95,7 +95,7 @@ func TestMockerPlugin_Disabled(t *testing.T) {
 
 // TestMockerPlugin_DefaultMockRule tests the default catch-all rule
 func TestMockerPlugin_DefaultMockRule(t *testing.T) {
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	config := MockerConfig{
 		Enabled: true, // No rules provided, should create default rule
 	}
@@ -106,9 +106,9 @@ func TestMockerPlugin_DefaultMockRule(t *testing.T) {
 
 	account := BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: &account,
-		Plugins: []schemas.Plugin{plugin},
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+		Account:    &account,
+		LLMPlugins: []schemas.LLMPlugin{plugin},
+		Logger:     bifrost.NewDefaultLogger(schemas.LogLevelError),
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost: %v", err)
@@ -147,7 +147,7 @@ func TestMockerPlugin_DefaultMockRule(t *testing.T) {
 
 // TestMockerPlugin_CustomSuccessRule tests custom success response
 func TestMockerPlugin_CustomSuccessRule(t *testing.T) {
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	config := MockerConfig{
 		Enabled: true,
 		Rules: []MockRule{
@@ -182,9 +182,9 @@ func TestMockerPlugin_CustomSuccessRule(t *testing.T) {
 
 	account := BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: &account,
-		Plugins: []schemas.Plugin{plugin},
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+		Account:    &account,
+		LLMPlugins: []schemas.LLMPlugin{plugin},
+		Logger:     bifrost.NewDefaultLogger(schemas.LogLevelError),
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost: %v", err)
@@ -226,7 +226,7 @@ func TestMockerPlugin_CustomSuccessRule(t *testing.T) {
 
 // TestMockerPlugin_ErrorResponse tests error response generation
 func TestMockerPlugin_ErrorResponse(t *testing.T) {
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	allowFallbacks := false
 	config := MockerConfig{
 		Enabled: true,
@@ -261,9 +261,9 @@ func TestMockerPlugin_ErrorResponse(t *testing.T) {
 
 	account := BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: &account,
-		Plugins: []schemas.Plugin{plugin},
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+		Account:    &account,
+		LLMPlugins: []schemas.LLMPlugin{plugin},
+		Logger:     bifrost.NewDefaultLogger(schemas.LogLevelError),
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost: %v", err)
@@ -296,7 +296,7 @@ func TestMockerPlugin_ErrorResponse(t *testing.T) {
 
 // TestMockerPlugin_MessageTemplate tests template variable substitution
 func TestMockerPlugin_MessageTemplate(t *testing.T) {
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	config := MockerConfig{
 		Enabled: true,
 		Rules: []MockRule{
@@ -324,9 +324,9 @@ func TestMockerPlugin_MessageTemplate(t *testing.T) {
 
 	account := BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: &account,
-		Plugins: []schemas.Plugin{plugin},
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+		Account:    &account,
+		LLMPlugins: []schemas.LLMPlugin{plugin},
+		Logger:     bifrost.NewDefaultLogger(schemas.LogLevelError),
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost: %v", err)
@@ -366,7 +366,7 @@ func TestMockerPlugin_MessageTemplate(t *testing.T) {
 
 // TestMockerPlugin_Statistics tests plugin statistics tracking
 func TestMockerPlugin_Statistics(t *testing.T) {
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	config := MockerConfig{
 		Enabled: true,
 		Rules: []MockRule{
@@ -394,9 +394,9 @@ func TestMockerPlugin_Statistics(t *testing.T) {
 
 	account := BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: &account,
-		Plugins: []schemas.Plugin{plugin},
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+		Account:    &account,
+		LLMPlugins: []schemas.LLMPlugin{plugin},
+		Logger:     bifrost.NewDefaultLogger(schemas.LogLevelError),
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost: %v", err)

@@ -2,19 +2,21 @@
 
 import { FormControl, FormField, FormItem, FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BaseProvider, RequestType } from "@/lib/types/config";
 import { isRequestTypeDisabled } from "@/lib/utils/validation";
-import { Control, useFormContext } from "react-hook-form";
 import { Settings2 } from "lucide-react";
 import { useEffect, useMemo } from "react";
+import { Control, useFormContext } from "react-hook-form";
 
 interface AllowedRequestsFieldsProps {
 	control: Control<any>;
 	namePrefix?: string;
+	pathOverridesPrefix?: string;
 	providerType?: BaseProvider;
+	disabled?: boolean;
 }
 
 // Provider-specific endpoint paths
@@ -32,6 +34,12 @@ const PROVIDER_ENDPOINTS: Partial<Record<BaseProvider, Partial<Record<RequestTyp
 		speech_stream: "/v1/audio/speech",
 		transcription: "/v1/audio/transcriptions",
 		transcription_stream: "/v1/audio/transcriptions",
+		image_generation: "/v1/images/generations",
+		image_generation_stream: "/v1/images/generations",
+		image_edit: "/v1/images/edits",
+		image_edit_stream: "/v1/images/edits",
+		image_variation: "/v1/images/variations",
+		count_tokens: "/v1/responses/tokens",
 	},
 	anthropic: {
 		chat_completion: "/v1/messages",
@@ -69,11 +77,23 @@ const REQUEST_TYPES: Array<{ key: RequestType; label: string }> = [
 	{ key: "speech_stream", label: "Speech Stream" },
 	{ key: "transcription", label: "Transcription" },
 	{ key: "transcription_stream", label: "Transcription Stream" },
+	{ key: "image_generation", label: "Image Generation" },
+	{ key: "image_generation_stream", label: "Image Generation Stream" },
+	{ key: "image_edit", label: "Image Edit" },
+	{ key: "image_edit_stream", label: "Image Edit Stream" },
+	{ key: "image_variation", label: "Image Variation" },
+	{ key: "count_tokens", label: "Count Tokens" },
 ];
 
-export function AllowedRequestsFields({ control, namePrefix = "allowed_requests", providerType }: AllowedRequestsFieldsProps) {
-	const leftColumn = REQUEST_TYPES.slice(0, 6);
-	const rightColumn = REQUEST_TYPES.slice(6);
+export function AllowedRequestsFields({
+	control,
+	namePrefix = "allowed_requests",
+	pathOverridesPrefix = "request_path_overrides",
+	providerType,
+	disabled = false,
+}: AllowedRequestsFieldsProps) {
+	const leftColumn = REQUEST_TYPES.slice(0, REQUEST_TYPES.length / 2);
+	const rightColumn = REQUEST_TYPES.slice(REQUEST_TYPES.length / 2);
 	const { getValues, setValue } = useFormContext();
 
 	// Reset disabled fields when providerType changes
@@ -104,10 +124,10 @@ export function AllowedRequestsFields({ control, namePrefix = "allowed_requests"
 						</div>
 						<div className="flex items-center gap-2">
 							{/* Settings icon for path override - only show when enabled */}
-							{allowedField.value && !isDisabled && !isPathOverrideDisabled && (
+							{allowedField.value && !isDisabled && !isPathOverrideDisabled && !disabled && (
 								<FormField
 									control={control}
-									name={`request_path_overrides.${requestType.key}`}
+									name={`${pathOverridesPrefix}.${requestType.key}`}
 									render={({ field: pathField }) => (
 										<Popover>
 											<PopoverTrigger asChild>
@@ -121,8 +141,11 @@ export function AllowedRequestsFields({ control, namePrefix = "allowed_requests"
 											</PopoverTrigger>
 											<PopoverContent className="w-80" align="end" onOpenAutoFocus={(e) => e.preventDefault()}>
 												<div className="space-y-2">
-													<h4 className="text-sm font-medium">Custom Path</h4>
-													<p className="text-muted-foreground text-xs">Override the default endpoint path</p>
+													<h4 className="text-sm font-medium">Custom Path or URL</h4>
+													<p className="text-muted-foreground text-xs">
+														Override with a path (e.g., /v1/chat) or a full URL (e.g., https://api.example.com/chat) to bypass
+														base_url
+													</p>
 													<Input placeholder={placeholder} {...pathField} value={pathField.value || ""} className="h-9" />
 												</div>
 											</PopoverContent>
@@ -146,7 +169,7 @@ export function AllowedRequestsFields({ control, namePrefix = "allowed_requests"
 										</Tooltip>
 									</TooltipProvider>
 								) : (
-									<Switch checked={allowedField.value} onCheckedChange={allowedField.onChange} size="md" />
+									<Switch checked={allowedField.value} onCheckedChange={allowedField.onChange} size="md" disabled={disabled} />
 								)}
 							</FormControl>
 						</div>
@@ -162,7 +185,7 @@ export function AllowedRequestsFields({ control, namePrefix = "allowed_requests"
 				<div className="text-sm font-medium">Allowed Request Types</div>
 				<p className="text-muted-foreground text-xs">
 					Select which request types this custom provider can handle.{" "}
-					{!isPathOverrideDisabled ? "Click the settings icon to customize endpoint paths." : ""}
+					{!isPathOverrideDisabled ? "Click the settings icon to customize endpoint paths or use full URLs." : ""}
 				</p>
 			</div>
 

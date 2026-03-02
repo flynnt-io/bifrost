@@ -3,6 +3,7 @@
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { AsyncMultiSelect } from "@/components/ui/asyncMultiselect";
 import { Button } from "@/components/ui/button";
+import { ConfigSyncAlert } from "@/components/ui/configSyncAlert";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +32,7 @@ import {
 } from "@/lib/store";
 import { KnownProvider } from "@/lib/types/config";
 import { CreateVirtualKeyRequest, Customer, Team, UpdateVirtualKeyRequest, VirtualKey } from "@/lib/types/governance";
+import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Building, Info, Trash2, Users, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -129,6 +131,10 @@ type VirtualKeyType = {
 export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, onCancel }: VirtualKeySheetProps) {
 	const [isOpen, setIsOpen] = useState(true);
 	const isEditing = !!virtualKey;
+
+	const hasCreateAccess = useRbac(RbacResource.VirtualKeys, RbacOperation.Create);
+	const hasUpdateAccess = useRbac(RbacResource.VirtualKeys, RbacOperation.Update);
+	const canSubmit = isEditing ? hasUpdateAccess : hasCreateAccess;
 
 	const handleClose = () => {
 		setIsOpen(false);
@@ -332,20 +338,24 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 
 	// Handle form submission
 	const onSubmit = async (data: FormData) => {
+		if (!canSubmit) {
+			toast.error("You don't have permission to perform this action");
+			return;
+		}
 		try {
 			// Normalize provider configs to ensure weights are numbers and handle budget/rate limits
 			const normalizedProviderConfigs = data.providerConfigs ? normalizeProviderConfigs(data.providerConfigs) : [];
-		if (isEditing && virtualKey) {
-			// Update existing virtual key
-			const updateData: UpdateVirtualKeyRequest = {
-				name: data.name || undefined,
-				description: data.description || undefined,
-				provider_configs: normalizedProviderConfigs,
-				mcp_configs: data.mcpConfigs,
-				team_id: data.entityType === "team" && data.teamId && data.teamId.trim() !== "" ? data.teamId : undefined,
-				customer_id: data.entityType === "customer" && data.customerId && data.customerId.trim() !== "" ? data.customerId : undefined,
-				is_active: data.isActive,
-			};
+			if (isEditing && virtualKey) {
+				// Update existing virtual key
+				const updateData: UpdateVirtualKeyRequest = {
+					name: data.name || undefined,
+					description: data.description || undefined,
+					provider_configs: normalizedProviderConfigs,
+					mcp_configs: data.mcpConfigs,
+					team_id: data.entityType === "team" && data.teamId && data.teamId.trim() !== "" ? data.teamId : undefined,
+					customer_id: data.entityType === "customer" && data.customerId && data.customerId.trim() !== "" ? data.customerId : undefined,
+					is_active: data.isActive,
+				};
 
 				// Add budget if enabled
 				const budgetMaxLimit = normalizeNumericField(data.budgetMaxLimit);
@@ -370,17 +380,17 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 
 				await updateVirtualKey({ vkId: virtualKey.id, data: updateData }).unwrap();
 				toast.success("Virtual key updated successfully");
-		} else {
-			// Create new virtual key
-			const createData: CreateVirtualKeyRequest = {
-				name: data.name,
-				description: data.description || undefined,
-				provider_configs: normalizedProviderConfigs,
-				mcp_configs: data.mcpConfigs,
-				team_id: data.entityType === "team" && data.teamId && data.teamId.trim() !== "" ? data.teamId : undefined,
-				customer_id: data.entityType === "customer" && data.customerId && data.customerId.trim() !== "" ? data.customerId : undefined,
-				is_active: data.isActive,
-			};
+			} else {
+				// Create new virtual key
+				const createData: CreateVirtualKeyRequest = {
+					name: data.name,
+					description: data.description || undefined,
+					provider_configs: normalizedProviderConfigs,
+					mcp_configs: data.mcpConfigs,
+					team_id: data.entityType === "team" && data.teamId && data.teamId.trim() !== "" ? data.teamId : undefined,
+					customer_id: data.entityType === "customer" && data.customerId && data.customerId.trim() !== "" ? data.customerId : undefined,
+					is_active: data.isActive,
+				};
 
 				// Add budget if enabled
 				const budgetMaxLimit = normalizeNumericField(data.budgetMaxLimit);
@@ -416,11 +426,10 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 	return (
 		<Sheet open={isOpen} onOpenChange={(open) => !open && handleClose()}>
 			<SheetContent
-				className="dark:bg-card flex w-full flex-col overflow-x-hidden bg-white p-8"
-				onInteractOutside={(e) => e.preventDefault()}
-				onEscapeKeyDown={(e) => e.preventDefault()}
+				className="dark:bg-card flex w-full flex-col overflow-x-hidden bg-white px-4 pb-8"
+				data-testid="vk-sheet"
 			>
-				<SheetHeader className="p-0 flex flex-col items-start">
+				<SheetHeader className="flex flex-col items-start px-3 pt-8">
 					<SheetTitle className="flex items-center gap-2">{isEditing ? virtualKey?.name : "Create Virtual Key"}</SheetTitle>
 					<SheetDescription>
 						{isEditing
@@ -430,7 +439,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 				</SheetHeader>
 
 				<Form {...form}>
-					<form onSubmit={form.handleSubmit(onSubmit)} className="flex h-full flex-col gap-6">
+					<form onSubmit={form.handleSubmit(onSubmit)} className="flex h-full flex-col gap-6 px-4">
 						<div className="space-y-4">
 							{/* Basic Information */}
 							<div className="space-y-4">
@@ -441,7 +450,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 										<FormItem>
 											<FormLabel>Name *</FormLabel>
 											<FormControl>
-												<Input placeholder="e.g., Production API Key" {...field} />
+												<Input placeholder="e.g., Production API Key" data-testid="vk-name-input" {...field} />
 											</FormControl>
 											<FormMessage />
 										</FormItem>
@@ -455,7 +464,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 										<FormItem>
 											<FormLabel>Description</FormLabel>
 											<FormControl>
-												<Textarea placeholder="This key is used for..." {...field} rows={3} />
+												<Textarea placeholder="This key is used for..." data-testid="vk-description-input" {...field} rows={3} />
 											</FormControl>
 											<FormMessage />
 										</FormItem>
@@ -467,7 +476,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 									name="isActive"
 									render={({ field }) => (
 										<FormItem>
-											<Toggle label="Is this key active?" val={field.value} setVal={field.onChange} />
+											<Toggle label="Is this key active?" val={field.value} setVal={field.onChange} data-testid="vk-is-active-toggle" />
 										</FormItem>
 									)}
 								/>
@@ -503,7 +512,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 											setSelectedProvider(""); // Reset to placeholder state
 										}}
 									>
-										<SelectTrigger className="flex-1">
+										<SelectTrigger className="flex-1" data-testid="vk-provider-select">
 											<SelectValue placeholder="Select a provider to add" />
 										</SelectTrigger>
 										<SelectContent>
@@ -524,7 +533,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 												return (
 													<>
 														{/* Base providers first */}
-														{baseProviders.map((provider, index) => (
+														{baseProviders.filter((p) => p.name).map((provider, index) => (
 															<SelectItem key={`base-${index}`} value={provider.name}>
 																<RenderProviderIcon provider={provider.name as KnownProvider} size="sm" className="h-4 w-4" />
 																{ProviderLabels[provider.name as ProviderName]}
@@ -532,7 +541,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 														))}
 
 														{/* Custom providers second */}
-														{customProviders.map((provider, index) => (
+														{customProviders.filter((p) => p.name).map((provider, index) => (
 															<SelectItem key={`custom-${index}`} value={provider.name}>
 																<RenderProviderIcon
 																	provider={provider.custom_provider_config?.base_provider_type || (provider.name as KnownProvider)}
@@ -609,7 +618,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 																</div>
 																<div className="w-3/4 space-y-2">
 																	<Label className="text-sm font-medium">
-																		Allowed Models <span className="ml-auto text-muted-foreground text-xs italic">type to search</span>
+																		Allowed Models <span className="text-muted-foreground ml-auto text-xs italic">type to search</span>
 																	</Label>
 																	<ModelMultiselect
 																		provider={config.provider}
@@ -631,89 +640,89 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 																</div>
 															</div>
 
-														{/* Allowed Keys for this provider */}
-														{(() => {
-															const providerKeys = availableKeys.filter((key) => key.provider === config.provider);
-															const configKeyIds = config.key_ids || [];
-															const selectedProviderKeys = providerKeys
-																.filter((key) => configKeyIds.includes(key.key_id))
-																.map((key) => ({
-																	label: key.name,
-																	value: key.key_id,
-																	description: key.models.join(", "),
-																	provider: key.provider,
-																}));
+															{/* Allowed Keys for this provider */}
+															{(() => {
+																const providerKeys = availableKeys.filter((key) => key.provider === config.provider);
+																const configKeyIds = config.key_ids || [];
+																const selectedProviderKeys = providerKeys
+																	.filter((key) => configKeyIds.includes(key.key_id))
+																	.map((key) => ({
+																		label: key.name,
+																		value: key.key_id,
+																		description: key.models?.join(", ") || "",
+																		provider: key.provider,
+																	}));
 
-															if (providerKeys.length === 0) return null;
+																if (providerKeys.length === 0) return null;
 
-															return (
-																<div className="mx-0.5 space-y-2">
-																	<Label className="text-sm font-medium">Allowed Keys</Label>
-																	<p className="text-muted-foreground text-xs">Keep empty to use all available keys for the provider</p>
-																	<AsyncMultiSelect
-																		hideSelectedOptions
-																		isNonAsync
-																		closeMenuOnSelect={false}
-																		menuPlacement="auto"
-																		defaultOptions={providerKeys.map((key) => ({
-																			label: key.name,
-																			value: key.key_id,
-																			description: key.models.join(", "),
-																			provider: key.provider,
-																		}))}
-																		views={{
-																			multiValue: (multiValueProps: MultiValueProps<VirtualKeyType>) => {
-																				return (
-																					<div
-																						{...multiValueProps.innerProps}
-																						className="bg-accent dark:!bg-card flex cursor-pointer items-center gap-1 rounded-sm px-1 py-0.5 text-sm"
-																					>
-																						{multiValueProps.data.label}{" "}
-																						<X
-																							className="hover:text-foreground text-muted-foreground h-4 w-4 cursor-pointer"
-																							onClick={(e) => {
-																								e.stopPropagation();
-																								multiValueProps.removeProps.onClick?.(e as any);
-																							}}
-																						/>
-																					</div>
-																				);
-																			},
-																			option: (optionProps: OptionProps<VirtualKeyType>) => {
-																				const { Option } = components;
-																				return (
-																					<Option
-																						{...optionProps}
-																						className={cn(
-																							"flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-2 text-sm",
-																							optionProps.isFocused && "bg-accent dark:!bg-card",
-																							"hover:bg-accent",
-																							optionProps.isSelected && "bg-accent dark:!bg-card",
-																						)}
-																					>
-																						<span className="text-content-primary grow truncate text-sm">{optionProps.data.label}</span>
-																						{optionProps.data.description && (
-																							<span className="text-content-tertiary max-w-[70%] text-sm">
-																								{optionProps.data.description}
-																							</span>
-																						)}
-																					</Option>
-																				);
-																			},
-																		}}
-																		value={selectedProviderKeys}
-																		onChange={(keys) => {
-																			// Update key_ids for this provider config
-																			const newKeyIds = keys.map((key) => key.value as string);
-																			handleUpdateProviderConfig(index, "key_ids", newKeyIds);
-																		}}
-																		placeholder="Select keys..."
-																		className="hover:bg-accent w-full"
-																		menuClassName="z-[60] max-h-[300px] overflow-y-auto w-full cursor-pointer custom-scrollbar"
-																	/>
-																</div>
-															);
-														})()}
+																return (
+																	<div className="mx-0.5 space-y-2">
+																		<Label className="text-sm font-medium">Allowed Keys</Label>
+																		<p className="text-muted-foreground text-xs">Keep empty to use all available keys for the provider</p>
+																		<AsyncMultiSelect
+																			hideSelectedOptions
+																			isNonAsync
+																			closeMenuOnSelect={false}
+																			menuPlacement="auto"
+																			defaultOptions={providerKeys.map((key) => ({
+																				label: key.name,
+																				value: key.key_id,
+																				description: key.models?.join(", ") || "",
+																				provider: key.provider,
+																			}))}
+																			views={{
+																				multiValue: (multiValueProps: MultiValueProps<VirtualKeyType>) => {
+																					return (
+																						<div
+																							{...multiValueProps.innerProps}
+																							className="bg-accent dark:!bg-card flex cursor-pointer items-center gap-1 rounded-sm px-1 py-0.5 text-sm"
+																						>
+																							{multiValueProps.data.label}{" "}
+																							<X
+																								className="hover:text-foreground text-muted-foreground h-4 w-4 cursor-pointer"
+																								onClick={(e) => {
+																									e.stopPropagation();
+																									multiValueProps.removeProps.onClick?.(e as any);
+																								}}
+																							/>
+																						</div>
+																					);
+																				},
+																				option: (optionProps: OptionProps<VirtualKeyType>) => {
+																					const { Option } = components;
+																					return (
+																						<Option
+																							{...optionProps}
+																							className={cn(
+																								"flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-2 text-sm",
+																								optionProps.isFocused && "bg-accent dark:!bg-card",
+																								"hover:bg-accent",
+																								optionProps.isSelected && "bg-accent dark:!bg-card",
+																							)}
+																						>
+																							<span className="text-content-primary grow truncate text-sm">{optionProps.data.label}</span>
+																							{optionProps.data.description && (
+																								<span className="text-content-tertiary max-w-[70%] text-sm">
+																									{optionProps.data.description}
+																								</span>
+																							)}
+																						</Option>
+																					);
+																				},
+																			}}
+																			value={selectedProviderKeys}
+																			onChange={(keys) => {
+																				// Update key_ids for this provider config
+																				const newKeyIds = keys.map((key) => key.value as string);
+																				handleUpdateProviderConfig(index, "key_ids", newKeyIds);
+																			}}
+																			placeholder="Select keys..."
+																			className="hover:bg-accent w-full"
+																			menuClassName="z-[60] max-h-[300px] overflow-y-auto w-full cursor-pointer custom-scrollbar"
+																		/>
+																	</div>
+																);
+															})()}
 
 															<DottedSeparator />
 
@@ -848,7 +857,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 													{mcpClientsData.filter((client) => !mcpConfigs.some((config) => config.mcp_client_name === client.config.name))
 														.length > 0 ? (
 														mcpClientsData
-															.filter((client) => !mcpConfigs.some((config) => config.mcp_client_name === client.config.name))
+															.filter((client) => client.config.name && !mcpConfigs.some((config) => config.mcp_client_name === client.config.name))
 															.map((client, index) => {
 																const client_tools = client.tools || [];
 																const totalTools = client.config.tools_to_execute?.includes("*")
@@ -1066,7 +1075,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 															defaultValue={field.value}
 														>
 															<FormControl className="w-full">
-																<SelectTrigger>
+																<SelectTrigger data-testid="vk-entity-type-select">
 																	<SelectValue />
 																</SelectTrigger>
 															</FormControl>
@@ -1089,7 +1098,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 															<FormLabel className="font-normal">Select Team</FormLabel>
 															<Select onValueChange={field.onChange} defaultValue={field.value}>
 																<FormControl className="w-full">
-																	<SelectTrigger>
+																	<SelectTrigger data-testid="vk-team-select">
 																		<SelectValue placeholder="Select a team" />
 																	</SelectTrigger>
 																</FormControl>
@@ -1125,7 +1134,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 															<FormLabel className="font-normal">Select Customer</FormLabel>
 															<Select onValueChange={field.onChange} defaultValue={field.value}>
 																<FormControl className="w-full">
-																	<SelectTrigger>
+																	<SelectTrigger data-testid="vk-customer-select">
 																		<SelectValue placeholder="Select a customer" />
 																	</SelectTrigger>
 																</FormControl>
@@ -1150,32 +1159,34 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, onSave, 
 								</>
 							)}
 						</div>
-
+						{isEditing && virtualKey?.config_hash && <ConfigSyncAlert className="mt-2" />}
 						{/* Form Footer */}
 						<div className="dark:bg-card border-border bg-white py-6">
 							<div className="flex justify-end gap-2">
-								<Button type="button" variant="outline" onClick={handleClose}>
+								<Button type="button" variant="outline" onClick={handleClose} data-testid="vk-cancel-btn">
 									Cancel
 								</Button>
 								<TooltipProvider>
 									<Tooltip>
 										<TooltipTrigger asChild>
 											<span className="inline-block">
-												<Button type="submit" disabled={isLoading || !form.formState.isDirty || !form.formState.isValid}>
+												<Button type="submit" disabled={isLoading || !form.formState.isDirty || !form.formState.isValid || !canSubmit} data-testid="vk-save-btn">
 													{isLoading ? "Saving..." : isEditing ? "Update" : "Create"}
 												</Button>
 											</span>
 										</TooltipTrigger>
-										{(isLoading || !form.formState.isDirty || !form.formState.isValid) && (
+										{(isLoading || !form.formState.isDirty || !form.formState.isValid || !canSubmit) && (
 											<TooltipContent>
 												<p>
-													{isLoading
-														? "Saving..."
-														: !form.formState.isDirty && !form.formState.isValid
-															? "No changes made and validation errors present"
-															: !form.formState.isDirty
-																? "No changes made"
-																: "Please fix validation errors"}
+													{!canSubmit
+														? "You don't have permission to perform this action"
+														: isLoading
+															? "Saving..."
+															: !form.formState.isDirty && !form.formState.isValid
+																? "No changes made and validation errors present"
+																: !form.formState.isDirty
+																	? "No changes made"
+																	: "Please fix validation errors"}
 												</p>
 											</TooltipContent>
 										)}

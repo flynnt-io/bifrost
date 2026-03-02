@@ -2,8 +2,8 @@ package schemas
 
 import (
 	"fmt"
-
-	"github.com/bytedance/sonic"
+	"reflect"
+	"time"
 )
 
 // =============================================================================
@@ -43,44 +43,183 @@ func (r *BifrostResponsesRequest) GetRawRequestBody() []byte {
 }
 
 type BifrostResponsesResponse struct {
-	ID *string `json:"id,omitempty"` // used for internal conversions
+	ID     *string `json:"id,omitempty"` // used for internal conversions
+	Object string  `json:"object"`       // "response"
 
 	Background         *bool                               `json:"background,omitempty"`
 	Conversation       *ResponsesResponseConversation      `json:"conversation,omitempty"`
-	CreatedAt          int                                 `json:"created_at"` // Unix timestamp when Response was created
-	Error              *ResponsesResponseError             `json:"error,omitempty"`
-	Include            []string                            `json:"include,omitempty"`            // Supported values: "web_search_call.action.sources", "code_interpreter_call.outputs", "computer_call_output.output.image_url", "file_search_call.results", "message.input_image.image_url", "message.output_text.logprobs", "reasoning.encrypted_content"
-	IncompleteDetails  *ResponsesResponseIncompleteDetails `json:"incomplete_details,omitempty"` // Details about why the response is incomplete
-	Instructions       *ResponsesResponseInstructions      `json:"instructions,omitempty"`
-	MaxOutputTokens    *int                                `json:"max_output_tokens,omitempty"`
-	MaxToolCalls       *int                                `json:"max_tool_calls,omitempty"`
+	CreatedAt          int                                 `json:"created_at"`   // Unix timestamp when Response was created
+	CompletedAt        *int                                `json:"completed_at"` // Unix timestamp when Response was completed
+	Error              *ResponsesResponseError             `json:"error"`
+	Include            []string                            `json:"include,omitempty"`  // Supported values: "web_search_call.action.sources", "code_interpreter_call.outputs", "computer_call_output.output.image_url", "file_search_call.results", "message.input_image.image_url", "message.output_text.logprobs", "reasoning.encrypted_content"
+	IncompleteDetails  *ResponsesResponseIncompleteDetails `json:"incomplete_details"` // Details about why the response is incomplete
+	Instructions       *ResponsesResponseInstructions      `json:"instructions"`
+	MaxOutputTokens    *int                                `json:"max_output_tokens"`
+	MaxToolCalls       *int                                `json:"max_tool_calls"`
 	Metadata           *map[string]any                     `json:"metadata,omitempty"`
 	Model              string                              `json:"model"`
-	Output             []ResponsesMessage                  `json:"output,omitempty"`
+	Output             []ResponsesMessage                  `json:"output"`
 	ParallelToolCalls  *bool                               `json:"parallel_tool_calls,omitempty"`
-	PreviousResponseID *string                             `json:"previous_response_id,omitempty"`
-	Prompt             *ResponsesPrompt                    `json:"prompt,omitempty"`            // Reference to a prompt template and variables
-	PromptCacheKey     *string                             `json:"prompt_cache_key,omitempty"`  // Prompt cache key
-	Reasoning          *ResponsesParametersReasoning       `json:"reasoning,omitempty"`         // Configuration options for reasoning models
-	SafetyIdentifier   *string                             `json:"safety_identifier,omitempty"` // Safety identifier
-	ServiceTier        *string                             `json:"service_tier,omitempty"`
+	PreviousResponseID *string                             `json:"previous_response_id"`
+	Prompt             *ResponsesPrompt                    `json:"prompt,omitempty"` // Reference to a prompt template and variables
+	PromptCacheKey     *string                             `json:"prompt_cache_key"` // Prompt cache key
+	PresencePenalty    *float64                            `json:"presence_penalty,omitempty"`
+	FrequencyPenalty   *float64                            `json:"frequency_penalty,omitempty"`
+	Reasoning          *ResponsesParametersReasoning       `json:"reasoning"`         // Configuration options for reasoning models
+	SafetyIdentifier   *string                             `json:"safety_identifier"` // Safety identifier
+	ServiceTier        *string                             `json:"service_tier"`
 	Status             *string                             `json:"status,omitempty"` // completed, failed, in_progress, cancelled, queued, or incomplete
 	StreamOptions      *ResponsesStreamOptions             `json:"stream_options,omitempty"`
+	StopReason         *string                             `json:"stop_reason,omitempty"` // Not in OpenAI's spec, but sent by other providers
 	Store              *bool                               `json:"store,omitempty"`
 	Temperature        *float64                            `json:"temperature,omitempty"`
 	Text               *ResponsesTextConfig                `json:"text,omitempty"`
 	TopLogProbs        *int                                `json:"top_logprobs,omitempty"`
 	TopP               *float64                            `json:"top_p,omitempty"`       // Controls diversity via nucleus sampling
 	ToolChoice         *ResponsesToolChoice                `json:"tool_choice,omitempty"` // Whether to call a tool
-	Tools              []ResponsesTool                     `json:"tools,omitempty"`       // Tools to use
+	Tools              []ResponsesTool                     `json:"tools"`                 // Tools to use
 	Truncation         *string                             `json:"truncation,omitempty"`
-	Usage              *ResponsesResponseUsage             `json:"usage,omitempty"`
+	Usage              *ResponsesResponseUsage             `json:"usage"`
 	ExtraFields        BifrostResponseExtraFields          `json:"extra_fields"`
 
 	// Perplexity-specific fields
 	SearchResults []SearchResult `json:"search_results,omitempty"`
 	Videos        []VideoResult  `json:"videos,omitempty"`
 	Citations     []string       `json:"citations,omitempty"`
+}
+
+func (resp *BifrostResponsesResponse) WithDefaults() *BifrostResponsesResponse {
+	if resp == nil {
+		return nil
+	}
+
+	result := &BifrostResponsesResponse{
+		ID:        resp.ID,
+		CreatedAt: resp.CreatedAt,
+		Model:     resp.Model,
+	}
+
+	// Object - default: "response"
+	if resp.Object != "" {
+		result.Object = resp.Object
+	} else {
+		result.Object = "response"
+	}
+
+	result.Conversation = resp.Conversation
+	result.Include = resp.Include
+	result.Metadata = resp.Metadata
+	result.Prompt = resp.Prompt
+	result.StreamOptions = resp.StreamOptions
+	result.StopReason = resp.StopReason
+	result.ExtraFields = resp.ExtraFields
+	result.SearchResults = resp.SearchResults
+	result.Videos = resp.Videos
+	result.Citations = resp.Citations
+	result.IncompleteDetails = resp.IncompleteDetails
+	result.PreviousResponseID = resp.PreviousResponseID
+	result.PromptCacheKey = resp.PromptCacheKey
+	result.SafetyIdentifier = resp.SafetyIdentifier
+	result.MaxToolCalls = resp.MaxToolCalls
+	result.Instructions = resp.Instructions
+	result.Error = resp.Error
+	result.CompletedAt = resp.CompletedAt
+	result.MaxOutputTokens = resp.MaxOutputTokens
+
+	// Status - default: "completed"
+	if resp.Status != nil {
+		result.Status = resp.Status
+	} else {
+		result.Status = Ptr("completed")
+	}
+
+	// Output array - default: empty array
+	if resp.Output != nil {
+		result.Output = resp.Output
+	} else {
+		result.Output = []ResponsesMessage{}
+	}
+
+	if resp.Reasoning != nil {
+		result.Reasoning = resp.Reasoning
+	} else {
+		result.Reasoning = &ResponsesParametersReasoning{}
+	}
+
+	// Sampling parameters - defaults: standard values
+	result.Temperature = orDefault(resp.Temperature, 1.0)
+	result.TopP = orDefault(resp.TopP, 1.0)
+	result.PresencePenalty = orDefault(resp.PresencePenalty, 0.0)
+	result.FrequencyPenalty = orDefault(resp.FrequencyPenalty, 0.0)
+
+	// Response configuration - defaults: standard behavior
+	result.Store = orDefault(resp.Store, true)
+	result.Background = orDefault(resp.Background, false)
+	result.ServiceTier = orDefault(resp.ServiceTier, "auto")
+	result.Truncation = orDefault(resp.Truncation, "disabled")
+	result.ParallelToolCalls = orDefault(resp.ParallelToolCalls, true)
+
+	// Token limits - defaults: 0 (unlimited)
+	result.TopLogProbs = orDefault(resp.TopLogProbs, 0)
+
+	// Tools array - default: empty array
+	if resp.Tools != nil {
+		result.Tools = resp.Tools
+	} else {
+		result.Tools = []ResponsesTool{}
+	}
+
+	// Tool choice - default: "auto"
+	if resp.ToolChoice != nil {
+		result.ToolChoice = resp.ToolChoice
+	} else {
+		autoStr := "auto"
+		result.ToolChoice = &ResponsesToolChoice{
+			ResponsesToolChoiceStr: &autoStr,
+		}
+	}
+
+	// Text config - default: text format with medium verbosity
+	if resp.Text != nil {
+		result.Text = &ResponsesTextConfig{
+			Format:    resp.Text.Format,
+			Verbosity: resp.Text.Verbosity,
+		}
+		if result.Text.Format == nil {
+			result.Text.Format = &ResponsesTextConfigFormat{Type: "text"}
+		}
+		if result.Text.Verbosity == nil {
+			result.Text.Verbosity = Ptr("medium")
+		}
+	} else {
+		result.Text = &ResponsesTextConfig{
+			Format:    &ResponsesTextConfigFormat{Type: "text"},
+			Verbosity: Ptr("medium"),
+		}
+	}
+
+	// Usage - ensure token details exist
+	result.Usage = resp.Usage
+	if result.Usage != nil {
+		result.Usage.Iterations = nil
+		result.Usage.Type = nil
+		if result.Usage.InputTokensDetails == nil {
+			result.Usage.InputTokensDetails = &ResponsesResponseInputTokens{CachedTokens: 0}
+		}
+		if result.Usage.OutputTokensDetails == nil {
+			result.Usage.OutputTokensDetails = &ResponsesResponseOutputTokens{ReasoningTokens: 0}
+		}
+	}
+
+	return result
+}
+
+// orDefault returns src if non-nil, otherwise returns a pointer to defaultVal
+func orDefault[T any](src *T, defaultVal T) *T {
+	if src != nil {
+		return src
+	}
+	return Ptr(defaultVal)
 }
 
 type ResponsesParameters struct {
@@ -129,11 +268,48 @@ type ResponsesTextConfigFormat struct {
 }
 
 // ResponsesTextConfigFormatJSONSchema represents a JSON schema specification
+// It supports JSON Schema fields used by various providers for structured outputs.
 type ResponsesTextConfigFormatJSONSchema struct {
-	AdditionalProperties *bool           `json:"additionalProperties,omitempty"`
-	Properties           *map[string]any `json:"properties,omitempty"`
-	Required             []string        `json:"required,omitempty"`
-	Type                 *string         `json:"type,omitempty"`
+	Name                 *string                     `json:"name,omitempty"`
+	Schema               *any                        `json:"schema,omitempty"`
+	Description          *string                     `json:"description,omitempty"`
+	Strict               *bool                       `json:"strict,omitempty"`
+	AdditionalProperties *AdditionalPropertiesStruct `json:"additionalProperties,omitempty"`
+	Properties           *map[string]any             `json:"properties,omitempty"`
+	Required             []string                    `json:"required,omitempty"`
+	Type                 *string                     `json:"type,omitempty"`
+
+	// JSON Schema definition fields
+	Defs        *map[string]any `json:"$defs,omitempty"`       // JSON Schema draft 2019-09+ definitions
+	Definitions *map[string]any `json:"definitions,omitempty"` // Legacy JSON Schema draft-07 definitions
+	Ref         *string         `json:"$ref,omitempty"`        // Reference to definition
+
+	// Array schema fields
+	Items    *map[string]any `json:"items,omitempty"`    // Array element schema
+	MinItems *int64          `json:"minItems,omitempty"` // Minimum array length
+	MaxItems *int64          `json:"maxItems,omitempty"` // Maximum array length
+
+	// Composition fields (union types)
+	AnyOf []map[string]any `json:"anyOf,omitempty"` // Union types (any of these schemas)
+	OneOf []map[string]any `json:"oneOf,omitempty"` // Exclusive union types (exactly one of these)
+	AllOf []map[string]any `json:"allOf,omitempty"` // Schema intersection (all of these)
+
+	// String validation fields
+	Format    *string `json:"format,omitempty"`    // String format (email, date, uri, etc.)
+	Pattern   *string `json:"pattern,omitempty"`   // Regex pattern for strings
+	MinLength *int64  `json:"minLength,omitempty"` // Minimum string length
+	MaxLength *int64  `json:"maxLength,omitempty"` // Maximum string length
+
+	// Number validation fields
+	Minimum *float64 `json:"minimum,omitempty"` // Minimum number value
+	Maximum *float64 `json:"maximum,omitempty"` // Maximum number value
+
+	// Misc fields
+	Title            *string     `json:"title,omitempty"`            // Schema title
+	Default          interface{} `json:"default,omitempty"`          // Default value
+	Nullable         *bool       `json:"nullable,omitempty"`         // Nullable indicator (OpenAPI 3.0 style)
+	Enum             []string    `json:"enum,omitempty"`             // Enum values
+	PropertyOrdering []string    `json:"propertyOrdering,omitempty"` // Ordering of properties, specific to Gemini
 }
 
 type ResponsesResponseConversation struct {
@@ -150,13 +326,13 @@ func (rc ResponsesResponseConversation) MarshalJSON() ([]byte, error) {
 	}
 
 	if rc.ResponsesResponseConversationStr != nil {
-		return sonic.Marshal(*rc.ResponsesResponseConversationStr)
+		return Marshal(*rc.ResponsesResponseConversationStr)
 	}
 	if rc.ResponsesResponseConversationStruct != nil {
-		return sonic.Marshal(rc.ResponsesResponseConversationStruct)
+		return Marshal(rc.ResponsesResponseConversationStruct)
 	}
 	// If both are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for ResponsesMessageContent.
@@ -165,14 +341,14 @@ func (rc ResponsesResponseConversation) MarshalJSON() ([]byte, error) {
 func (rc *ResponsesResponseConversation) UnmarshalJSON(data []byte) error {
 	// First, try to unmarshal as a direct string
 	var stringContent string
-	if err := sonic.Unmarshal(data, &stringContent); err == nil {
+	if err := Unmarshal(data, &stringContent); err == nil {
 		rc.ResponsesResponseConversationStr = &stringContent
 		return nil
 	}
 
 	// Try to unmarshal as a direct array of ContentBlock
 	var structContent ResponsesResponseConversationStruct
-	if err := sonic.Unmarshal(data, &structContent); err == nil {
+	if err := Unmarshal(data, &structContent); err == nil {
 		rc.ResponsesResponseConversationStruct = &structContent
 		return nil
 	}
@@ -194,13 +370,13 @@ func (rc ResponsesResponseInstructions) MarshalJSON() ([]byte, error) {
 	}
 
 	if rc.ResponsesResponseInstructionsStr != nil {
-		return sonic.Marshal(*rc.ResponsesResponseInstructionsStr)
+		return Marshal(*rc.ResponsesResponseInstructionsStr)
 	}
 	if rc.ResponsesResponseInstructionsArray != nil {
-		return sonic.Marshal(rc.ResponsesResponseInstructionsArray)
+		return Marshal(rc.ResponsesResponseInstructionsArray)
 	}
 	// If both are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for ResponsesMessageContent.
@@ -209,14 +385,14 @@ func (rc ResponsesResponseInstructions) MarshalJSON() ([]byte, error) {
 func (rc *ResponsesResponseInstructions) UnmarshalJSON(data []byte) error {
 	// First, try to unmarshal as a direct string
 	var stringContent string
-	if err := sonic.Unmarshal(data, &stringContent); err == nil {
+	if err := Unmarshal(data, &stringContent); err == nil {
 		rc.ResponsesResponseInstructionsStr = &stringContent
 		return nil
 	}
 
 	// Try to unmarshal as a direct array of ContentBlock
 	var arrayContent []ResponsesMessage
-	if err := sonic.Unmarshal(data, &arrayContent); err == nil {
+	if err := Unmarshal(data, &arrayContent); err == nil {
 		rc.ResponsesResponseInstructionsArray = arrayContent
 		return nil
 	}
@@ -231,9 +407,10 @@ type ResponsesPrompt struct {
 }
 
 type ResponsesParametersReasoning struct {
-	Effort          *string `json:"effort,omitempty"`           // "minimal" | "low" | "medium" | "high"
+	Effort          *string `json:"effort"`                     // "none" | "minimal" | "low" | "medium" | "high" (any value other than "none" will enable reasoning)
 	GenerateSummary *string `json:"generate_summary,omitempty"` // Deprecated: use summary instead
-	Summary         *string `json:"summary,omitempty"`          // "auto" | "concise" | "detailed"
+	Summary         *string `json:"summary"`                    // "auto" | "concise" | "detailed"
+	MaxTokens       *int    `json:"max_tokens,omitempty"`       // Maximum number of tokens to generate for the reasoning output (required for anthropic)
 }
 
 type ResponsesResponseConversationStruct struct {
@@ -250,16 +427,20 @@ type ResponsesResponseIncompleteDetails struct {
 }
 
 type ResponsesResponseUsage struct {
+	Type                *string                        `json:"type,omitempty"`        // type field is sent by anthropic
 	InputTokens         int                            `json:"input_tokens"`          // Number of input tokens
 	InputTokensDetails  *ResponsesResponseInputTokens  `json:"input_tokens_details"`  // Detailed breakdown of input tokens
 	OutputTokens        int                            `json:"output_tokens"`         // Number of output tokens
 	OutputTokensDetails *ResponsesResponseOutputTokens `json:"output_tokens_details"` // Detailed breakdown of output tokens	TotalTokens int `json:"total_tokens"` // Total number of tokens used
 	TotalTokens         int                            `json:"total_tokens"`          // Total number of tokens used
 	Cost                *BifrostCost                   `json:"cost,omitempty"`        // Only for the providers which support cost calculation
+	Iterations          []ResponsesResponseUsage       `json:"iterations,omitempty"`  // iterations field is sent by anthropic
 }
 
 type ResponsesResponseInputTokens struct {
-	AudioTokens int `json:"audio_tokens"` // Tokens for audio input
+	TextTokens  int `json:"text_tokens,omitempty"`  // Tokens for text input
+	AudioTokens int `json:"audio_tokens,omitempty"` // Tokens for audio input
+	ImageTokens int `json:"image_tokens,omitempty"` // Tokens for image input
 
 	// For Providers which follow OpenAI's spec, CachedTokens means the number of input tokens read from the cache+input tokens used to create the cache entry. (because they do not differentiate between cache creation and cache read tokens)
 	// For Providers which do not follow OpenAI's spec, CachedTokens means only the number of input tokens read from the cache.
@@ -267,8 +448,10 @@ type ResponsesResponseInputTokens struct {
 }
 
 type ResponsesResponseOutputTokens struct {
+	TextTokens               int  `json:"text_tokens,omitempty"`
 	AcceptedPredictionTokens int  `json:"accepted_prediction_tokens,omitempty"`
 	AudioTokens              int  `json:"audio_tokens,omitempty"`
+	ImageTokens              *int `json:"image_tokens,omitempty"`
 	ReasoningTokens          int  `json:"reasoning_tokens"` // Required for few OpenAI models
 	RejectedPredictionTokens int  `json:"rejected_prediction_tokens,omitempty"`
 	CitationTokens           *int `json:"citation_tokens,omitempty"`
@@ -320,6 +503,7 @@ type ResponsesMessage struct {
 	*ResponsesToolMessage // For Tool calls and outputs
 
 	// Reasoning
+	// gpt-oss models include only reasoning_text content blocks in a message, while other openai models include summaries+encrypted_content
 	*ResponsesReasoning
 }
 
@@ -349,13 +533,13 @@ func (rc ResponsesMessageContent) MarshalJSON() ([]byte, error) {
 	}
 
 	if rc.ContentStr != nil {
-		return sonic.Marshal(*rc.ContentStr)
+		return Marshal(*rc.ContentStr)
 	}
 	if rc.ContentBlocks != nil {
-		return sonic.Marshal(rc.ContentBlocks)
+		return Marshal(rc.ContentBlocks)
 	}
 	// If both are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for ResponsesMessageContent.
@@ -364,14 +548,14 @@ func (rc ResponsesMessageContent) MarshalJSON() ([]byte, error) {
 func (rc *ResponsesMessageContent) UnmarshalJSON(data []byte) error {
 	// First, try to unmarshal as a direct string
 	var stringContent string
-	if err := sonic.Unmarshal(data, &stringContent); err == nil {
+	if err := Unmarshal(data, &stringContent); err == nil {
 		rc.ContentStr = &stringContent
 		return nil
 	}
 
 	// Try to unmarshal as a direct array of ContentBlock
 	var arrayContent []ResponsesMessageContentBlock
-	if err := sonic.Unmarshal(data, &arrayContent); err == nil {
+	if err := Unmarshal(data, &arrayContent); err == nil {
 		rc.ContentBlocks = arrayContent
 		return nil
 	}
@@ -389,32 +573,55 @@ const (
 	ResponsesOutputMessageContentTypeText      ResponsesMessageContentBlockType = "output_text"
 	ResponsesOutputMessageContentTypeRefusal   ResponsesMessageContentBlockType = "refusal"
 	ResponsesOutputMessageContentTypeReasoning ResponsesMessageContentBlockType = "reasoning_text"
+
+	// gemini sends rendered content in google search results
+	ResponsesOutputMessageContentTypeRenderedContent ResponsesMessageContentBlockType = "rendered_content"
+
+	ResponsesOutputMessageContentTypeCompaction ResponsesMessageContentBlockType = "compaction"
 )
 
 // ResponsesMessageContentBlock represents different types of content (text, image, file, audio)
 // Only one of the content type fields should be set
 type ResponsesMessageContentBlock struct {
-	Type   ResponsesMessageContentBlockType `json:"type"`
-	FileID *string                          `json:"file_id,omitempty"` // Reference to uploaded file
-	Text   *string                          `json:"text,omitempty"`
+	Type      ResponsesMessageContentBlockType `json:"type"`
+	FileID    *string                          `json:"file_id,omitempty"` // Reference to uploaded file
+	Text      *string                          `json:"text,omitempty"`
+	Signature *string                          `json:"signature,omitempty"` // Signature of the content (for reasoning)
 
 	*ResponsesInputMessageContentBlockImage
 	*ResponsesInputMessageContentBlockFile
 	Audio *ResponsesInputMessageContentBlockAudio `json:"input_audio,omitempty"`
 
-	*ResponsesOutputMessageContentText    // Normal text output from the model
-	*ResponsesOutputMessageContentRefusal // Model refusal to answer
+	*ResponsesOutputMessageContentText            // Normal text output from the model
+	*ResponsesOutputMessageContentRefusal         // Model refusal to answer
+	*ResponsesOutputMessageContentRenderedContent // Rendered content from search entry point
+	*ResponsesOutputMessageContentCompaction      // Compaction content from the model
+
+	// Not in OpenAI's schemas, but sent by a few providers (Anthropic, Bedrock are some of them)
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	Citations    *Citations    `json:"citations,omitempty"`
 }
 
+type ResponsesOutputMessageContentCompaction struct {
+	Summary string `json:"summary,omitempty"` // The compaction summary text
+}
+type ResponsesOutputMessageContentRenderedContent struct {
+	RenderedContent string `json:"rendered_content"` // HTML/styled content from search entry point
+}
+
+type Citations struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
 type ResponsesInputMessageContentBlockImage struct {
 	ImageURL *string `json:"image_url,omitempty"`
 	Detail   *string `json:"detail,omitempty"` // "low" | "high" | "auto"
 }
 
 type ResponsesInputMessageContentBlockFile struct {
-	FileData *string `json:"file_data,omitempty"` // Base64 encoded file data
+	FileData *string `json:"file_data,omitempty"` // Base64 encoded file data or plain text
 	FileURL  *string `json:"file_url,omitempty"`  // Direct URL to file
 	Filename *string `json:"filename,omitempty"`  // Name of the file
+	FileType *string `json:"file_type,omitempty"` // MIME type (e.g., "application/pdf", "text/plain")
 }
 
 type ResponsesInputMessageContentBlockAudio struct {
@@ -427,8 +634,8 @@ type ResponsesInputMessageContentBlockAudio struct {
 // =============================================================================
 
 type ResponsesOutputMessageContentText struct {
-	Annotations []ResponsesOutputMessageContentTextAnnotation `json:"annotations,omitempty"` // Citations and references
-	LogProbs    []ResponsesOutputMessageContentTextLogProb    `json:"logprobs,omitempty"`    // Token log probabilities
+	Annotations []ResponsesOutputMessageContentTextAnnotation `json:"annotations"` // Citations and references
+	LogProbs    []ResponsesOutputMessageContentTextLogProb    `json:"logprobs"`    // Token log probabilities
 }
 
 type ResponsesOutputMessageContentTextAnnotation struct {
@@ -442,6 +649,16 @@ type ResponsesOutputMessageContentTextAnnotation struct {
 	Title       *string `json:"title,omitempty"`
 	URL         *string `json:"url,omitempty"`
 	ContainerID *string `json:"container_id,omitempty"`
+
+	// Anthropic specific fields
+	StartCharIndex  *int    `json:"start_char_index,omitempty"`
+	EndCharIndex    *int    `json:"end_char_index,omitempty"`
+	StartPageNumber *int    `json:"start_page_number,omitempty"`
+	EndPageNumber   *int    `json:"end_page_number,omitempty"`
+	StartBlockIndex *int    `json:"start_block_index,omitempty"`
+	EndBlockIndex   *int    `json:"end_block_index,omitempty"`
+	Source          *string `json:"source,omitempty"`
+	EncryptedIndex  *string `json:"encrypted_index,omitempty"`
 }
 
 // ResponsesOutputMessageContentTextLogProb represents log probability information for content.
@@ -486,42 +703,72 @@ type ResponsesToolMessageActionStruct struct {
 
 func (action ResponsesToolMessageActionStruct) MarshalJSON() ([]byte, error) {
 	if action.ResponsesComputerToolCallAction != nil {
-		return sonic.Marshal(action.ResponsesComputerToolCallAction)
+		return Marshal(action.ResponsesComputerToolCallAction)
 	}
 	if action.ResponsesWebSearchToolCallAction != nil {
-		return sonic.Marshal(action.ResponsesWebSearchToolCallAction)
+		return Marshal(action.ResponsesWebSearchToolCallAction)
 	}
 	if action.ResponsesLocalShellToolCallAction != nil {
-		return sonic.Marshal(action.ResponsesLocalShellToolCallAction)
+		return Marshal(action.ResponsesLocalShellToolCallAction)
 	}
 	if action.ResponsesMCPApprovalRequestAction != nil {
-		return sonic.Marshal(action.ResponsesMCPApprovalRequestAction)
+		return Marshal(action.ResponsesMCPApprovalRequestAction)
 	}
-	return nil, fmt.Errorf("responses tool message action struct is neither a computer tool call action nor a web search tool call action nor a local shell tool call action nor a mcp approval request action")
+	return nil, fmt.Errorf("responses tool message action struct is empty")
 }
 
 func (action *ResponsesToolMessageActionStruct) UnmarshalJSON(data []byte) error {
-	var computerToolCallAction ResponsesComputerToolCallAction
-	if err := sonic.Unmarshal(data, &computerToolCallAction); err == nil {
+	// First, peek at the type field to determine which variant to unmarshal
+	var typeStruct struct {
+		Type string `json:"type"`
+	}
+	if err := Unmarshal(data, &typeStruct); err != nil {
+		return fmt.Errorf("failed to peek at type field: %w", err)
+	}
+
+	// Based on the type, unmarshal into the appropriate variant
+	switch typeStruct.Type {
+	case "exec":
+		var localShellToolCallAction ResponsesLocalShellToolCallAction
+		if err := Unmarshal(data, &localShellToolCallAction); err != nil {
+			return fmt.Errorf("failed to unmarshal local shell tool call action: %w", err)
+		}
+		action.ResponsesLocalShellToolCallAction = &localShellToolCallAction
+		return nil
+
+	case "mcp_approval_request":
+		var mcpApprovalRequestAction ResponsesMCPApprovalRequestAction
+		if err := Unmarshal(data, &mcpApprovalRequestAction); err != nil {
+			return fmt.Errorf("failed to unmarshal mcp approval request action: %w", err)
+		}
+		action.ResponsesMCPApprovalRequestAction = &mcpApprovalRequestAction
+		return nil
+
+	case "search", "open_page", "find":
+		var webSearchToolCallAction ResponsesWebSearchToolCallAction
+		if err := Unmarshal(data, &webSearchToolCallAction); err != nil {
+			return fmt.Errorf("failed to unmarshal web search tool call action: %w", err)
+		}
+		action.ResponsesWebSearchToolCallAction = &webSearchToolCallAction
+		return nil
+
+	case "click", "double_click", "drag", "keypress", "move", "screenshot", "scroll", "type", "wait", "zoom":
+		var computerToolCallAction ResponsesComputerToolCallAction
+		if err := Unmarshal(data, &computerToolCallAction); err != nil {
+			return fmt.Errorf("failed to unmarshal computer tool call action: %w", err)
+		}
+		action.ResponsesComputerToolCallAction = &computerToolCallAction
+		return nil
+
+	default:
+		// use computer tool, as it can have many possible actions
+		var computerToolCallAction ResponsesComputerToolCallAction
+		if err := Unmarshal(data, &computerToolCallAction); err != nil {
+			return fmt.Errorf("failed to unmarshal computer tool call action: %w", err)
+		}
 		action.ResponsesComputerToolCallAction = &computerToolCallAction
 		return nil
 	}
-	var webSearchToolCallAction ResponsesWebSearchToolCallAction
-	if err := sonic.Unmarshal(data, &webSearchToolCallAction); err == nil {
-		action.ResponsesWebSearchToolCallAction = &webSearchToolCallAction
-		return nil
-	}
-	var localShellToolCallAction ResponsesLocalShellToolCallAction
-	if err := sonic.Unmarshal(data, &localShellToolCallAction); err == nil {
-		action.ResponsesLocalShellToolCallAction = &localShellToolCallAction
-		return nil
-	}
-	var mcpApprovalRequestAction ResponsesMCPApprovalRequestAction
-	if err := sonic.Unmarshal(data, &mcpApprovalRequestAction); err == nil {
-		action.ResponsesMCPApprovalRequestAction = &mcpApprovalRequestAction
-		return nil
-	}
-	return fmt.Errorf("responses tool message action struct is neither a computer tool call action nor a web search tool call action nor a local shell tool call action nor a mcp approval request action")
 }
 
 type ResponsesToolMessageOutputStruct struct {
@@ -532,33 +779,33 @@ type ResponsesToolMessageOutputStruct struct {
 
 func (output ResponsesToolMessageOutputStruct) MarshalJSON() ([]byte, error) {
 	if output.ResponsesToolCallOutputStr != nil {
-		return sonic.Marshal(*output.ResponsesToolCallOutputStr)
+		return Marshal(*output.ResponsesToolCallOutputStr)
 	}
 	if output.ResponsesFunctionToolCallOutputBlocks != nil {
-		return sonic.Marshal(output.ResponsesFunctionToolCallOutputBlocks)
+		return Marshal(output.ResponsesFunctionToolCallOutputBlocks)
 	}
 	if output.ResponsesComputerToolCallOutput != nil {
-		return sonic.Marshal(output.ResponsesComputerToolCallOutput)
+		return Marshal(output.ResponsesComputerToolCallOutput)
 	}
-	return nil, fmt.Errorf("responses tool message output struct is neither a string nor an array of responses message content blocks nor a computer tool call output data")
+	return nil, fmt.Errorf("responses tool message output struct is neither a string nor an array of responses message content blocks nor a computer tool call output data nor an image generation call output")
 }
 func (output *ResponsesToolMessageOutputStruct) UnmarshalJSON(data []byte) error {
 	var str string
-	if err := sonic.Unmarshal(data, &str); err == nil {
+	if err := Unmarshal(data, &str); err == nil {
 		output.ResponsesToolCallOutputStr = &str
 		return nil
 	}
 	var array []ResponsesMessageContentBlock
-	if err := sonic.Unmarshal(data, &array); err == nil {
+	if err := Unmarshal(data, &array); err == nil {
 		output.ResponsesFunctionToolCallOutputBlocks = array
 		return nil
 	}
 	var computerToolCallOutput ResponsesComputerToolCallOutputData
-	if err := sonic.Unmarshal(data, &computerToolCallOutput); err == nil {
+	if err := Unmarshal(data, &computerToolCallOutput); err == nil {
 		output.ResponsesComputerToolCallOutput = &computerToolCallOutput
 		return nil
 	}
-	return fmt.Errorf("responses tool message output struct is neither a string nor an array of responses message content blocks nor a computer tool call output data")
+	return fmt.Errorf("responses tool message output struct is neither a string nor an array of responses message content blocks nor a computer tool call output data nor an image generation call output")
 }
 
 // =============================================================================
@@ -596,7 +843,7 @@ type ResponsesComputerToolCallPendingSafetyCheck struct {
 
 // ResponsesComputerToolCallAction represents the different types of computer actions
 type ResponsesComputerToolCallAction struct {
-	Type    string                                `json:"type"`             // "click" | "double_click" | "drag" | "keypress" | "move" | "screenshot" | "scroll" | "type" | "wait"
+	Type    string                                `json:"type"`             // "click" | "double_click" | "drag" | "keypress" | "move" | "screenshot" | "scroll" | "type" | "wait" | "zoom"
 	X       *int                                  `json:"x,omitempty"`      // Common X coordinate field (Click, DoubleClick, Move, Scroll)
 	Y       *int                                  `json:"y,omitempty"`      // Common Y coordinate field (Click, DoubleClick, Move, Scroll)
 	Button  *string                               `json:"button,omitempty"` // "left" | "right" | "wheel" | "back" | "forward"
@@ -605,6 +852,7 @@ type ResponsesComputerToolCallAction struct {
 	ScrollX *int                                  `json:"scroll_x,omitempty"`
 	ScrollY *int                                  `json:"scroll_y,omitempty"`
 	Text    *string                               `json:"text,omitempty"`
+	Region  []int                                 `json:"region,omitempty"` // [x1, y1, x2, y2] for zoom action (Anthropic Opus 4.5)
 }
 
 type ResponsesComputerToolCallActionPath struct {
@@ -640,6 +888,7 @@ type ResponsesWebSearchToolCallAction struct {
 	Type    string                                         `json:"type"`          // "search" | "open_page" | "find"
 	URL     *string                                        `json:"url,omitempty"` // Common URL field (OpenPage, Find)
 	Query   *string                                        `json:"query,omitempty"`
+	Queries []string                                       `json:"queries,omitempty"`
 	Sources []ResponsesWebSearchToolCallActionSearchSource `json:"sources,omitempty"`
 	Pattern *string                                        `json:"pattern,omitempty"`
 }
@@ -648,6 +897,11 @@ type ResponsesWebSearchToolCallAction struct {
 type ResponsesWebSearchToolCallActionSearchSource struct {
 	Type string `json:"type"` // always "url"
 	URL  string `json:"url"`
+
+	// Anthropic specific fields
+	Title            *string `json:"title,omitempty"`
+	EncryptedContent *string `json:"encrypted_content,omitempty"`
+	PageAge          *string `json:"page_age,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -669,13 +923,13 @@ func (rf ResponsesFunctionToolCallOutput) MarshalJSON() ([]byte, error) {
 	}
 
 	if rf.ResponsesFunctionToolCallOutputStr != nil {
-		return sonic.Marshal(*rf.ResponsesFunctionToolCallOutputStr)
+		return Marshal(*rf.ResponsesFunctionToolCallOutputStr)
 	}
 	if rf.ResponsesFunctionToolCallOutputBlocks != nil {
-		return sonic.Marshal(rf.ResponsesFunctionToolCallOutputBlocks)
+		return Marshal(rf.ResponsesFunctionToolCallOutputBlocks)
 	}
 	// If both are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for ResponsesFunctionToolCallOutput.
@@ -684,7 +938,7 @@ func (rf ResponsesFunctionToolCallOutput) MarshalJSON() ([]byte, error) {
 func (rf *ResponsesFunctionToolCallOutput) UnmarshalJSON(data []byte) error {
 	// Parse as generic object to check if it contains content-like fields
 	var genericObj map[string]interface{}
-	if err := sonic.Unmarshal(data, &genericObj); err != nil {
+	if err := Unmarshal(data, &genericObj); err != nil {
 		return err
 	}
 
@@ -704,14 +958,14 @@ func (rf *ResponsesFunctionToolCallOutput) UnmarshalJSON(data []byte) error {
 
 	// First, try to unmarshal as a direct string
 	var stringContent string
-	if err := sonic.Unmarshal(data, &stringContent); err == nil {
+	if err := Unmarshal(data, &stringContent); err == nil {
 		rf.ResponsesFunctionToolCallOutputStr = &stringContent
 		return nil
 	}
 
 	// Try to unmarshal as a direct array of ContentBlock
 	var arrayContent []ResponsesMessageContentBlock
-	if err := sonic.Unmarshal(data, &arrayContent); err == nil {
+	if err := Unmarshal(data, &arrayContent); err == nil {
 		rf.ResponsesFunctionToolCallOutputBlocks = arrayContent
 		return nil
 	}
@@ -725,7 +979,7 @@ func (rf *ResponsesFunctionToolCallOutput) UnmarshalJSON(data []byte) error {
 
 // ResponsesReasoning represents a reasoning output
 type ResponsesReasoning struct {
-	Summary          []ResponsesReasoningContent `json:"summary"`
+	Summary          []ResponsesReasoningSummary `json:"summary"`
 	EncryptedContent *string                     `json:"encrypted_content,omitempty"`
 }
 
@@ -737,8 +991,8 @@ const (
 	ResponsesReasoningContentBlockTypeSummaryText ResponsesReasoningContentBlockType = "summary_text"
 )
 
-// ResponsesReasoningContent represents a reasoning content block
-type ResponsesReasoningContent struct {
+// ResponsesReasoningSummary represents a reasoning content block
+type ResponsesReasoningSummary struct {
 	Type ResponsesReasoningContentBlockType `json:"type"`
 	Text string                             `json:"text"`
 }
@@ -778,10 +1032,10 @@ func (o ResponsesCodeInterpreterOutput) MarshalJSON() ([]byte, error) {
 
 	// Marshal whichever one is present
 	if o.ResponsesCodeInterpreterOutputLogs != nil {
-		return sonic.Marshal(o.ResponsesCodeInterpreterOutputLogs)
+		return Marshal(o.ResponsesCodeInterpreterOutputLogs)
 	}
 	if o.ResponsesCodeInterpreterOutputImage != nil {
-		return sonic.Marshal(o.ResponsesCodeInterpreterOutputImage)
+		return Marshal(o.ResponsesCodeInterpreterOutputImage)
 	}
 
 	// Return null if neither is set
@@ -799,7 +1053,7 @@ func (o *ResponsesCodeInterpreterOutput) UnmarshalJSON(data []byte) error {
 	var typeStruct struct {
 		Type string `json:"type"`
 	}
-	if err := sonic.Unmarshal(data, &typeStruct); err != nil {
+	if err := Unmarshal(data, &typeStruct); err != nil {
 		return fmt.Errorf("failed to read type field: %w", err)
 	}
 
@@ -807,7 +1061,7 @@ func (o *ResponsesCodeInterpreterOutput) UnmarshalJSON(data []byte) error {
 	switch typeStruct.Type {
 	case "logs":
 		var logs ResponsesCodeInterpreterOutputLogs
-		if err := sonic.Unmarshal(data, &logs); err != nil {
+		if err := Unmarshal(data, &logs); err != nil {
 			return fmt.Errorf("failed to unmarshal logs output: %w", err)
 		}
 		o.ResponsesCodeInterpreterOutputLogs = &logs
@@ -816,7 +1070,7 @@ func (o *ResponsesCodeInterpreterOutput) UnmarshalJSON(data []byte) error {
 
 	case "image":
 		var image ResponsesCodeInterpreterOutputImage
-		if err := sonic.Unmarshal(data, &image); err != nil {
+		if err := Unmarshal(data, &image); err != nil {
 			return fmt.Errorf("failed to unmarshal image output: %w", err)
 		}
 		o.ResponsesCodeInterpreterOutputImage = &image
@@ -966,13 +1220,13 @@ func (tc ResponsesToolChoice) MarshalJSON() ([]byte, error) {
 	}
 
 	if tc.ResponsesToolChoiceStr != nil {
-		return sonic.Marshal(tc.ResponsesToolChoiceStr)
+		return Marshal(tc.ResponsesToolChoiceStr)
 	}
 	if tc.ResponsesToolChoiceStruct != nil {
-		return sonic.Marshal(tc.ResponsesToolChoiceStruct)
+		return Marshal(tc.ResponsesToolChoiceStruct)
 	}
 	// If both are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for ChatMessageContent.
@@ -981,14 +1235,14 @@ func (tc ResponsesToolChoice) MarshalJSON() ([]byte, error) {
 func (tc *ResponsesToolChoice) UnmarshalJSON(data []byte) error {
 	// First, try to unmarshal as a direct string
 	var toolChoiceStr string
-	if err := sonic.Unmarshal(data, &toolChoiceStr); err == nil {
+	if err := Unmarshal(data, &toolChoiceStr); err == nil {
 		tc.ResponsesToolChoiceStr = &toolChoiceStr
 		return nil
 	}
 
 	// Try to unmarshal as a direct array of ContentBlock
 	var responsesToolChoiceStruct ResponsesToolChoiceStruct
-	if err := sonic.Unmarshal(data, &responsesToolChoiceStruct); err == nil {
+	if err := Unmarshal(data, &responsesToolChoiceStruct); err == nil {
 		tc.ResponsesToolChoiceStruct = &responsesToolChoiceStruct
 		return nil
 	}
@@ -1028,6 +1282,9 @@ type ResponsesTool struct {
 	Name        *string           `json:"name,omitempty"`        // Common name field (Function, Custom tools)
 	Description *string           `json:"description,omitempty"` // Common description field (Function, Custom tools)
 
+	// Not in OpenAI's schemas, but sent by a few providers (Anthropic, Bedrock are some of them)
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+
 	*ResponsesToolFunction
 	*ResponsesToolFileSearch
 	*ResponsesToolComputerUsePreview
@@ -1040,10 +1297,300 @@ type ResponsesTool struct {
 	*ResponsesToolWebSearchPreview
 }
 
+// MarshalJSON implements custom JSON marshaling for ResponsesTool
+// It merges common fields with the appropriate embedded struct based on type
+func (t ResponsesTool) MarshalJSON() ([]byte, error) {
+	// Start with common fields
+	result := map[string]interface{}{
+		"type": t.Type,
+	}
+
+	if t.Name != nil {
+		result["name"] = t.Name
+	}
+	if t.Description != nil {
+		result["description"] = t.Description
+	}
+	if t.CacheControl != nil {
+		result["cache_control"] = t.CacheControl
+	}
+
+	// Based on type, marshal the appropriate embedded struct
+	switch t.Type {
+	case ResponsesToolTypeFunction:
+		if t.ResponsesToolFunction != nil {
+			bytes, err := Marshal(t.ResponsesToolFunction)
+			if err != nil {
+				return nil, err
+			}
+			var funcFields map[string]interface{}
+			if err := Unmarshal(bytes, &funcFields); err != nil {
+				return nil, err
+			}
+			for k, v := range funcFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeFileSearch:
+		if t.ResponsesToolFileSearch != nil {
+			bytes, err := Marshal(t.ResponsesToolFileSearch)
+			if err != nil {
+				return nil, err
+			}
+			var fileSearchFields map[string]interface{}
+			if err := Unmarshal(bytes, &fileSearchFields); err != nil {
+				return nil, err
+			}
+			for k, v := range fileSearchFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeComputerUsePreview:
+		if t.ResponsesToolComputerUsePreview != nil {
+			bytes, err := Marshal(t.ResponsesToolComputerUsePreview)
+			if err != nil {
+				return nil, err
+			}
+			var computerFields map[string]interface{}
+			if err := Unmarshal(bytes, &computerFields); err != nil {
+				return nil, err
+			}
+			for k, v := range computerFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeWebSearch:
+		if t.ResponsesToolWebSearch != nil {
+			bytes, err := Marshal(t.ResponsesToolWebSearch)
+			if err != nil {
+				return nil, err
+			}
+			var webSearchFields map[string]interface{}
+			if err := Unmarshal(bytes, &webSearchFields); err != nil {
+				return nil, err
+			}
+			for k, v := range webSearchFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeMCP:
+		if t.ResponsesToolMCP != nil {
+			bytes, err := Marshal(t.ResponsesToolMCP)
+			if err != nil {
+				return nil, err
+			}
+			var mcpFields map[string]interface{}
+			if err := Unmarshal(bytes, &mcpFields); err != nil {
+				return nil, err
+			}
+			for k, v := range mcpFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeCodeInterpreter:
+		if t.ResponsesToolCodeInterpreter != nil {
+			bytes, err := Marshal(t.ResponsesToolCodeInterpreter)
+			if err != nil {
+				return nil, err
+			}
+			var codeInterpreterFields map[string]interface{}
+			if err := Unmarshal(bytes, &codeInterpreterFields); err != nil {
+				return nil, err
+			}
+			for k, v := range codeInterpreterFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeImageGeneration:
+		if t.ResponsesToolImageGeneration != nil {
+			bytes, err := Marshal(t.ResponsesToolImageGeneration)
+			if err != nil {
+				return nil, err
+			}
+			var imageGenFields map[string]interface{}
+			if err := Unmarshal(bytes, &imageGenFields); err != nil {
+				return nil, err
+			}
+			for k, v := range imageGenFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeLocalShell:
+		if t.ResponsesToolLocalShell != nil {
+			bytes, err := Marshal(t.ResponsesToolLocalShell)
+			if err != nil {
+				return nil, err
+			}
+			var localShellFields map[string]interface{}
+			if err := Unmarshal(bytes, &localShellFields); err != nil {
+				return nil, err
+			}
+			for k, v := range localShellFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeCustom:
+		if t.ResponsesToolCustom != nil {
+			bytes, err := Marshal(t.ResponsesToolCustom)
+			if err != nil {
+				return nil, err
+			}
+			var customFields map[string]interface{}
+			if err := Unmarshal(bytes, &customFields); err != nil {
+				return nil, err
+			}
+			for k, v := range customFields {
+				result[k] = v
+			}
+		}
+
+	case ResponsesToolTypeWebSearchPreview:
+		if t.ResponsesToolWebSearchPreview != nil {
+			bytes, err := Marshal(t.ResponsesToolWebSearchPreview)
+			if err != nil {
+				return nil, err
+			}
+			var webSearchPreviewFields map[string]interface{}
+			if err := Unmarshal(bytes, &webSearchPreviewFields); err != nil {
+				return nil, err
+			}
+			for k, v := range webSearchPreviewFields {
+				result[k] = v
+			}
+		}
+	}
+
+	return Marshal(result)
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for ResponsesTool
+// It unmarshals common fields first, then the appropriate embedded struct based on type
+func (t *ResponsesTool) UnmarshalJSON(data []byte) error {
+	// First unmarshal into a map to inspect the type
+	var raw map[string]interface{}
+	if err := Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Extract type field
+	typeValue, ok := raw["type"]
+	if !ok {
+		return fmt.Errorf("missing required 'type' field in ResponsesTool")
+	}
+
+	typeStr, ok := typeValue.(string)
+	if !ok {
+		return fmt.Errorf("'type' field must be a string")
+	}
+	t.Type = ResponsesToolType(typeStr)
+
+	// Unmarshal common fields
+	if name, ok := raw["name"].(string); ok {
+		t.Name = &name
+	}
+	if description, ok := raw["description"].(string); ok {
+		t.Description = &description
+	}
+	if cacheControl, ok := raw["cache_control"]; ok {
+		bytes, err := Marshal(cacheControl)
+		if err != nil {
+			return err
+		}
+		var cc CacheControl
+		if err := Unmarshal(bytes, &cc); err != nil {
+			return err
+		}
+		t.CacheControl = &cc
+	}
+
+	// Based on type, unmarshal into the appropriate embedded struct
+	switch t.Type {
+	case ResponsesToolTypeFunction:
+		var funcTool ResponsesToolFunction
+		if err := Unmarshal(data, &funcTool); err != nil {
+			return err
+		}
+		t.ResponsesToolFunction = &funcTool
+
+	case ResponsesToolTypeFileSearch:
+		var fileSearchTool ResponsesToolFileSearch
+		if err := Unmarshal(data, &fileSearchTool); err != nil {
+			return err
+		}
+		t.ResponsesToolFileSearch = &fileSearchTool
+
+	case ResponsesToolTypeComputerUsePreview:
+		var computerTool ResponsesToolComputerUsePreview
+		if err := Unmarshal(data, &computerTool); err != nil {
+			return err
+		}
+		t.ResponsesToolComputerUsePreview = &computerTool
+
+	case ResponsesToolTypeWebSearch:
+		var webSearchTool ResponsesToolWebSearch
+		if err := Unmarshal(data, &webSearchTool); err != nil {
+			return err
+		}
+		t.ResponsesToolWebSearch = &webSearchTool
+
+	case ResponsesToolTypeMCP:
+		var mcpTool ResponsesToolMCP
+		if err := Unmarshal(data, &mcpTool); err != nil {
+			return err
+		}
+		t.ResponsesToolMCP = &mcpTool
+
+	case ResponsesToolTypeCodeInterpreter:
+		var codeInterpreterTool ResponsesToolCodeInterpreter
+		if err := Unmarshal(data, &codeInterpreterTool); err != nil {
+			return err
+		}
+		t.ResponsesToolCodeInterpreter = &codeInterpreterTool
+
+	case ResponsesToolTypeImageGeneration:
+		var imageGenTool ResponsesToolImageGeneration
+		if err := Unmarshal(data, &imageGenTool); err != nil {
+			return err
+		}
+		t.ResponsesToolImageGeneration = &imageGenTool
+
+	case ResponsesToolTypeLocalShell:
+		var localShellTool ResponsesToolLocalShell
+		if err := Unmarshal(data, &localShellTool); err != nil {
+			return err
+		}
+		t.ResponsesToolLocalShell = &localShellTool
+
+	case ResponsesToolTypeCustom:
+		var customTool ResponsesToolCustom
+		if err := Unmarshal(data, &customTool); err != nil {
+			return err
+		}
+		t.ResponsesToolCustom = &customTool
+
+	case ResponsesToolTypeWebSearchPreview:
+		var webSearchPreviewTool ResponsesToolWebSearchPreview
+		if err := Unmarshal(data, &webSearchPreviewTool); err != nil {
+			return err
+		}
+		t.ResponsesToolWebSearchPreview = &webSearchPreviewTool
+	}
+
+	return nil
+}
+
 // ResponsesToolFunction represents a tool function
 type ResponsesToolFunction struct {
 	Parameters *ToolFunctionParameters `json:"parameters,omitempty"` // A JSON schema object describing the parameters
-	Strict     *bool                   `json:"strict,omitempty"`     // Whether to enforce strict parameter validation
+	Strict     *bool                   `json:"strict"`               // Whether to enforce strict parameter validation
 }
 
 // ResponsesToolFileSearch represents a tool file search
@@ -1096,14 +1643,14 @@ func (f *ResponsesToolFileSearchFilter) MarshalJSON() ([]byte, error) {
 		return nil, fmt.Errorf("unknown filter type: %s", f.Type)
 	}
 
-	return sonic.Marshal(result)
+	return Marshal(result)
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for ResponsesToolFileSearchFilter
 func (f *ResponsesToolFileSearchFilter) UnmarshalJSON(data []byte) error {
 	// First, unmarshal into a map to inspect the type field
 	var raw map[string]interface{}
-	if err := sonic.Unmarshal(data, &raw); err != nil {
+	if err := Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("failed to unmarshal filter JSON: %w", err)
 	}
 
@@ -1128,7 +1675,7 @@ func (f *ResponsesToolFileSearchFilter) UnmarshalJSON(data []byte) error {
 		f.ResponsesToolFileSearchCompoundFilter = nil
 
 		// Unmarshal into the comparison filter
-		if err := sonic.Unmarshal(data, f.ResponsesToolFileSearchComparisonFilter); err != nil {
+		if err := Unmarshal(data, f.ResponsesToolFileSearchComparisonFilter); err != nil {
 			return fmt.Errorf("failed to unmarshal comparison filter: %w", err)
 		}
 
@@ -1146,7 +1693,7 @@ func (f *ResponsesToolFileSearchFilter) UnmarshalJSON(data []byte) error {
 		f.ResponsesToolFileSearchComparisonFilter = nil
 
 		// Unmarshal into the compound filter
-		if err := sonic.Unmarshal(data, f.ResponsesToolFileSearchCompoundFilter); err != nil {
+		if err := Unmarshal(data, f.ResponsesToolFileSearchCompoundFilter); err != nil {
 			return fmt.Errorf("failed to unmarshal compound filter: %w", err)
 		}
 
@@ -1188,6 +1735,8 @@ type ResponsesToolComputerUsePreview struct {
 	DisplayHeight int    `json:"display_height"` // The height of the computer display
 	DisplayWidth  int    `json:"display_width"`  // The width of the computer display
 	Environment   string `json:"environment"`    // The type of computer environment to control
+
+	EnableZoom *bool `json:"enable_zoom,omitempty"` // for computer tool in anthropic only
 }
 
 // ResponsesToolWebSearch represents a tool web search
@@ -1195,11 +1744,78 @@ type ResponsesToolWebSearch struct {
 	Filters           *ResponsesToolWebSearchFilters      `json:"filters,omitempty"`             // Filters for the search
 	SearchContextSize *string                             `json:"search_context_size,omitempty"` // "low" | "medium" | "high"
 	UserLocation      *ResponsesToolWebSearchUserLocation `json:"user_location,omitempty"`       // The approximate location of the user
+
+	// Anthropic only
+	MaxUses *int `json:"max_uses,omitempty"` // Maximum number of uses for the search
 }
 
 // ResponsesToolWebSearchFilters represents filters for web search
 type ResponsesToolWebSearchFilters struct {
-	AllowedDomains []string `json:"allowed_domains"` // Allowed domains for the search
+	AllowedDomains []string `json:"allowed_domains,omitempty"` // Allowed domains for the search
+	BlockedDomains []string `json:"blocked_domains,omitempty"` // Blocked domains for the search, only used in anthropic
+
+	// Gemini only
+	// Filter search results to a specific time range.
+	// If users set a start time, they must set an end time (and vice versa).
+	TimeRangeFilter *Interval `json:"time_range_filter,omitempty"`
+}
+
+// Interval represents a time interval, encoded as a start time (inclusive) and an end time (exclusive).
+// The start time must be less than or equal to the end time.
+// When the start equals the end time, the interval is an empty interval.
+// (matches no time)
+// When both start and end are unspecified, the interval matches any time.
+type Interval struct {
+	// Optional. The start time of the interval.
+	StartTime time.Time `json:"start_time,omitempty"`
+	// Optional. The end time of the interval.
+	EndTime time.Time `json:"end_time,omitempty"`
+}
+
+func (i *Interval) UnmarshalJSON(data []byte) error {
+	type Alias Interval
+	aux := &struct {
+		StartTime *time.Time `json:"start_time,omitempty"`
+		EndTime   *time.Time `json:"end_time,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(i),
+	}
+
+	if err := Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	if !reflect.ValueOf(aux.StartTime).IsZero() {
+		i.StartTime = time.Time(*aux.StartTime)
+	}
+
+	if !reflect.ValueOf(aux.EndTime).IsZero() {
+		i.EndTime = time.Time(*aux.EndTime)
+	}
+
+	return nil
+}
+
+func (i *Interval) MarshalJSON() ([]byte, error) {
+	type Alias Interval
+	aux := &struct {
+		StartTime *time.Time `json:"start_time,omitempty"`
+		EndTime   *time.Time `json:"end_time,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(i),
+	}
+
+	if !reflect.ValueOf(i.StartTime).IsZero() {
+		aux.StartTime = (*time.Time)(&i.StartTime)
+	}
+
+	if !reflect.ValueOf(i.EndTime).IsZero() {
+		aux.EndTime = (*time.Time)(&i.EndTime)
+	}
+
+	return Marshal(aux)
 }
 
 // ResponsesToolWebSearchUserLocation - The approximate location of the user
@@ -1252,7 +1868,7 @@ func (as ResponsesToolMCPAllowedToolsApprovalSetting) MarshalJSON() ([]byte, err
 	}
 
 	if as.Setting != nil {
-		return sonic.Marshal(*as.Setting)
+		return Marshal(*as.Setting)
 	}
 	if as.Always != nil || as.Never != nil {
 		// Marshal as an object with always/never fields
@@ -1263,17 +1879,17 @@ func (as ResponsesToolMCPAllowedToolsApprovalSetting) MarshalJSON() ([]byte, err
 		if as.Never != nil {
 			obj["never"] = as.Never
 		}
-		return sonic.Marshal(obj)
+		return Marshal(obj)
 	}
 	// If all are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for ResponsesToolMCPAllowedToolsApprovalSetting
 func (as *ResponsesToolMCPAllowedToolsApprovalSetting) UnmarshalJSON(data []byte) error {
 	// First, try to unmarshal as a direct string
 	var settingStr string
-	if err := sonic.Unmarshal(data, &settingStr); err == nil {
+	if err := Unmarshal(data, &settingStr); err == nil {
 		as.Setting = &settingStr
 		return nil
 	}
@@ -1283,7 +1899,7 @@ func (as *ResponsesToolMCPAllowedToolsApprovalSetting) UnmarshalJSON(data []byte
 		Always *ResponsesToolMCPAllowedToolsApprovalFilter `json:"always,omitempty"`
 		Never  *ResponsesToolMCPAllowedToolsApprovalFilter `json:"never,omitempty"`
 	}
-	if err := sonic.Unmarshal(data, &obj); err == nil {
+	if err := Unmarshal(data, &obj); err == nil {
 		as.Always = obj.Always
 		as.Never = obj.Never
 		return nil
@@ -1380,7 +1996,9 @@ const (
 	ResponsesStreamResponseTypeFileSearchCallSearching        ResponsesStreamResponseType = "response.file_search_call.searching"
 	ResponsesStreamResponseTypeFileSearchCallResultsAdded     ResponsesStreamResponseType = "response.file_search_call.results.added"
 	ResponsesStreamResponseTypeFileSearchCallResultsCompleted ResponsesStreamResponseType = "response.file_search_call.results.completed"
+	ResponsesStreamResponseTypeWebSearchCallInProgress        ResponsesStreamResponseType = "response.web_search_call.in_progress"
 	ResponsesStreamResponseTypeWebSearchCallSearching         ResponsesStreamResponseType = "response.web_search_call.searching"
+	ResponsesStreamResponseTypeWebSearchCallCompleted         ResponsesStreamResponseType = "response.web_search_call.completed"
 	ResponsesStreamResponseTypeWebSearchCallResultsAdded      ResponsesStreamResponseType = "response.web_search_call.results.added"
 	ResponsesStreamResponseTypeWebSearchCallResultsCompleted  ResponsesStreamResponseType = "response.web_search_call.results.completed"
 
@@ -1427,14 +2045,15 @@ type BifrostResponsesStreamResponse struct {
 	Response *BifrostResponsesResponse `json:"response,omitempty"`
 
 	OutputIndex *int              `json:"output_index,omitempty"`
-	Item        *ResponsesMessage `json:"item,omitempty"`
+	Item        *ResponsesMessage `json:"item"`
 
 	ContentIndex *int                          `json:"content_index,omitempty"`
 	ItemID       *string                       `json:"item_id,omitempty"`
 	Part         *ResponsesMessageContentBlock `json:"part,omitempty"`
 
-	Delta    *string                                    `json:"delta,omitempty"`
-	LogProbs []ResponsesOutputMessageContentTextLogProb `json:"logprobs,omitempty"`
+	Delta     *string                                    `json:"delta,omitempty"`
+	Signature *string                                    `json:"signature,omitempty"` // Not in OpenAI's spec, but sent by other providers
+	LogProbs  []ResponsesOutputMessageContentTextLogProb `json:"logprobs"`
 
 	Text *string `json:"text,omitempty"` // Full text of the output item, comes with event "response.output_text.done"
 
@@ -1458,4 +2077,86 @@ type BifrostResponsesStreamResponse struct {
 	SearchResults []SearchResult `json:"search_results,omitempty"`
 	Videos        []VideoResult  `json:"videos,omitempty"`
 	Citations     []string       `json:"citations,omitempty"`
+}
+
+func (resp *BifrostResponsesStreamResponse) WithDefaults() *BifrostResponsesStreamResponse {
+	if resp == nil {
+		return nil
+	}
+
+	// Filter out non-OpenAI response types
+	if resp.Type == ResponsesStreamResponseTypePing {
+		return nil
+	}
+
+	result := &BifrostResponsesStreamResponse{
+		Type:           resp.Type,
+		SequenceNumber: resp.SequenceNumber,
+	}
+
+	// Copy nested response (applies defaults)
+	result.Response = resp.Response.WithDefaults()
+
+	// Copy all streaming-specific fields
+	result.OutputIndex = resp.OutputIndex
+	result.Item = resp.Item
+	result.ContentIndex = resp.ContentIndex
+	result.ItemID = resp.ItemID
+	result.Part = resp.Part
+	result.Delta = resp.Delta
+	result.Signature = resp.Signature
+	result.Text = resp.Text
+	result.Refusal = resp.Refusal
+	result.Arguments = resp.Arguments
+	result.PartialImageB64 = resp.PartialImageB64
+	result.PartialImageIndex = resp.PartialImageIndex
+	result.Annotation = resp.Annotation
+	result.AnnotationIndex = resp.AnnotationIndex
+	result.Code = resp.Code
+	result.Message = resp.Message
+	result.Param = resp.Param
+	result.LogProbs = resp.LogProbs
+
+	// Apply event-specific defaults
+	switch resp.Type {
+	case ResponsesStreamResponseTypeOutputItemAdded:
+		// Default item status to "in_progress"
+		if result.Item != nil && result.Item.Status == nil {
+			result.Item.Status = Ptr("in_progress")
+		}
+
+	case ResponsesStreamResponseTypeOutputTextDelta, ResponsesStreamResponseTypeOutputTextDone:
+		// Ensure logprobs array exists
+		if result.LogProbs == nil {
+			result.LogProbs = []ResponsesOutputMessageContentTextLogProb{}
+		}
+
+	case ResponsesStreamResponseTypeContentPartAdded, ResponsesStreamResponseTypeContentPartDone:
+		// Ensure part has proper structure
+		if result.Part == nil {
+			result.Part = &ResponsesMessageContentBlock{
+				Type: ResponsesOutputMessageContentTypeText,
+				Text: Ptr(""),
+				ResponsesOutputMessageContentText: &ResponsesOutputMessageContentText{
+					LogProbs:    []ResponsesOutputMessageContentTextLogProb{},
+					Annotations: []ResponsesOutputMessageContentTextAnnotation{},
+				},
+			}
+		} else if result.Part.ResponsesOutputMessageContentText == nil {
+			result.Part.ResponsesOutputMessageContentText = &ResponsesOutputMessageContentText{
+				LogProbs:    []ResponsesOutputMessageContentTextLogProb{},
+				Annotations: []ResponsesOutputMessageContentTextAnnotation{},
+			}
+		} else {
+			// Ensure nested arrays exist
+			if result.Part.ResponsesOutputMessageContentText.LogProbs == nil {
+				result.Part.ResponsesOutputMessageContentText.LogProbs = []ResponsesOutputMessageContentTextLogProb{}
+			}
+			if result.Part.ResponsesOutputMessageContentText.Annotations == nil {
+				result.Part.ResponsesOutputMessageContentText.Annotations = []ResponsesOutputMessageContentTextAnnotation{}
+			}
+		}
+	}
+
+	return result
 }

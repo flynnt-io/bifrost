@@ -22,6 +22,12 @@ type ElevenlabsSpeechRequest struct {
 	ApplyTextNormalization          *string                                    `json:"apply_text_normalization,omitempty"`
 	ApplyLanguageTextNormalization  *bool                                      `json:"apply_language_text_normalization,omitempty"`
 	UsePVCAsIVC                     *bool                                      `json:"use_pvc_as_ivc,omitempty"` // deprecated
+	ExtraParams                     map[string]interface{}                     `json:"-"`
+}
+
+// GetExtraParams implements the providerUtils.RequestBodyWithExtraParams interface.
+func (r *ElevenlabsSpeechRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
 }
 
 // ElevenlabsSpeechWithTimestampsResponse represents the response from the with-timestamps endpoint
@@ -70,6 +76,12 @@ type ElevenlabsTranscriptionRequest struct {
 	Seed                  *int                             `json:"seed,omitempty"`
 	UseMultiChannel       *bool                            `json:"use_multi_channel,omitempty"`
 	WebhookMetadata       interface{}                      `json:"webhook_metadata,omitempty"`
+	ExtraParams           map[string]interface{}           `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *ElevenlabsTranscriptionRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
 }
 
 type ElevenlabsTimestampsGranularity string
@@ -155,7 +167,7 @@ type ElevenlabsSpeechToTextWebhookResponse struct {
 
 // ERROR TYPES
 type ElevenlabsError struct {
-	Detail ElevenlabsErrorDetail `json:"detail"`
+	Detail *ElevenlabsErrorDetail `json:"detail,omitempty"`
 }
 
 // ElevenlabsErrorDetail handles both single object (non-validation errors) and

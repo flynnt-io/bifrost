@@ -3,13 +3,16 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
-import { ProviderName, RequestTypeColors, RequestTypeLabels, Status, StatusColors } from "@/lib/constants/logs";
+import { ProviderName, RequestTypeColors, RequestTypeLabels, Status, StatusBarColors } from "@/lib/constants/logs";
 import { LogEntry, ResponsesMessageContentBlock } from "@/lib/types/logs";
 import { ColumnDef } from "@tanstack/react-table";
 import { ArrowUpDown, Trash2 } from "lucide-react";
 import moment from "moment";
 
 function getMessage(log?: LogEntry) {
+	if (log?.object === "list_models") {
+		return "N/A";
+	}
 	if (log?.input_history && log.input_history.length > 0) {
 		let userMessageContent = log.input_history[log.input_history.length - 1].content;
 		if (userMessageContent == undefined) {
@@ -26,7 +29,8 @@ function getMessage(log?: LogEntry) {
 		}
 		return lastTextContentBlock;
 	} else if (log?.responses_input_history && log.responses_input_history.length > 0) {
-		let lastMessageContent = log.responses_input_history[log.responses_input_history.length - 1].content;
+		let lastMessage = log.responses_input_history[log.responses_input_history.length - 1];
+		let lastMessageContent = lastMessage.content;
 		if (typeof lastMessageContent === "string") {
 			return lastMessageContent;
 		}
@@ -36,26 +40,41 @@ function getMessage(log?: LogEntry) {
 				lastTextContentBlock = block.text;
 			}
 		}
-		return lastTextContentBlock;
+		// If no content found in content field, check output field for Responses API
+		if (!lastTextContentBlock && lastMessage.output) {
+			// Handle output field - it could be a string, an array of content blocks, or a computer tool call output data
+			if (typeof lastMessage.output === "string") {
+				return lastMessage.output;
+			} else if (Array.isArray(lastMessage.output)) {
+				return lastMessage.output.map((block) => block.text).join("\n");
+			} else if (lastMessage.output.type && lastMessage.output.type === "computer_screenshot") {
+				return lastMessage.output.image_url;
+			}
+		}
+		return lastTextContentBlock ?? "";
 	} else if (log?.speech_input) {
 		return log.speech_input.input;
 	} else if (log?.transcription_input) {
-		return log.transcription_input.prompt || "Audio file";
+		return "Audio file";
+	} else if (log?.image_generation_input?.prompt) {
+		return log.image_generation_input.prompt;
+	}
+	const obj = log?.object as string | undefined;
+	if (obj === "image_edit" || obj === "image_edit_stream" || obj === "image_variation") {
+		return "Image file";
 	}
 	return "";
 }
 
-export const createColumns = (onDelete: (log: LogEntry) => void): ColumnDef<LogEntry>[] => [
+export const createColumns = (onDelete: (log: LogEntry) => void, hasDeleteAccess = true): ColumnDef<LogEntry>[] => [
 	{
 		accessorKey: "status",
-		header: "Status",
+		header: "",
+		size: 8,
+		maxSize: 8,
 		cell: ({ row }) => {
 			const status = row.original.status as Status;
-			return (
-				<Badge variant="secondary" className={`${StatusColors[status] ?? ""} font-mono text-xs uppercase`}>
-					{status}
-				</Badge>
-			);
+			return <div className={`h-full min-h-[24px] w-1 rounded-sm ${StatusBarColors[status]}`} />;
 		},
 	},
 	{
@@ -68,7 +87,7 @@ export const createColumns = (onDelete: (log: LogEntry) => void): ColumnDef<LogE
 		),
 		cell: ({ row }) => {
 			const timestamp = row.original.timestamp;
-			return <div className="font-mono text-xs">{moment(timestamp).format("YYYY-MM-DD hh:mm:ss A (Z)")}</div>;
+			return <div className="text-xs">{moment(timestamp).format("YYYY-MM-DD hh:mm:ss A (Z)")}</div>;
 		},
 	},
 	{
@@ -110,7 +129,7 @@ export const createColumns = (onDelete: (log: LogEntry) => void): ColumnDef<LogE
 	{
 		accessorKey: "model",
 		header: "Model",
-		cell: ({ row }) => <div className="max-w-[120px] truncate font-mono text-xs font-normal">{row.original.model}</div>,
+		cell: ({ row }) => <div className="max-w-[120px] truncate font-mono text-xs font-normal">{row.original.model || "N/A"}</div>,
 	},
 	{
 		accessorKey: "latency",
@@ -176,7 +195,7 @@ export const createColumns = (onDelete: (log: LogEntry) => void): ColumnDef<LogE
 		cell: ({ row }) => {
 			const log = row.original;
 			return (
-				<Button variant="outline" size="icon" onClick={() => onDelete(log)}>
+				<Button variant="outline" size="icon" onClick={() => onDelete(log)} disabled={!hasDeleteAccess}>
 					<Trash2 />
 				</Button>
 			);

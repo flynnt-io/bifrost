@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { HeadersTable } from "@/components/ui/headersTable";
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -19,6 +19,37 @@ import { toast } from "sonner";
 interface NetworkFormFragmentProps {
 	provider: ModelProvider;
 }
+
+// seconds to human readable time
+const secondsToHumanReadable = (seconds: number) => {
+	// Handle edge cases
+	if (!seconds || seconds < 0 || isNaN(seconds)) {
+		return "0 seconds";
+	}
+	seconds = Math.floor(seconds);
+	if (seconds < 60) {
+		return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+	}
+	if (seconds < 3600) {
+		const minutes = Math.floor(seconds / 60);
+		return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+	}
+	if (seconds < 86400) {
+		const hours = Math.floor(seconds / 3600);
+		return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+	}
+	// For >= 1 day, only show non-zero components
+	const days = Math.floor(seconds / 86400);
+	const hours = Math.floor((seconds % 86400) / 3600);
+	const minutes = Math.floor((seconds % 3600) / 60);
+	const remainingSeconds = seconds % 60;
+	const parts: string[] = [];
+	parts.push(`${days} ${days === 1 ? "day" : "days"}`);
+	if (hours > 0) parts.push(`${hours} ${hours === 1 ? "hour" : "hours"}`);
+	if (minutes > 0) parts.push(`${minutes} ${minutes === 1 ? "minute" : "minutes"}`);
+	if (remainingSeconds > 0) parts.push(`${remainingSeconds} ${remainingSeconds === 1 ? "second" : "seconds"}`);
+	return parts.join(" ");
+};
 
 export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 	const dispatch = useAppDispatch();
@@ -74,6 +105,7 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 			.unwrap()
 			.then(() => {
 				toast.success("Provider configuration updated successfully");
+				form.reset(data);
 			})
 			.catch((err) => {
 				toast.error("Failed to update provider configuration", {
@@ -98,6 +130,7 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 	}, [form, provider.name, provider.network_config]);
 
 	const baseURLRequired = provider.name === "ollama" || provider.name === "sgl" || isCustomProvider;
+	const hideBaseURL = provider.name === "vllm";
 
 	return (
 		<Form {...form}>
@@ -105,23 +138,26 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				{/* Network Configuration */}
 				<div className="space-y-4">
 					<div className="grid grid-cols-1 gap-4">
-						<FormField
-							control={form.control}
-							name="network_config.base_url"
-							render={({ field }) => (
-								<FormItem>
-									<FormLabel>Base URL {baseURLRequired ? "(Required)" : "(Optional)"}</FormLabel>
-									<FormControl>
-										<Input
-											placeholder={isCustomProvider ? "https://api.your-provider.com" : "https://api.example.com"}
-											{...field}
-											value={field.value || ""}
-										/>
-									</FormControl>
-									<FormMessage />
-								</FormItem>
-							)}
-						/>
+						{!hideBaseURL && (
+							<FormField
+								control={form.control}
+								name="network_config.base_url"
+								render={({ field }) => (
+									<FormItem>
+										<FormLabel>Base URL {baseURLRequired ? "(Required)" : "(Optional)"}</FormLabel>
+										<FormControl>
+											<Input
+												placeholder={isCustomProvider ? "https://api.your-provider.com" : "https://api.example.com"}
+												{...field}
+												value={field.value || ""}
+												disabled={!hasUpdateProviderAccess}
+											/>
+										</FormControl>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+						)}
 						<div className="flex w-full flex-row items-start gap-4">
 							<FormField
 								control={form.control}
@@ -130,8 +166,26 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									<FormItem className="flex-1">
 										<FormLabel>Timeout (seconds)</FormLabel>
 										<FormControl>
-											<Input placeholder="30" {...field} onChange={(e) => field.onChange(Number(e.target.value))} />
+											<Input
+												placeholder="30"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("network_config");
+												}}
+											/>
 										</FormControl>
+										<FormDescription>{secondsToHumanReadable(field.value)}</FormDescription>
 										<FormMessage />
 									</FormItem>
 								)}
@@ -143,7 +197,24 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									<FormItem className="flex-1">
 										<FormLabel>Max Retries</FormLabel>
 										<FormControl>
-											<Input placeholder="0" {...field} onChange={(e) => field.onChange(Number(e.target.value))} />
+											<Input
+												placeholder="0"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("network_config");
+												}}
+											/>
 										</FormControl>
 										<FormMessage />
 									</FormItem>
@@ -158,7 +229,24 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									<FormItem className="flex-1">
 										<FormLabel>Initial Backoff (ms)</FormLabel>
 										<FormControl>
-											<Input placeholder="e.g 500" {...field} onChange={(e) => field.onChange(Number(e.target.value))} />
+											<Input
+												placeholder="e.g 500"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("network_config");
+												}}
+											/>
 										</FormControl>
 										<FormMessage />
 									</FormItem>
@@ -171,7 +259,24 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									<FormItem className="flex-1">
 										<FormLabel>Max Backoff (ms)</FormLabel>
 										<FormControl>
-											<Input placeholder="e.g 10000" {...field} onChange={(e) => field.onChange(Number(e.target.value))} />
+											<Input
+												placeholder="e.g 10000"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("network_config");
+												}}
+											/>
 										</FormControl>
 										<FormMessage />
 									</FormItem>
@@ -190,6 +295,7 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 											keyPlaceholder="Header name"
 											valuePlaceholder="Header value"
 											label="Extra Headers"
+											disabled={!hasUpdateProviderAccess}
 										/>
 									</FormControl>
 									<FormMessage />
@@ -201,25 +307,27 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 
 				{/* Form Actions */}
 				<div className="flex justify-end space-x-2 py-2">
-					<Button
-						type="button"
-						variant="outline"
-						onClick={() => {
-							form.reset({
-								network_config: undefined,
-							});
-							onSubmit(form.getValues());
-						}}
-						disabled={
-							!hasUpdateProviderAccess ||
-							isUpdatingProvider ||
-							!provider.network_config ||
-							!provider.network_config.base_url ||
-							provider.network_config.base_url.trim() === ""
-						}
-					>
-						Remove configuration
-					</Button>
+					{!hideBaseURL && (
+						<Button
+							type="button"
+							variant="outline"
+							onClick={() => {
+								form.reset({
+									network_config: undefined,
+								});
+								onSubmit(form.getValues());
+							}}
+							disabled={
+								!hasUpdateProviderAccess ||
+								isUpdatingProvider ||
+								!provider.network_config ||
+								!provider.network_config.base_url ||
+								provider.network_config.base_url.trim() === ""
+							}
+						>
+							Remove configuration
+						</Button>
+					)}
 					<TooltipProvider>
 						<Tooltip>
 							<TooltipTrigger asChild>

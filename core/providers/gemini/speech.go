@@ -10,15 +10,8 @@ import (
 )
 
 // ToBifrostSpeechRequest converts a GeminiGenerationRequest to a BifrostSpeechRequest
-func (request *GeminiGenerationRequest) ToBifrostSpeechRequest() *schemas.BifrostSpeechRequest {
-	provider, model := schemas.ParseModelString(request.Model, schemas.Gemini)
-
-	if provider == schemas.Vertex {
-		// Add google/ prefix for Bifrost if not already present
-		if !strings.HasPrefix(model, "google/") {
-			model = "google/" + model
-		}
-	}
+func (request *GeminiGenerationRequest) ToBifrostSpeechRequest(ctx *schemas.BifrostContext) *schemas.BifrostSpeechRequest {
+	provider, model := schemas.ParseModelString(request.Model, utils.CheckAndSetDefaultProvider(ctx, schemas.Gemini))
 
 	bifrostReq := &schemas.BifrostSpeechRequest{
 		Provider: provider,
@@ -107,7 +100,7 @@ func ToGeminiSpeechRequest(bifrostReq *schemas.BifrostSpeechRequest) (*GeminiGen
 	// Convert parameters to generation config
 	geminiReq.GenerationConfig.ResponseModalities = []Modality{ModalityAudio}
 	// Convert speech input to Gemini format
-	if bifrostReq.Input.Input != "" {
+	if bifrostReq.Input != nil && bifrostReq.Input.Input != "" {
 		geminiReq.Contents = []Content{
 			{
 				Parts: []*Part{
@@ -123,6 +116,7 @@ func ToGeminiSpeechRequest(bifrostReq *schemas.BifrostSpeechRequest) (*GeminiGen
 			if bifrostReq.Params.VoiceConfig.Voice != nil || len(bifrostReq.Params.VoiceConfig.MultiVoiceConfig) > 0 {
 				addSpeechConfigToGenerationConfig(&geminiReq.GenerationConfig, bifrostReq.Params.VoiceConfig)
 			}
+			geminiReq.ExtraParams = bifrostReq.Params.ExtraParams
 		}
 	}
 	return geminiReq, nil
@@ -139,10 +133,14 @@ func (response *GenerateContentResponse) ToBifrostSpeechResponse(ctx context.Con
 			var audioData []byte
 			// Extract audio data from all parts
 			for _, part := range candidate.Content.Parts {
-				if part.InlineData != nil && part.InlineData.Data != nil {
+				if part.InlineData != nil && len(part.InlineData.Data) > 0 {
 					// Check if this is audio data
 					if strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
-						audioData = append(audioData, part.InlineData.Data...)
+						decodedData, err := decodeBase64StringToBytes(part.InlineData.Data)
+						if err != nil {
+							return nil, fmt.Errorf("failed to decode base64 audio data: %v", err)
+						}
+						audioData = append(audioData, decodedData...)
 					}
 				}
 			}
@@ -156,9 +154,14 @@ func (response *GenerateContentResponse) ToBifrostSpeechResponse(ctx context.Con
 						return nil, fmt.Errorf("failed to convert PCM to WAV: %v", err)
 					}
 					bifrostResp.Audio = wavData
-				}else{
+				} else {
 					bifrostResp.Audio = audioData
 				}
+			}
+
+			// Set usage information
+			if response.UsageMetadata != nil {
+				bifrostResp.Usage = convertGeminiUsageMetadataToSpeechUsage(response.UsageMetadata)
 			}
 		}
 	}
@@ -178,13 +181,18 @@ func ToGeminiSpeechResponse(bifrostResp *schemas.BifrostSpeechResponse) *Generat
 			Parts: []*Part{
 				{
 					InlineData: &Blob{
-						Data:     bifrostResp.Audio,
-						MIMEType: detectAudioMimeType(bifrostResp.Audio),
+						Data:     encodeBytesToBase64String(bifrostResp.Audio),
+						MIMEType: utils.DetectAudioMimeType(bifrostResp.Audio),
 					},
 				},
 			},
 			Role: string(RoleModel),
 		},
+	}
+
+	// Set usage metadata if present
+	if bifrostResp.Usage != nil {
+		genaiResp.UsageMetadata = convertBifrostSpeechUsageToGeminiUsageMetadata(bifrostResp.Usage)
 	}
 
 	genaiResp.Candidates = []*Candidate{candidate}

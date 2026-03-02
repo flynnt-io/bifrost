@@ -5,6 +5,7 @@ package handlers
 import (
 	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 )
@@ -22,6 +23,7 @@ func NewIntegrationHandler(client *bifrost.Bifrost, handlerStore lib.HandlerStor
 		integrations.NewAnthropicRouter(client, handlerStore, logger),
 		integrations.NewGenAIRouter(client, handlerStore, logger),
 		integrations.NewLiteLLMRouter(client, handlerStore, logger),
+		integrations.NewCohereRouter(client, handlerStore, logger),
 		integrations.NewLangChainRouter(client, handlerStore, logger),
 		integrations.NewPydanticAIRouter(client, handlerStore, logger),
 		integrations.NewBedrockRouter(client, handlerStore, logger),
@@ -33,7 +35,7 @@ func NewIntegrationHandler(client *bifrost.Bifrost, handlerStore lib.HandlerStor
 }
 
 // RegisterRoutes registers all integration routes for AI provider compatibility endpoints
-func (h *IntegrationHandler) RegisterRoutes(r *router.Router, middlewares ...lib.BifrostHTTPMiddleware) {
+func (h *IntegrationHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	// Register routes for each integration extension
 	for _, extension := range h.extensions {
 		extension.RegisterRoutes(r, middlewares...)

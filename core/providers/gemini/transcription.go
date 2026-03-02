@@ -1,21 +1,16 @@
 package gemini
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
 // ToBifrostTranscriptionRequest converts a GeminiGenerationRequest to a BifrostTranscriptionRequest
-func (request *GeminiGenerationRequest) ToBifrostTranscriptionRequest() *schemas.BifrostTranscriptionRequest {
-	provider, model := schemas.ParseModelString(request.Model, schemas.Gemini)
-
-	if provider == schemas.Vertex {
-		// Add google/ prefix for Bifrost if not already present
-		if !strings.HasPrefix(model, "google/") {
-			model = "google/" + model
-		}
-	}
+func (request *GeminiGenerationRequest) ToBifrostTranscriptionRequest(ctx *schemas.BifrostContext) (*schemas.BifrostTranscriptionRequest, error) {
+	provider, model := schemas.ParseModelString(request.Model, utils.CheckAndSetDefaultProvider(ctx, schemas.Gemini))
 
 	bifrostReq := &schemas.BifrostTranscriptionRequest{
 		Provider: provider,
@@ -39,7 +34,11 @@ func (request *GeminiGenerationRequest) ToBifrostTranscriptionRequest() *schemas
 
 			// Extract audio data from inline data
 			if part.InlineData != nil && strings.HasPrefix(strings.ToLower(part.InlineData.MIMEType), "audio/") {
-				audioData = append(audioData, part.InlineData.Data...)
+				decodedData, err := decodeBase64StringToBytes(part.InlineData.Data)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode base64 audio data: %v", err)
+				}
+				audioData = append(audioData, decodedData...)
 				if audioMimeType == "" {
 					audioMimeType = part.InlineData.MIMEType
 				}
@@ -101,7 +100,7 @@ func (request *GeminiGenerationRequest) ToBifrostTranscriptionRequest() *schemas
 		bifrostReq.Params.ExtraParams["labels"] = request.Labels
 	}
 
-	return bifrostReq
+	return bifrostReq, nil
 }
 
 func ToGeminiTranscriptionRequest(bifrostReq *schemas.BifrostTranscriptionRequest) *GeminiGenerationRequest {
@@ -116,24 +115,27 @@ func ToGeminiTranscriptionRequest(bifrostReq *schemas.BifrostTranscriptionReques
 
 	// Convert parameters to generation config
 	if bifrostReq.Params != nil {
-
+		geminiReq.ExtraParams = bifrostReq.Params.ExtraParams
 		// Handle extra parameters
 		if bifrostReq.Params.ExtraParams != nil {
 			// Safety settings
 			if safetySettings, ok := schemas.SafeExtractFromMap(bifrostReq.Params.ExtraParams, "safety_settings"); ok {
-				if settings, ok := safetySettings.([]SafetySetting); ok {
+				delete(geminiReq.ExtraParams, "safety_settings")
+				if settings, ok := SafeExtractSafetySettings(safetySettings); ok {
 					geminiReq.SafetySettings = settings
 				}
 			}
 
 			// Cached content
 			if cachedContent, ok := schemas.SafeExtractString(bifrostReq.Params.ExtraParams["cached_content"]); ok {
+				delete(geminiReq.ExtraParams, "cached_content")
 				geminiReq.CachedContent = cachedContent
 			}
 
 			// Labels
 			if labels, ok := schemas.SafeExtractFromMap(bifrostReq.Params.ExtraParams, "labels"); ok {
-				if labelMap, ok := labels.(map[string]string); ok {
+				if labelMap, ok := schemas.SafeExtractStringMap(labels); ok {
+					delete(geminiReq.ExtraParams, "labels")
 					geminiReq.Labels = labelMap
 				}
 			}
@@ -159,8 +161,8 @@ func ToGeminiTranscriptionRequest(bifrostReq *schemas.BifrostTranscriptionReques
 	if len(bifrostReq.Input.File) > 0 {
 		parts = append(parts, &Part{
 			InlineData: &Blob{
-				MIMEType: detectAudioMimeType(bifrostReq.Input.File),
-				Data:     bifrostReq.Input.File,
+				MIMEType: utils.DetectAudioMimeType(bifrostReq.Input.File),
+				Data:     encodeBytesToBase64String(bifrostReq.Input.File),
 			},
 		})
 	}
@@ -177,9 +179,6 @@ func ToGeminiTranscriptionRequest(bifrostReq *schemas.BifrostTranscriptionReques
 // ToBifrostTranscriptionResponse converts a GenerateContentResponse to a BifrostTranscriptionResponse
 func (response *GenerateContentResponse) ToBifrostTranscriptionResponse() *schemas.BifrostTranscriptionResponse {
 	bifrostResp := &schemas.BifrostTranscriptionResponse{}
-
-	// Extract usage metadata
-	inputTokens, outputTokens, totalTokens, _, _ := response.extractUsageMetadata()
 
 	// Process candidates to extract text content
 	if len(response.Candidates) > 0 {
@@ -198,13 +197,8 @@ func (response *GenerateContentResponse) ToBifrostTranscriptionResponse() *schem
 				bifrostResp.Text = textContent
 				bifrostResp.Task = schemas.Ptr("transcribe")
 
-				// Set usage information
-				bifrostResp.Usage = &schemas.TranscriptionUsage{
-					Type:         "tokens",
-					InputTokens:  &inputTokens,
-					OutputTokens: &outputTokens,
-					TotalTokens:  &totalTokens,
-				}
+				// Set usage information with modality details
+				bifrostResp.Usage = convertGeminiUsageMetadataToTranscriptionUsage(response.UsageMetadata)
 			}
 		}
 	}
@@ -231,25 +225,8 @@ func ToGeminiTranscriptionResponse(bifrostResp *schemas.BifrostTranscriptionResp
 		},
 	}
 
-	// Set usage metadata from transcription usage
-	if bifrostResp.Usage != nil {
-		var promptTokens, candidatesTokens, totalTokens int32
-		if bifrostResp.Usage.InputTokens != nil {
-			promptTokens = int32(*bifrostResp.Usage.InputTokens)
-		}
-		if bifrostResp.Usage.OutputTokens != nil {
-			candidatesTokens = int32(*bifrostResp.Usage.OutputTokens)
-		}
-		if bifrostResp.Usage.TotalTokens != nil {
-			totalTokens = int32(*bifrostResp.Usage.TotalTokens)
-		}
-
-		genaiResp.UsageMetadata = &GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     promptTokens,
-			CandidatesTokenCount: candidatesTokens,
-			TotalTokenCount:      totalTokens,
-		}
-	}
+	// Set usage metadata from transcription usage with modality details
+	genaiResp.UsageMetadata = convertBifrostTranscriptionUsageToGeminiUsageMetadata(bifrostResp.Usage)
 
 	genaiResp.Candidates = []*Candidate{candidate}
 	return genaiResp

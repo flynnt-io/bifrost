@@ -1,4 +1,4 @@
-# Bifrost
+# Bifrost AI Gateway
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/maximhq/bifrost/core)](https://goreportcard.com/report/github.com/maximhq/bifrost/core)
 [![Discord badge](https://dcbadge.limes.pink/api/server/https://discord.gg/exN5KAydbU?style=flat)](https://discord.gg/exN5KAydbU)
@@ -53,6 +53,25 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 - [Gateway Setup](https://docs.getbifrost.ai/quickstart/gateway/setting-up) - HTTP API deployment
 - [Go SDK Setup](https://docs.getbifrost.ai/quickstart/go-sdk/setting-up) - Direct integration
+
+---
+
+## Enterprise Deployments
+
+Bifrost supports enterprise-grade, private deployments for teams running production AI systems at scale.
+In addition to private networking, custom security controls, and governance, enterprise deployments unlock advanced capabilities including adaptive load balancing, clustering, guardrails, MCP gateway and and other features designed for enterprise-grade scale and reliability.
+
+<img src=".github/assets/features.png" alt="Book a Demo" width="100%" style="margin-top:5px;"/>
+
+
+<div align="center" style="display: flex; flex-direction: column;">
+  <a href="https://calendly.com/maximai/bifrost-demo">
+    <img src=".github/assets/book-demo-button.png" alt="Book a Demo" width="170" style="margin-top:5px;"/>
+  </a>
+  <div>
+  <a href="https://www.getmaxim.ai/bifrost/enterprise" target="_blank" rel="noopener noreferrer">Explore enterprise capabilities</a>
+  </div>
+</div>
 
 ---
 
@@ -255,7 +274,7 @@ We welcome contributions of all kinds! See our [Contributing Guide](https://docs
 - How to submit pull requests
 - Building and testing locally
 
-For development requirements and build instructions, see our [Development Setup Guide](https://docs.getbifrost.ai/contributing/building-a-plugins).
+For development requirements and build instructions, see our [Development Setup Guide](https://docs.getbifrost.ai/contributing/setting-up-repo#development-environment-setup).
 
 ---
 

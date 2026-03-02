@@ -22,10 +22,16 @@ func NewLiteLLMRouter(client *bifrost.Bifrost, handlerStore lib.HandlerStore, lo
 	routes = append(routes, CreateOpenAIRouteConfigs("/litellm", handlerStore)...)
 
 	// Add Anthropic routes to LiteLLM for Anthropic API compatibility
-	routes = append(routes, CreateAnthropicRouteConfigs("/litellm")...)
+	routes = append(routes, CreateAnthropicRouteConfigs("/litellm", logger)...)
 
 	// Add GenAI routes to LiteLLM for Vertex AI compatibility
 	routes = append(routes, CreateGenAIRouteConfigs("/litellm")...)
+
+	// Add Bedrock routes to LiteLLM for AWS Bedrock API compatibility
+	routes = append(routes, CreateBedrockRouteConfigs("/litellm", handlerStore)...)
+
+	// Add Cohere routes to LiteLLM for Cohere API compatibility
+	routes = append(routes, CreateCohereRouteConfigs("/litellm")...)
 
 	return &LiteLLMRouter{
 		GenericRouter: NewGenericRouter(client, handlerStore, routes, logger),

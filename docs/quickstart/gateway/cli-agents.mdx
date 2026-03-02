@@ -54,7 +54,7 @@ It is a modern, open-source chat client that supports multiple providers.
 
 ### [Claude Code](https://www.claude.com/product/claude-code)
 
-It brings Sonnet 4.5 directly to your terminal with powerful coding capabilities.
+It brings AI-powered coding capabilities directly to your terminal.
 
 **Setup:**
 
@@ -78,6 +78,103 @@ Now all Claude Code traffic flows through Bifrost, giving you access to any prov
 
 <Note>
 This setup automatically detects if you're using Anthropic MAX account instead of a regular API key authentication :)
+</Note>
+
+#### Model Configuration
+
+Claude Code uses three model tiers: **Sonnet** (default), **Opus** (complex tasks), and **Haiku** (fast, lightweight). With Bifrost, you can override these defaults to use any model from any provider.
+
+**Override Default Models:**
+
+Set environment variables to replace Claude Code's default model tiers with any Bifrost-configured model:
+
+```bash
+# Replace Sonnet tier with GPT-5
+export ANTHROPIC_DEFAULT_SONNET_MODEL="openai/gpt-5"
+
+# Replace Opus tier with Claude Opus 4.5
+export ANTHROPIC_DEFAULT_OPUS_MODEL="anthropic/claude-opus-4-5-20251101"
+
+# Replace Haiku tier with Azure-hosted Claude
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="azure/claude-haiku-4-5"
+```
+
+<Warning>
+Alternative models must support **tool use capabilities** for file operations, terminal commands, and code editing to work properly with Claude Code.
+</Warning>
+
+**Start with a Specific Model:**
+
+Launch Claude Code with a specific model using the `--model` flag:
+
+```bash
+# Start with Opus
+claude --model claude-opus-4-5-20251101
+
+# Start with Haiku for lightweight tasks
+claude --model claude-haiku-4-5-20251001
+```
+
+#### Switching Models Mid-Session
+
+Use the `/model` command to switch models during an active session:
+
+```bash
+# Using shorthand
+/model opus
+/model sonnet
+/model haiku
+
+# Using full model names
+/model claude-opus-4-5-20251101
+/model claude-sonnet-4-5-20250929
+
+# Using different providers dynamically via Bifrost
+/model vertex/claude-haiku-4-5
+/model azure/claude-sonnet-4-5
+/model bedrock/claude-sonnet-4-5
+```
+
+<Tip>
+Run `/model` without arguments to check your current model. The switch is instantaneous and Claude Code seamlessly continues your conversation context with the new model.
+</Tip>
+
+<Warning>
+If you use Claude-specific features like **web search**, **computer use**, or **citations**, ensure the model you switch to also supports these capabilities. Non-Claude models or Claude models on certain providers may not support all features.
+</Warning>
+
+#### Provider Compatibility
+
+<Warning>
+**Not all providers work well with Claude Code**. Since Claude Code heavily relies on tool calling for file operations, terminal commands, and code editing, providers must properly support and stream tool call arguments.
+
+**Known Issues:**
+- **OpenRouter**: Does not stream function call arguments properly. Tool calls return with empty `arguments` fields, causing Claude Code to fail when attempting file operations or other tool-based actions.
+- **Some proxy providers**: May not fully implement the Anthropic API streaming specification for tool calls.
+
+If you experience issues with tool calls not executing properly, try switching to a different provider in your Bifrost configuration.
+</Warning>
+
+#### Example: Full Bifrost Setup
+
+Here's a complete setup using Bifrost with custom model overrides:
+
+```bash
+# Core Bifrost configuration
+export ANTHROPIC_API_KEY=your-bifrost-virtual-key
+export ANTHROPIC_BASE_URL=http://localhost:8080/anthropic
+
+# Custom model tiers (optional)
+export ANTHROPIC_DEFAULT_SONNET_MODEL="anthropic/claude-sonnet-4-5-20250929"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="openai/gpt-5"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="azure/claude-haiku-4-5"
+
+# Start Claude Code
+claude
+```
+
+<Note>
+Add these exports to your `~/.bashrc` or `~/.zshrc` for persistent configuration across terminal sessions.
 </Note>
 
 ### [Codex CLI](https://developers.openai.com/codex/cli/)
@@ -260,7 +357,7 @@ It is Alibaba's powerful coding assistant with advanced reasoning capabilities.
 Agent integrations work with your existing Bifrost configuration. Ensure you have:
 
 - **Providers configured**: See [Provider Configuration](./provider-configuration) for setup details
-- **Optional: MCP tools**: See [MCP Integration](../../features/mcp) to enhance agent capabilities
+- **Optional: MCP tools**: See [MCP Integration](../../mcp/overview) to enhance agent capabilities
 
 ## Monitoring Agent Traffic
 
@@ -271,22 +368,52 @@ For complete monitoring capabilities, see [Built-in Observability](../../feature
 
 ## MCP Tools Integration
 
-Bifrost automatically sends all configured MCP tools to your agents. This means your agents can access filesystem operations, database queries, web search, and more without any additional configuration.
-
 <Note>
-**Important: MCP Tool Execution Behavior**
-
-When using Bifrost as a gateway, MCP tool calls require manual approval and execution for security reasons. Bifrost returns the tool call information but doesn't automatically execute it. You need to handle the approval and execution logic by calling the `v1/mcp/tool/execute` endpoint.
-
-**Gateway-on-Gateway Limitations**: If your agent/editor (like Zed) has its own gateway that routes through Bifrost, the agent's gateway may not handle MCP tool approvals that come from Bifrost. In such cases, we recommend configuring MCP tools directly in your agent/editor instead of relying on Bifrost's MCP integration.
-
-We intentionally avoid supporting "gateway-on-gateway" MCP setups because handling tool approvals across multiple gateways introduces unnecessary complexity and falls outside the scope of what an LLM gateway should manage. While we're working on an agentic mode that will allow Bifrost to automatically execute certain tool calls, the current design prioritizes security and clear responsibility boundaries.
+This feature is only available on `v1.4.0-prerelease1` and above.
 </Note>
 
-For setup and available tools, see [MCP Integration](../../features/mcp).
+Bifrost exposes all configured MCP tools through a dedicated MCP server endpoint at `/mcp`. This allows external MCP clients (Claude Code, Cursor, and other MCP-compatible applications) to connect directly and access your tools.
+
+### Connect Claude Code to Bifrost MCP
+
+Add Bifrost as an MCP server to Claude Code:
+
+```bash
+claude mcp add --transport http bifrost http://localhost:8080/mcp
+```
+
+**Using Virtual Key Authentication:**
+
+If you have virtual key authentication enabled in Bifrost, connect using the JSON configuration format:
+
+```bash
+claude mcp add-json bifrost '{"type":"http","url":"http://localhost:8080/mcp","headers":{"Authorization":"Bearer bf-virtual-key"}}'
+```
+
+Replace `bf-virtual-key` with your actual Bifrost virtual key.
+
+Claude Code will only have access to the specific MCP tools permitted by the virtual key's configuration. To grant access to additional tools, verify or modify the virtual key's MCP tool permissions in the Bifrost dashboard.
+
+### Supported Agents
+
+You can connect any MCP-compatible client to Bifrost's MCP server:
+
+- **Claude Code** - Add via `claude mcp add` command
+- **Cursor IDE** - Configure in cursor settings
+- **Custom Applications** - Any app implementing the MCP protocol
+
+### Tool Access Control
+
+Control which tools each client can access using Virtual Keys:
+
+- Create a Virtual Key for each client/environment
+- Configure which MCP servers and tools the key can access
+- Bifrost automatically enforces these permissions
+
+For complete setup instructions and tool filtering options, see [MCP Gateway URL](../../mcp/gateway-url).
 
 ## Next Steps
 
 - **[Provider Configuration](./provider-configuration)** - Configure AI providers for your agents
-- **[Governance](../../features/governance)** - Set usage limits and policies for your agents
+- **[Governance](../../features/governance/virtual-keys)** - Set usage limits and policies for your agents
 - **[Integrations](../../integrations/what-is-an-integration)** - Understand how Bifrost works with existing AI provider SDKs

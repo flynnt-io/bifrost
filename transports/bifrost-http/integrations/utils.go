@@ -2,16 +2,20 @@ package integrations
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/bytedance/sonic"
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
 )
+
+var bifrostContextKeyProvider = schemas.BifrostContextKey("provider")
 
 var availableIntegrations = []string{
 	"openai",
@@ -19,6 +23,9 @@ var availableIntegrations = []string{
 	"genai",
 	"litellm",
 	"langchain",
+	"bedrock",
+	"pydantic",
+	"cohere",
 }
 
 // newBifrostError wraps a standard error into a BifrostError with IsBifrostError set to false.
@@ -42,12 +49,12 @@ func newBifrostError(err error, message string) *schemas.BifrostError {
 	}
 }
 
-// safeGetRequestType safely obtains the request type from a BifrostStream chunk.
+// safeGetRequestType safely obtains the request type from a BifrostStreamChunk chunk.
 // It checks multiple sources in order of preference:
 // 1. Response ExtraFields if any response is available
 // 2. BifrostError ExtraFields if error is available and not nil
 // 3. Falls back to "unknown" if no source is available
-func safeGetRequestType(chunk *schemas.BifrostStream) string {
+func safeGetRequestType(chunk *schemas.BifrostStreamChunk) string {
 	if chunk == nil {
 		return "unknown"
 	}
@@ -134,7 +141,7 @@ func extractExactPath(ctx *fasthttp.RequestCtx) string {
 }
 
 // sendStreamError sends an error in streaming format using the stream error converter if available
-func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, config RouteConfig, bifrostErr *schemas.BifrostError) {
+func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, config RouteConfig, bifrostErr *schemas.BifrostError) {
 	var errorResponse interface{}
 
 	// Use stream error converter if available, otherwise fallback to regular error converter
@@ -160,7 +167,7 @@ func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *co
 
 // sendError sends an error response with the appropriate status code and JSON body.
 // It handles different error types (string, error interface, or arbitrary objects).
-func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, errorConverter ErrorConverter, bifrostErr *schemas.BifrostError) {
+func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, errorConverter ErrorConverter, bifrostErr *schemas.BifrostError) {
 	if bifrostErr.StatusCode != nil {
 		ctx.SetStatusCode(*bifrostErr.StatusCode)
 	} else {
@@ -168,8 +175,12 @@ func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *context.
 	}
 	ctx.SetContentType("application/json")
 
-	errorBody, err := sonic.Marshal(errorConverter(bifrostCtx, bifrostErr))
+	// Marshal the error for response and log the error for diagnostics
+	responseObj := errorConverter(bifrostCtx, bifrostErr)
+	errorBody, err := sonic.Marshal(responseObj)
 	if err != nil {
+		// Log the marshal failure and return a plain text error
+		g.logger.Error("failed to marshal error response", "err", err, "path", extractExactPath(ctx))
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.SetBodyString(fmt.Sprintf("failed to encode error response: %v", err))
 		return
@@ -179,9 +190,15 @@ func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *context.
 }
 
 // sendSuccess sends a successful response with HTTP 200 status and JSON body.
-func (g *GenericRouter) sendSuccess(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, errorConverter ErrorConverter, response interface{}) {
+func (g *GenericRouter) sendSuccess(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, errorConverter ErrorConverter, response interface{}, extraHeaders map[string]string) {
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	ctx.SetContentType("application/json")
+
+	if extraHeaders != nil {
+		for key, value := range extraHeaders {
+			ctx.Response.Header.Set(key, value)
+		}
+	}
 
 	responseBody, err := sonic.Marshal(response)
 	if err != nil {
@@ -248,6 +265,10 @@ func (g *GenericRouter) extractAndParseFallbacks(req interface{}, bifrostReq *sc
 		if bifrostReq.EmbeddingRequest != nil {
 			bifrostReq.EmbeddingRequest.Fallbacks = parsedFallbacks
 		}
+	case schemas.RerankRequest:
+		if bifrostReq.RerankRequest != nil {
+			bifrostReq.RerankRequest.Fallbacks = parsedFallbacks
+		}
 	case schemas.SpeechRequest, schemas.SpeechStreamRequest:
 		if bifrostReq.SpeechRequest != nil {
 			bifrostReq.SpeechRequest.Fallbacks = parsedFallbacks
@@ -255,6 +276,10 @@ func (g *GenericRouter) extractAndParseFallbacks(req interface{}, bifrostReq *sc
 	case schemas.TranscriptionRequest, schemas.TranscriptionStreamRequest:
 		if bifrostReq.TranscriptionRequest != nil {
 			bifrostReq.TranscriptionRequest.Fallbacks = parsedFallbacks
+		}
+	case schemas.ImageGenerationRequest, schemas.ImageGenerationStreamRequest:
+		if bifrostReq.ImageGenerationRequest != nil {
+			bifrostReq.ImageGenerationRequest.Fallbacks = parsedFallbacks
 		}
 	}
 
@@ -302,6 +327,30 @@ func (g *GenericRouter) extractFallbacksFromRequest(req interface{}) ([]string, 
 	return nil, nil
 }
 
+// getVirtualKeyFromBifrostContext extracts the virtual key value from bifrost context.
+// Returns nil if no VK is present (e.g., direct key mode or no governance).
+func getVirtualKeyFromBifrostContext(ctx *schemas.BifrostContext) *string {
+	vkValue := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey)
+	if vkValue == "" {
+		return nil
+	}
+	return &vkValue
+}
+
+// getResultTTLFromHeaderWithDefault extracts the result TTL from the x-bf-async-job-result-ttl header.
+// Returns the default TTL if the header is not present or invalid.
+func getResultTTLFromHeaderWithDefault(ctx *fasthttp.RequestCtx, defaultTTL int) int {
+	resultTTL := string(ctx.Request.Header.Peek(schemas.AsyncHeaderResultTTL))
+	if resultTTL == "" {
+		return defaultTTL
+	}
+	resultTTLInt, err := strconv.Atoi(resultTTL)
+	if err != nil || resultTTLInt < 0 {
+		return defaultTTL
+	}
+	return resultTTLInt
+}
+
 // isAnthropicAPIKeyAuth checks if the request uses standard API key authentication.
 // Returns true for API key auth (x-api-key header), false for OAuth (Bearer sk-ant-oat*).
 // This is required for Claude Code specifically, which may use OAuth authentication.
@@ -319,4 +368,23 @@ func isAnthropicAPIKeyAuth(ctx *fasthttp.RequestCtx) bool {
 	}
 	// Default to API mode
 	return true
+}
+
+// ParseProviderScopedVideoID parses a provider-scoped video ID in the form "id:provider".
+// The ID portion is automatically URL-decoded to restore the original ID.
+func ParseProviderScopedVideoID(videoID string) (schemas.ModelProvider, string, error) {
+	parts := strings.SplitN(videoID, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("video_id must be in id:provider format")
+	}
+	provider := schemas.ModelProvider(parts[1])
+	rawID := parts[0]
+
+	// URL decode the ID to restore original characters (e.g., %2F -> /)
+	// This handles IDs from all providers that may contain special characters
+	if decoded, err := url.PathUnescape(rawID); err == nil {
+		rawID = decoded
+	}
+
+	return provider, rawID, nil
 }

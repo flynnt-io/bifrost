@@ -19,6 +19,7 @@ func (p *LoggerPlugin) insertInitialLogEntry(
 	parentRequestID string,
 	timestamp time.Time,
 	fallbackIndex int,
+	routingEnginesUsed []string, // list of routing engines used
 	data *InitialLogData,
 ) error {
 	entry := &logstore.Log{
@@ -38,6 +39,10 @@ func (p *LoggerPlugin) insertInitialLogEntry(
 		ToolsParsed:                 data.Tools,
 		SpeechInputParsed:           data.SpeechInput,
 		TranscriptionInputParsed:    data.TranscriptionInput,
+		ImageGenerationInputParsed:  data.ImageGenerationInput,
+		RoutingEnginesUsed:          routingEnginesUsed,
+		MetadataParsed:              data.Metadata,
+		VideoGenerationInputParsed:  data.VideoGenerationInput,
 	}
 	if parentRequestID != "" {
 		entry.ParentRequestID = &parentRequestID
@@ -54,8 +59,11 @@ func (p *LoggerPlugin) updateLogEntry(
 	latency int64,
 	virtualKeyID string,
 	virtualKeyName string,
+	routingRuleID string,
+	routingRuleName string,
 	numberOfRetries int,
 	cacheDebug *schemas.BifrostCacheDebug,
+	routingEngineLogs string,
 	data *UpdateLogData,
 ) error {
 	updates := make(map[string]interface{})
@@ -71,8 +79,17 @@ func (p *LoggerPlugin) updateLogEntry(
 	if virtualKeyName != "" {
 		updates["virtual_key_name"] = virtualKeyName
 	}
+	if routingRuleID != "" {
+		updates["routing_rule_id"] = routingRuleID
+	}
+	if routingRuleName != "" {
+		updates["routing_rule_name"] = routingRuleName
+	}
 	if numberOfRetries != 0 {
 		updates["number_of_retries"] = numberOfRetries
+	}
+	if routingEngineLogs != "" {
+		updates["routing_engine_logs"] = routingEngineLogs
 	}
 	// Handle JSON fields by setting them on a temporary entry and serializing
 	tempEntry := &logstore.Log{}
@@ -96,12 +113,31 @@ func (p *LoggerPlugin) updateLogEntry(
 			}
 		}
 
+		if data.ListModelsOutput != nil {
+			tempEntry.ListModelsOutputParsed = data.ListModelsOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize list models output: %v", err)
+			} else {
+				updates["list_models_output"] = tempEntry.ListModelsOutput
+			}
+		}
+
 		if data.EmbeddingOutput != nil {
 			tempEntry.EmbeddingOutputParsed = data.EmbeddingOutput
 			if err := tempEntry.SerializeFields(); err != nil {
 				p.logger.Error("failed to serialize embedding output: %v", err)
 			} else {
 				updates["embedding_output"] = tempEntry.EmbeddingOutput
+			}
+		}
+
+		if data.RerankOutput != nil {
+			tempEntry.RerankOutputParsed = data.RerankOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize rerank output: %v", err)
+			} else {
+				updates["rerank_output"] = tempEntry.RerankOutput
+				updates["content_summary"] = tempEntry.ContentSummary
 			}
 		}
 
@@ -120,6 +156,70 @@ func (p *LoggerPlugin) updateLogEntry(
 				p.logger.Error("failed to serialize transcription output: %v", err)
 			} else {
 				updates["transcription_output"] = tempEntry.TranscriptionOutput
+			}
+		}
+
+		if data.ImageGenerationOutput != nil {
+			tempEntry.ImageGenerationOutputParsed = data.ImageGenerationOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize image generation output: %v", err)
+			} else {
+				updates["image_generation_output"] = tempEntry.ImageGenerationOutput
+			}
+		}
+
+		if data.VideoGenerationOutput != nil {
+			tempEntry.VideoGenerationOutputParsed = data.VideoGenerationOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize video generation output: %v", err)
+			} else {
+				updates["video_generation_output"] = tempEntry.VideoGenerationOutput
+			}
+		}
+
+		if data.VideoRetrieveOutput != nil {
+			tempEntry.VideoRetrieveOutputParsed = data.VideoRetrieveOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize video retrieve output: %v", err)
+			} else {
+				updates["video_retrieve_output"] = tempEntry.VideoRetrieveOutput
+			}
+		}
+
+		if data.VideoDownloadOutput != nil {
+			tempEntry.VideoDownloadOutputParsed = data.VideoDownloadOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize video download output: %v", err)
+			} else {
+				updates["video_download_output"] = tempEntry.VideoDownloadOutput
+			}
+		}
+
+		if data.VideoListOutput != nil {
+			tempEntry.VideoListOutputParsed = data.VideoListOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize video list output: %v", err)
+			} else {
+				updates["video_list_output"] = tempEntry.VideoListOutput
+			}
+		}
+
+		if data.VideoDeleteOutput != nil {
+			tempEntry.VideoDeleteOutputParsed = data.VideoDeleteOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize video delete output: %v", err)
+			} else {
+				updates["video_delete_output"] = tempEntry.VideoDeleteOutput
+			}
+		}
+
+		// Handle raw request marshaling and logging
+		if data.RawRequest != nil {
+			rawRequestBytes, err := sonic.Marshal(data.RawRequest)
+			if err != nil {
+				p.logger.Error("failed to marshal raw request: %v", err)
+			} else {
+				updates["raw_request"] = string(rawRequestBytes)
 			}
 		}
 	}
@@ -168,7 +268,6 @@ func (p *LoggerPlugin) updateLogEntry(
 			updates["raw_response"] = string(rawResponseBytes)
 		}
 	}
-
 	return p.store.Update(ctx, requestID, updates)
 }
 
@@ -180,8 +279,11 @@ func (p *LoggerPlugin) updateStreamingLogEntry(
 	selectedKeyName string,
 	virtualKeyID string,
 	virtualKeyName string,
+	routingRuleID string,
+	routingRuleName string,
 	numberOfRetries int,
 	cacheDebug *schemas.BifrostCacheDebug,
+	routingEngineLogs string,
 	streamResponse *streaming.ProcessedStreamResponse,
 	isFinalChunk bool,
 ) error {
@@ -195,8 +297,17 @@ func (p *LoggerPlugin) updateStreamingLogEntry(
 	if virtualKeyName != "" {
 		updates["virtual_key_name"] = virtualKeyName
 	}
+	if routingRuleID != "" {
+		updates["routing_rule_id"] = routingRuleID
+	}
+	if routingRuleName != "" {
+		updates["routing_rule_name"] = routingRuleName
+	}
 	if numberOfRetries != 0 {
 		updates["number_of_retries"] = numberOfRetries
+	}
+	if routingEngineLogs != "" {
+		updates["routing_engine_logs"] = routingEngineLogs
 	}
 	// Handle error case first
 	if streamResponse.Data.ErrorDetails != nil {
@@ -265,6 +376,15 @@ func (p *LoggerPlugin) updateStreamingLogEntry(
 				updates["speech_output"] = tempEntry.SpeechOutput
 			}
 		}
+		// Handle image generation output from stream updates
+		if streamResponse.Data.ImageGenerationOutput != nil {
+			tempEntry.ImageGenerationOutputParsed = streamResponse.Data.ImageGenerationOutput
+			if err := tempEntry.SerializeFields(); err != nil {
+				p.logger.Error("failed to serialize image generation output: %v", err)
+			} else {
+				updates["image_generation_output"] = tempEntry.ImageGenerationOutput
+			}
+		}
 		// Handle cache debug
 		if cacheDebug != nil {
 			tempEntry.CacheDebugParsed = cacheDebug
@@ -292,6 +412,19 @@ func (p *LoggerPlugin) updateStreamingLogEntry(
 			} else {
 				updates["responses_output"] = tempEntry.ResponsesOutput
 			}
+		}
+		// Handle raw request from stream updates
+		if streamResponse.RawRequest != nil && *streamResponse.RawRequest != nil {
+			rawRequestBytes, err := sonic.Marshal(*streamResponse.RawRequest)
+			if err != nil {
+				p.logger.Error("failed to marshal raw request: %v", err)
+			} else {
+				updates["raw_request"] = string(rawRequestBytes)
+			}
+		}
+		// Handle raw response from stream updates
+		if streamResponse.Data.RawResponse != nil {
+			updates["raw_response"] = *streamResponse.Data.RawResponse
 		}
 	}
 	// Only perform update if there's something to update
@@ -331,37 +464,90 @@ func (p *LoggerPlugin) GetStats(ctx context.Context, filters logstore.SearchFilt
 	return p.store.GetStats(ctx, filters)
 }
 
+// GetHistogram returns time-bucketed request counts for the given filters
+func (p *LoggerPlugin) GetHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.HistogramResult, error) {
+	return p.store.GetHistogram(ctx, filters, bucketSizeSeconds)
+}
+
+// GetTokenHistogram returns time-bucketed token usage for the given filters
+func (p *LoggerPlugin) GetTokenHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.TokenHistogramResult, error) {
+	return p.store.GetTokenHistogram(ctx, filters, bucketSizeSeconds)
+}
+
+// GetCostHistogram returns time-bucketed cost data with model breakdown for the given filters
+func (p *LoggerPlugin) GetCostHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.CostHistogramResult, error) {
+	return p.store.GetCostHistogram(ctx, filters, bucketSizeSeconds)
+}
+
+// GetModelHistogram returns time-bucketed model usage with success/error breakdown for the given filters
+func (p *LoggerPlugin) GetModelHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ModelHistogramResult, error) {
+	return p.store.GetModelHistogram(ctx, filters, bucketSizeSeconds)
+}
+
 // GetAvailableModels returns all unique models from logs
 func (p *LoggerPlugin) GetAvailableModels(ctx context.Context) []string {
-	result, err := p.store.FindAll(ctx, "model IS NOT NULL AND model != ''", "model")
+	models, err := p.store.GetDistinctModels(ctx)
 	if err != nil {
-		p.logger.Error("failed to get available models: %w", err)
+		p.logger.Error("failed to get available models: %v", err)
 		return []string{}
 	}
-	return p.extractUniqueStrings(result, func(log *logstore.Log) string { return log.Model })
+	return models
 }
 
 func (p *LoggerPlugin) GetAvailableSelectedKeys(ctx context.Context) []KeyPair {
-	result, err := p.store.FindAll(ctx, "selected_key_id IS NOT NULL AND selected_key_id != '' AND selected_key_name IS NOT NULL AND selected_key_name != ''", "selected_key_id, selected_key_name")
+	results, err := p.store.GetDistinctKeyPairs(ctx, "selected_key_id", "selected_key_name")
 	if err != nil {
-		p.logger.Error("failed to get available selected keys: %w", err)
+		p.logger.Error("failed to get available selected keys: %v", err)
 		return []KeyPair{}
 	}
-	return p.extractUniqueKeyPairs(result, func(log *logstore.Log) KeyPair {
-		return KeyPair{
-			ID:   log.SelectedKeyID,
-			Name: log.SelectedKeyName,
-		}
-	})
+	return keyPairResultsToKeyPairs(results)
 }
 
 func (p *LoggerPlugin) GetAvailableVirtualKeys(ctx context.Context) []KeyPair {
-	result, err := p.store.FindAll(ctx, "virtual_key_id IS NOT NULL AND virtual_key_id != '' AND virtual_key_name IS NOT NULL AND virtual_key_name != ''", "virtual_key_id, virtual_key_name")
+	results, err := p.store.GetDistinctKeyPairs(ctx, "virtual_key_id", "virtual_key_name")
 	if err != nil {
-		p.logger.Error("failed to get available virtual keys: %w", err)
+		p.logger.Error("failed to get available virtual keys: %v", err)
 		return []KeyPair{}
 	}
-	return p.extractUniqueKeyPairs(result, func(log *logstore.Log) KeyPair {
+	return keyPairResultsToKeyPairs(results)
+}
+
+func (p *LoggerPlugin) GetAvailableRoutingRules(ctx context.Context) []KeyPair {
+	results, err := p.store.GetDistinctKeyPairs(ctx, "routing_rule_id", "routing_rule_name")
+	if err != nil {
+		p.logger.Error("failed to get available routing rules: %v", err)
+		return []KeyPair{}
+	}
+	return keyPairResultsToKeyPairs(results)
+}
+
+// GetAvailableRoutingEngines returns all unique routing engine types used in logs
+func (p *LoggerPlugin) GetAvailableRoutingEngines(ctx context.Context) []string {
+	engines, err := p.store.GetDistinctRoutingEngines(ctx)
+	if err != nil {
+		p.logger.Error("failed to get available routing engines: %v", err)
+		return []string{}
+	}
+	return engines
+}
+
+// keyPairResultsToKeyPairs converts logstore.KeyPairResult slice to KeyPair slice
+func keyPairResultsToKeyPairs(results []logstore.KeyPairResult) []KeyPair {
+	pairs := make([]KeyPair, len(results))
+	for i, r := range results {
+		pairs[i] = KeyPair{ID: r.ID, Name: r.Name}
+	}
+	return pairs
+}
+
+// GetAvailableMCPVirtualKeys returns all unique virtual key ID-Name pairs from MCP tool logs
+func (p *LoggerPlugin) GetAvailableMCPVirtualKeys(ctx context.Context) []KeyPair {
+	result, err := p.store.GetAvailableMCPVirtualKeys(ctx)
+	if err != nil {
+		p.logger.Error("failed to get available virtual keys from MCP logs: %w", err)
+		return []KeyPair{}
+	}
+	return p.extractUniqueMCPKeyPairs(result, func(log *logstore.MCPToolLog) KeyPair {
 		if log.VirtualKeyID != nil && log.VirtualKeyName != nil {
 			return KeyPair{
 				ID:   *log.VirtualKeyID,
@@ -372,11 +558,11 @@ func (p *LoggerPlugin) GetAvailableVirtualKeys(ctx context.Context) []KeyPair {
 	})
 }
 
-// extractUniqueKeyPairs extracts unique non-empty key pairs from logs using the provided extractor function
-func (p *LoggerPlugin) extractUniqueKeyPairs(logs []*logstore.Log, extractor func(*logstore.Log) KeyPair) []KeyPair {
+// extractUniqueMCPKeyPairs extracts unique non-empty key pairs from MCP logs using the provided extractor function
+func (p *LoggerPlugin) extractUniqueMCPKeyPairs(logs []logstore.MCPToolLog, extractor func(*logstore.MCPToolLog) KeyPair) []KeyPair {
 	uniqueSet := make(map[string]KeyPair)
-	for _, log := range logs {
-		pair := extractor(log)
+	for i := range logs {
+		pair := extractor(&logs[i])
 		if pair.ID != "" && pair.Name != "" {
 			uniqueSet[pair.ID] = pair
 		}
@@ -389,17 +575,157 @@ func (p *LoggerPlugin) extractUniqueKeyPairs(logs []*logstore.Log, extractor fun
 	return result
 }
 
-// extractUniqueStrings extracts unique non-empty string values from logs using the provided extractor function
-func (p *LoggerPlugin) extractUniqueStrings(logs []*logstore.Log, extractor func(*logstore.Log) string) []string {
-	uniqueSet := make(map[string]bool)
-	for _, log := range logs {
-		if value := extractor(log); value != "" {
-			uniqueSet[value] = true
+// RecalculateCosts recomputes cost for log entries that are missing cost values
+func (p *LoggerPlugin) RecalculateCosts(ctx context.Context, filters logstore.SearchFilters, limit int) (*RecalculateCostResult, error) {
+	if p.pricingManager == nil {
+		return nil, fmt.Errorf("pricing manager is not configured")
+	}
+
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	// Always scope to logs that don't have cost populated
+	filters.MissingCostOnly = true
+	pagination := logstore.PaginationOptions{
+		Limit: limit,
+		// Always look at the oldest requests first
+		SortBy: "timestamp",
+		Order:  "asc",
+	}
+
+	searchResult, err := p.store.SearchLogs(ctx, filters, pagination)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search logs for cost recalculation: %w", err)
+	}
+
+	result := &RecalculateCostResult{
+		TotalMatched: searchResult.Stats.TotalRequests,
+	}
+
+	costUpdates := make(map[string]float64, len(searchResult.Logs))
+
+	for _, logEntry := range searchResult.Logs {
+		cost, calcErr := p.calculateCostForLog(&logEntry)
+		if calcErr != nil {
+			result.Skipped++
+			p.logger.Debug("skipping cost recalculation for log %s: %v", logEntry.ID, calcErr)
+			continue
+		}
+		costUpdates[logEntry.ID] = cost
+	}
+
+	if len(costUpdates) > 0 {
+		if err := p.store.BulkUpdateCost(ctx, costUpdates); err != nil {
+			return nil, fmt.Errorf("failed to bulk update costs: %w", err)
+		}
+		result.Updated = len(costUpdates)
+	}
+
+	// Re-count how many logs still match the missing-cost filter after updates
+	remainingResult, err := p.store.SearchLogs(ctx, filters, logstore.PaginationOptions{
+		Limit:  1, // we only need stats.TotalRequests for the count
+		Offset: 0,
+		SortBy: "timestamp",
+		Order:  "asc",
+	})
+	if err != nil {
+		p.logger.Warn("failed to recompute remaining missing-cost logs: %v", err)
+	} else {
+		result.Remaining = remainingResult.Stats.TotalRequests
+	}
+
+	return result, nil
+}
+
+func (p *LoggerPlugin) calculateCostForLog(logEntry *logstore.Log) (float64, error) {
+	if logEntry == nil {
+		return 0, fmt.Errorf("log entry cannot be nil")
+	}
+
+	if (logEntry.TokenUsageParsed == nil && logEntry.TokenUsage != "") ||
+		(logEntry.CacheDebugParsed == nil && logEntry.CacheDebug != "") {
+		if err := logEntry.DeserializeFields(); err != nil {
+			return 0, fmt.Errorf("failed to deserialize fields for log %s: %w", logEntry.ID, err)
 		}
 	}
-	result := make([]string, 0, len(uniqueSet))
-	for value := range uniqueSet {
-		result = append(result, value)
+
+	cacheDebug := logEntry.CacheDebugParsed
+	usage := logEntry.TokenUsageParsed
+
+	// Handle cache hits before attempting to use usage data
+	if cacheDebug != nil && cacheDebug.CacheHit {
+		return p.calculateCostForCacheHit(cacheDebug)
 	}
-	return result
+
+	if usage == nil {
+		return 0, fmt.Errorf("token usage not available for log %s", logEntry.ID)
+	}
+
+	requestType := schemas.RequestType(logEntry.Object)
+	if requestType == "" {
+		p.logger.Warn("skipping cost calculation for log %s: object type is empty (timestamp: %s)", logEntry.ID, logEntry.Timestamp)
+		return 0, fmt.Errorf("object type is empty for log %s", logEntry.ID)
+	}
+
+	baseCost := p.pricingManager.CalculateCostFromUsage(
+		logEntry.Provider,
+		logEntry.Model,
+		"",
+		usage,
+		requestType,
+		false,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	// For cache misses, combine base cost with embedding cost if available
+	if cacheDebug != nil && !cacheDebug.CacheHit {
+		baseCost += p.calculateCacheEmbeddingCost(cacheDebug)
+	}
+
+	return baseCost, nil
+}
+
+func (p *LoggerPlugin) calculateCostForCacheHit(cacheDebug *schemas.BifrostCacheDebug) (float64, error) {
+	if cacheDebug == nil {
+		return 0, fmt.Errorf("cache debug data missing")
+	}
+
+	// Direct hits have zero cost
+	if cacheDebug.HitType != nil && *cacheDebug.HitType == "direct" {
+		return 0, nil
+	}
+
+	// Semantic hits bill the embedding lookup
+	embeddingCost := p.calculateCacheEmbeddingCost(cacheDebug)
+	return embeddingCost, nil
+}
+
+func (p *LoggerPlugin) calculateCacheEmbeddingCost(cacheDebug *schemas.BifrostCacheDebug) float64 {
+	if cacheDebug == nil || cacheDebug.ProviderUsed == nil || cacheDebug.ModelUsed == nil || cacheDebug.InputTokens == nil {
+		return 0
+	}
+
+	return p.pricingManager.CalculateCostFromUsage(
+		*cacheDebug.ProviderUsed,
+		*cacheDebug.ModelUsed,
+		"",
+		&schemas.BifrostLLMUsage{
+			PromptTokens:     *cacheDebug.InputTokens,
+			CompletionTokens: 0,
+			TotalTokens:      *cacheDebug.InputTokens,
+		},
+		schemas.EmbeddingRequest,
+		false,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
 }

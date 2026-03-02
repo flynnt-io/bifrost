@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/maximhq/bifrost/core/providers/anthropic"
+	"github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
@@ -33,7 +34,9 @@ func ToBedrockTextCompletionRequest(bifrostReq *schemas.BifrostTextCompletionReq
 		bedrockReq.TopP = bifrostReq.Params.TopP
 
 		if bifrostReq.Params.ExtraParams != nil {
+			bedrockReq.ExtraParams = bifrostReq.Params.ExtraParams
 			if topK, ok := schemas.SafeExtractIntPointer(bifrostReq.Params.ExtraParams["top_k"]); ok {
+				delete(bedrockReq.ExtraParams, "top_k")
 				bedrockReq.TopK = topK
 			}
 		}
@@ -58,7 +61,7 @@ func ToBedrockTextCompletionRequest(bifrostReq *schemas.BifrostTextCompletionReq
 }
 
 // ToBifrostTextCompletionRequest converts a Bedrock text completion request to Bifrost format
-func (request *BedrockTextCompletionRequest) ToBifrostTextCompletionRequest() *schemas.BifrostTextCompletionRequest {
+func (request *BedrockTextCompletionRequest) ToBifrostTextCompletionRequest(ctx *schemas.BifrostContext) *schemas.BifrostTextCompletionRequest {
 	if request == nil {
 		return nil
 	}
@@ -77,7 +80,7 @@ func (request *BedrockTextCompletionRequest) ToBifrostTextCompletionRequest() *s
 		prompt = strings.Join(parts, "\n\n")
 	}
 
-	provider, model := schemas.ParseModelString(request.ModelID, schemas.Bedrock)
+	provider, model := schemas.ParseModelString(request.ModelID, utils.CheckAndSetDefaultProvider(ctx, schemas.Bedrock))
 
 	bifrostReq := &schemas.BifrostTextCompletionRequest{
 		Provider: provider,

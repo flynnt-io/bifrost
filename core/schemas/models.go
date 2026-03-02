@@ -3,8 +3,6 @@ package schemas
 import (
 	"encoding/base64"
 	"fmt"
-
-	"github.com/bytedance/sonic"
 )
 
 // DefaultPageSize is the default page size for listing models
@@ -20,6 +18,14 @@ type ListModelsByKeyResult struct {
 	KeyID    string
 }
 
+// KeyStatus represents the status of model listing for a specific key
+type KeyStatus struct {
+	KeyID    string        `json:"key_id"`   // Empty for keyless providers
+	Status   KeyStatusType `json:"status"`   // "success", "failed"
+	Provider ModelProvider `json:"provider"` // Always populated
+	Error    *BifrostError `json:"error,omitempty"`
+}
+
 type BifrostListModelsRequest struct {
 	Provider ModelProvider `json:"provider"`
 
@@ -27,6 +33,9 @@ type BifrostListModelsRequest struct {
 
 	// PageToken: Token received from previous request to retrieve next page
 	PageToken string `json:"page_token"`
+
+	// Unfiltered: If true, the response will include all models for the provider, regardless of the allowed models (internal bifrost use only, not sent to the provider)
+	Unfiltered bool `json:"-"`
 
 	// ExtraParams: Additional provider-specific query parameters
 	// This allows for flexibility to pass any custom parameters that specific providers might support
@@ -37,6 +46,9 @@ type BifrostListModelsResponse struct {
 	Data          []Model                    `json:"data"`
 	ExtraFields   BifrostResponseExtraFields `json:"extra_fields"`
 	NextPageToken string                     `json:"next_page_token,omitempty"` // Token to retrieve next page
+
+	// Key-level status tracking for multi-key providers
+	KeyStatuses []KeyStatus `json:"key_statuses,omitempty"`
 
 	// Anthropic specific fields
 	FirstID *string `json:"-"`
@@ -73,6 +85,7 @@ func (response *BifrostListModelsResponse) ApplyPagination(pageSize int, pageTok
 			Data:          []Model{},
 			ExtraFields:   response.ExtraFields,
 			NextPageToken: "",
+			KeyStatuses:   response.KeyStatuses,
 		}
 	}
 
@@ -86,6 +99,7 @@ func (response *BifrostListModelsResponse) ApplyPagination(pageSize int, pageTok
 	paginatedResponse := &BifrostListModelsResponse{
 		Data:        paginatedData,
 		ExtraFields: response.ExtraFields,
+		KeyStatuses: response.KeyStatuses,
 	}
 
 	if endIndex < totalItems {
@@ -182,7 +196,7 @@ func encodePaginationCursor(offset int, lastID string) (string, error) {
 		LastID: lastID,
 	}
 
-	jsonData, err := sonic.Marshal(cursor)
+	jsonData, err := Marshal(cursor)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal pagination cursor: %w", err)
 	}
@@ -206,7 +220,7 @@ func decodePaginationCursor(token string) paginationCursor {
 	}
 
 	var cursor paginationCursor
-	if err := sonic.Unmarshal(decoded, &cursor); err != nil {
+	if err := Unmarshal(decoded, &cursor); err != nil {
 		return paginationCursor{}
 	}
 

@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	schemas "github.com/maximhq/bifrost/core/schemas"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // Mock time.Sleep to avoid real delays in tests
@@ -18,9 +21,6 @@ func init() {
 	mockSleep = func(d time.Duration) {
 		// Do nothing in tests to avoid real delays
 	}
-
-	// Setup test logger to avoid nil pointer dereference
-	logger = NewDefaultLogger(schemas.LogLevelError) // Use error level to keep tests quiet
 }
 
 // Helper function to create test config with specific retry settings
@@ -49,8 +49,10 @@ func createBifrostError(message string, statusCode *int, errorType *string, isBi
 // Test executeRequestWithRetries - success scenarios
 func TestExecuteRequestWithRetries_SuccessScenarios(t *testing.T) {
 	config := createTestConfig(3, 100*time.Millisecond, 1*time.Second)
-	ctx := context.Background()
-
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	logger := NewDefaultLogger(schemas.LogLevelError)
+	// Adding dummy tracer to the context
+	ctx.SetValue(schemas.BifrostContextKeyTracer, &schemas.NoOpTracer{})
 	// Test immediate success
 	t.Run("ImmediateSuccess", func(t *testing.T) {
 		callCount := 0
@@ -60,12 +62,14 @@ func TestExecuteRequestWithRetries_SuccessScenarios(t *testing.T) {
 		}
 
 		result, err := executeRequestWithRetries(
-			&ctx,
+			ctx,
 			config,
 			handler,
 			schemas.ChatCompletionRequest,
 			schemas.OpenAI,
 			"gpt-4",
+			nil,
+			logger,
 		)
 
 		if callCount != 1 {
@@ -93,12 +97,14 @@ func TestExecuteRequestWithRetries_SuccessScenarios(t *testing.T) {
 		}
 
 		result, err := executeRequestWithRetries(
-			&ctx,
+			ctx,
 			config,
 			handler,
 			schemas.ChatCompletionRequest,
 			schemas.OpenAI,
 			"gpt-4",
+			nil,
+			logger,
 		)
 
 		if callCount != 3 {
@@ -116,7 +122,9 @@ func TestExecuteRequestWithRetries_SuccessScenarios(t *testing.T) {
 // Test executeRequestWithRetries - retry limits
 func TestExecuteRequestWithRetries_RetryLimits(t *testing.T) {
 	config := createTestConfig(2, 100*time.Millisecond, 1*time.Second)
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyTracer, &schemas.NoOpTracer{})
+	logger := NewDefaultLogger(schemas.LogLevelError)
 	t.Run("ExceedsMaxRetries", func(t *testing.T) {
 		callCount := 0
 		handler := func() (string, *schemas.BifrostError) {
@@ -126,12 +134,14 @@ func TestExecuteRequestWithRetries_RetryLimits(t *testing.T) {
 		}
 
 		result, err := executeRequestWithRetries(
-			&ctx,
+			ctx,
 			config,
 			handler,
 			schemas.ChatCompletionRequest,
 			schemas.OpenAI,
 			"gpt-4",
+			nil,
+			logger,
 		)
 
 		// Should try: initial + 2 retries = 3 total attempts
@@ -156,7 +166,8 @@ func TestExecuteRequestWithRetries_RetryLimits(t *testing.T) {
 // Test executeRequestWithRetries - non-retryable errors
 func TestExecuteRequestWithRetries_NonRetryableErrors(t *testing.T) {
 	config := createTestConfig(3, 100*time.Millisecond, 1*time.Second)
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyTracer, &schemas.NoOpTracer{})
 	testCases := []struct {
 		name  string
 		error *schemas.BifrostError
@@ -178,7 +189,7 @@ func TestExecuteRequestWithRetries_NonRetryableErrors(t *testing.T) {
 			error: createBifrostError("invalid model", nil, nil, false),
 		},
 	}
-
+	logger := NewDefaultLogger(schemas.LogLevelError)
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			callCount := 0
@@ -188,12 +199,14 @@ func TestExecuteRequestWithRetries_NonRetryableErrors(t *testing.T) {
 			}
 
 			result, err := executeRequestWithRetries(
-				&ctx,
+				ctx,
 				config,
 				handler,
 				schemas.ChatCompletionRequest,
 				schemas.OpenAI,
 				"gpt-4",
+				nil,
+				logger,
 			)
 
 			if callCount != 1 {
@@ -212,7 +225,8 @@ func TestExecuteRequestWithRetries_NonRetryableErrors(t *testing.T) {
 // Test executeRequestWithRetries - retryable conditions
 func TestExecuteRequestWithRetries_RetryableConditions(t *testing.T) {
 	config := createTestConfig(1, 100*time.Millisecond, 1*time.Second)
-	ctx := context.Background()
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyTracer, &schemas.NoOpTracer{})
 	testCases := []struct {
 		name  string
 		error *schemas.BifrostError
@@ -250,6 +264,7 @@ func TestExecuteRequestWithRetries_RetryableConditions(t *testing.T) {
 			error: createBifrostError("some error", nil, Ptr("rate_limit"), false),
 		},
 	}
+	logger := NewDefaultLogger(schemas.LogLevelError)
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,12 +275,14 @@ func TestExecuteRequestWithRetries_RetryableConditions(t *testing.T) {
 			}
 
 			result, err := executeRequestWithRetries(
-				&ctx,
+				ctx,
 				config,
 				handler,
 				schemas.ChatCompletionRequest,
 				schemas.OpenAI,
 				"gpt-4",
+				nil,
+				logger,
 			)
 
 			// Should try: initial + 1 retry = 2 total attempts
@@ -285,7 +302,7 @@ func TestExecuteRequestWithRetries_RetryableConditions(t *testing.T) {
 // Test calculateBackoff - exponential growth (base calculations without jitter)
 func TestCalculateBackoff_ExponentialGrowth(t *testing.T) {
 	config := createTestConfig(5, 100*time.Millisecond, 5*time.Second)
-
+	
 	// Test the base exponential calculation by checking that results fall within expected ranges
 	// Since we can't easily mock rand.Float64, we'll test the bounds instead
 	testCases := []struct {
@@ -397,8 +414,8 @@ func TestIsRateLimitError_AllPatterns(t *testing.T) {
 			}
 
 			// Test case insensitive - mixed case
-			if !IsRateLimitErrorMessage(strings.Title(pattern)) {
-				t.Errorf("Title case pattern '%s' should be detected as rate limit error", strings.Title(pattern))
+			if !IsRateLimitErrorMessage(cases.Title(language.English).String(pattern)) {
+				t.Errorf("Title case pattern '%s' should be detected as rate limit error", cases.Title(language.English).String(pattern))
 			}
 
 			// Test as part of larger message
@@ -469,8 +486,8 @@ func TestIsRateLimitError_EdgeCases(t *testing.T) {
 // Test retry logging and attempt counting
 func TestExecuteRequestWithRetries_LoggingAndCounting(t *testing.T) {
 	config := createTestConfig(2, 50*time.Millisecond, 1*time.Second)
-	ctx := context.Background()
-
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyTracer, &schemas.NoOpTracer{})
 	// Capture calls and timing for verification
 	var attemptCounts []int
 	callCount := 0
@@ -486,14 +503,17 @@ func TestExecuteRequestWithRetries_LoggingAndCounting(t *testing.T) {
 		// Third call succeeds
 		return "success", nil
 	}
+	logger := NewDefaultLogger(schemas.LogLevelError)
 
 	result, err := executeRequestWithRetries(
-		&ctx,
+		ctx,
 		config,
 		handler,
 		schemas.ChatCompletionRequest,
 		schemas.OpenAI,
 		"gpt-4",
+		nil,
+		logger,
 	)
 
 	// Verify call progression
@@ -572,6 +592,7 @@ func BenchmarkIsRateLimitError(b *testing.B) {
 
 // Mock Account implementation for testing UpdateProvider
 type MockAccount struct {
+	mu      sync.RWMutex
 	configs map[schemas.ModelProvider]*schemas.ProviderConfig
 	keys    map[schemas.ModelProvider][]schemas.Key
 }
@@ -584,8 +605,15 @@ func NewMockAccount() *MockAccount {
 }
 
 func (ma *MockAccount) AddProvider(provider schemas.ModelProvider, concurrency int, bufferSize int) {
+	ma.AddProviderWithBaseURL(provider, concurrency, bufferSize, "")
+}
+
+func (ma *MockAccount) AddProviderWithBaseURL(provider schemas.ModelProvider, concurrency int, bufferSize int, baseURL string) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
 	ma.configs[provider] = &schemas.ProviderConfig{
 		NetworkConfig: schemas.NetworkConfig{
+			BaseURL:                        baseURL,
 			DefaultRequestTimeoutInSeconds: 30,
 			MaxRetries:                     3,
 			RetryBackoffInitial:            500 * time.Millisecond,
@@ -600,13 +628,15 @@ func (ma *MockAccount) AddProvider(provider schemas.ModelProvider, concurrency i
 	ma.keys[provider] = []schemas.Key{
 		{
 			ID:     fmt.Sprintf("test-key-%s", provider),
-			Value:  fmt.Sprintf("sk-test-%s", provider),
+			Value:  *schemas.NewEnvVar(fmt.Sprintf("sk-test-%s", provider)),
 			Weight: 100,
 		},
 	}
 }
 
 func (ma *MockAccount) UpdateProviderConfig(provider schemas.ModelProvider, concurrency int, bufferSize int) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
 	if config, exists := ma.configs[provider]; exists {
 		config.ConcurrencyAndBufferSize.Concurrency = concurrency
 		config.ConcurrencyAndBufferSize.BufferSize = bufferSize
@@ -614,6 +644,8 @@ func (ma *MockAccount) UpdateProviderConfig(provider schemas.ModelProvider, conc
 }
 
 func (ma *MockAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+	ma.mu.RLock()
+	defer ma.mu.RUnlock()
 	providers := make([]schemas.ModelProvider, 0, len(ma.configs))
 	for provider := range ma.configs {
 		providers = append(providers, provider)
@@ -622,6 +654,8 @@ func (ma *MockAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error)
 }
 
 func (ma *MockAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	ma.mu.RLock()
+	defer ma.mu.RUnlock()
 	if config, exists := ma.configs[provider]; exists {
 		// Return a copy to simulate real behavior
 		configCopy := *config
@@ -630,7 +664,9 @@ func (ma *MockAccount) GetConfigForProvider(provider schemas.ModelProvider) (*sc
 	return nil, fmt.Errorf("provider %s not configured", provider)
 }
 
-func (ma *MockAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+func (ma *MockAccount) GetKeysForProvider(ctx context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+	ma.mu.RLock()
+	defer ma.mu.RUnlock()
 	if keys, exists := ma.keys[provider]; exists {
 		return keys, nil
 	}
@@ -645,7 +681,7 @@ func TestUpdateProvider(t *testing.T) {
 		account.AddProvider(schemas.OpenAI, 5, 1000)
 
 		// Initialize Bifrost
-		ctx := context.Background()
+		ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 		bifrost, err := Init(ctx, schemas.BifrostConfig{
 			Account: account,
 			Logger:  NewDefaultLogger(schemas.LogLevelError), // Keep tests quiet
@@ -728,28 +764,30 @@ func TestUpdateProvider(t *testing.T) {
 		}
 
 		// Verify provider doesn't exist initially
-		if bifrost.getProviderByKey(schemas.Anthropic) != nil {
+		// Note: Use Ollama (not in dynamicallyConfigurableProviders) to test truly inactive provider
+		if bifrost.getProviderByKey(schemas.Ollama) != nil {
 			t.Fatal("Provider should not exist initially")
 		}
 
 		// Add provider to account after bifrost initialization
-		account.AddProvider(schemas.Anthropic, 3, 500)
+		// Note: Ollama requires a BaseURL
+		account.AddProviderWithBaseURL(schemas.Ollama, 3, 500, "http://localhost:11434")
 
 		// Update should succeed and initialize the provider
-		err = bifrost.UpdateProvider(schemas.Anthropic)
+		err = bifrost.UpdateProvider(schemas.Ollama)
 		if err != nil {
 			t.Fatalf("UpdateProvider should succeed for inactive provider: %v", err)
 		}
 
 		// Verify provider now exists
-		provider := bifrost.getProviderByKey(schemas.Anthropic)
+		provider := bifrost.getProviderByKey(schemas.Ollama)
 		if provider == nil {
 			t.Fatal("Provider should exist after update")
 		}
 
-		if provider.GetProviderKey() != schemas.Anthropic {
+		if provider.GetProviderKey() != schemas.Ollama {
 			t.Errorf("Provider has wrong key: got %s, want %s",
-				provider.GetProviderKey(), schemas.Anthropic)
+				provider.GetProviderKey(), schemas.Ollama)
 		}
 	})
 

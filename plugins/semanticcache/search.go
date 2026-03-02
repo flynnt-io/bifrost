@@ -13,7 +13,7 @@ import (
 	"github.com/maximhq/bifrost/framework/vectorstore"
 )
 
-func (plugin *Plugin) performDirectSearch(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, cacheKey string) (*schemas.PluginShortCircuit, error) {
+func (plugin *Plugin) performDirectSearch(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, cacheKey string) (*schemas.LLMPluginShortCircuit, error) {
 	// Generate hash for the request
 	hash, err := plugin.generateRequestHash(req)
 	if err != nil {
@@ -82,8 +82,33 @@ func (plugin *Plugin) performDirectSearch(ctx *schemas.BifrostContext, req *sche
 	return plugin.buildResponseFromResult(ctx, req, result, CacheTypeDirect, 1.0, 0)
 }
 
+// generateEmbeddingsForStorage generates embeddings and stores them in context for PostHook storage.
+// This is used when the vector store requires vectors but we're in direct-only cache mode.
+// Unlike performSemanticSearch, this function does not perform any search - it only generates
+// and stores embeddings so they can be persisted with the cache entry.
+func (plugin *Plugin) generateEmbeddingsForStorage(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error {
+	// Extract text and metadata for embedding
+	text, paramsHash, err := plugin.extractTextForEmbedding(req)
+	if err != nil {
+		return fmt.Errorf("failed to extract text for embedding: %w", err)
+	}
+
+	// Generate embedding
+	embedding, inputTokens, err := plugin.generateEmbedding(ctx, text)
+	if err != nil {
+		return fmt.Errorf("failed to generate embedding: %w", err)
+	}
+
+	// Store embedding and metadata in context for PostHook
+	ctx.SetValue(requestEmbeddingKey, embedding)
+	ctx.SetValue(requestEmbeddingTokensKey, inputTokens)
+	ctx.SetValue(requestParamsHashKey, paramsHash)
+
+	return nil
+}
+
 // performSemanticSearch performs semantic similarity search and returns matching response if found.
-func (plugin *Plugin) performSemanticSearch(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, cacheKey string) (*schemas.PluginShortCircuit, error) {
+func (plugin *Plugin) performSemanticSearch(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, cacheKey string) (*schemas.LLMPluginShortCircuit, error) {
 	// Extract text and metadata for embedding
 	text, paramsHash, err := plugin.extractTextForEmbedding(req)
 	if err != nil {
@@ -96,14 +121,14 @@ func (plugin *Plugin) performSemanticSearch(ctx *schemas.BifrostContext, req *sc
 		return nil, fmt.Errorf("failed to generate embedding: %w", err)
 	}
 
-	// Store embedding and metadata in context for PostHook
+	// Store embedding and metadata in context for PostLLMHook
 	ctx.SetValue(requestEmbeddingKey, embedding)
 	ctx.SetValue(requestEmbeddingTokensKey, inputTokens)
 	ctx.SetValue(requestParamsHashKey, paramsHash)
 
 	cacheThreshold := plugin.config.Threshold
 
-	thresholdValue := (*ctx).Value(CacheThresholdKey)
+	thresholdValue := ctx.Value(CacheThresholdKey)
 	if thresholdValue != nil {
 		threshold, ok := thresholdValue.(float64)
 		if !ok {
@@ -158,8 +183,8 @@ func (plugin *Plugin) performSemanticSearch(ctx *schemas.BifrostContext, req *sc
 	return plugin.buildResponseFromResult(ctx, req, result, CacheTypeSemantic, cacheThreshold, inputTokens)
 }
 
-// buildResponseFromResult constructs a PluginShortCircuit response from a cached VectorEntry result
-func (plugin *Plugin) buildResponseFromResult(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, result vectorstore.SearchResult, cacheType CacheType, threshold float64, inputTokens int) (*schemas.PluginShortCircuit, error) {
+// buildResponseFromResult constructs a LLMPluginShortCircuit response from a cached VectorEntry result
+func (plugin *Plugin) buildResponseFromResult(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, result vectorstore.SearchResult, cacheType CacheType, threshold float64, inputTokens int) (*schemas.LLMPluginShortCircuit, error) {
 	// Extract response data from the result properties
 	properties := result.Properties
 	if properties == nil {
@@ -198,7 +223,7 @@ func (plugin *Plugin) buildResponseFromResult(ctx *schemas.BifrostContext, req *
 					defer cancel()
 					err := plugin.store.Delete(deleteCtx, plugin.config.VectorStoreNamespace, result.ID)
 					if err != nil {
-						plugin.logger.Warn(fmt.Sprintf("%s Failed to delete expired entry %s: %v", PluginLoggerPrefix, result.ID, err))
+						plugin.logger.Warn("%s Failed to delete expired entry %s: %v", PluginLoggerPrefix, result.ID, err)
 					}
 				}()
 				// Return nil to indicate cache miss
@@ -238,7 +263,7 @@ func (plugin *Plugin) buildResponseFromResult(ctx *schemas.BifrostContext, req *
 }
 
 // buildSingleResponseFromResult constructs a single response from cached data
-func (plugin *Plugin) buildSingleResponseFromResult(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, result vectorstore.SearchResult, responseData interface{}, cacheType CacheType, threshold float64, similarity float64, inputTokens int) (*schemas.PluginShortCircuit, error) {
+func (plugin *Plugin) buildSingleResponseFromResult(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, result vectorstore.SearchResult, responseData interface{}, cacheType CacheType, threshold float64, similarity float64, inputTokens int) (*schemas.LLMPluginShortCircuit, error) {
 	provider, _, _ := req.GetRequestFields()
 
 	responseStr, ok := responseData.(string)
@@ -279,13 +304,13 @@ func (plugin *Plugin) buildSingleResponseFromResult(ctx *schemas.BifrostContext,
 	ctx.SetValue(isCacheHitKey, true)
 	ctx.SetValue(cacheHitTypeKey, cacheType)
 
-	return &schemas.PluginShortCircuit{
+	return &schemas.LLMPluginShortCircuit{
 		Response: &cachedResponse,
 	}, nil
 }
 
 // buildStreamingResponseFromResult constructs a streaming response from cached data
-func (plugin *Plugin) buildStreamingResponseFromResult(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, result vectorstore.SearchResult, streamData interface{}, cacheType CacheType, threshold float64, similarity float64, inputTokens int) (*schemas.PluginShortCircuit, error) {
+func (plugin *Plugin) buildStreamingResponseFromResult(ctx *schemas.BifrostContext, req *schemas.BifrostRequest, result vectorstore.SearchResult, streamData interface{}, cacheType CacheType, threshold float64, similarity float64, inputTokens int) (*schemas.LLMPluginShortCircuit, error) {
 	provider, _, _ := req.GetRequestFields()
 
 	// Parse stream_chunks
@@ -297,9 +322,9 @@ func (plugin *Plugin) buildStreamingResponseFromResult(ctx *schemas.BifrostConte
 	// Mark cache-hit once to avoid concurrent ctx writes
 	ctx.SetValue(isCacheHitKey, true)
 	ctx.SetValue(cacheHitTypeKey, cacheType)
-	
+
 	// Create stream channel
-	streamChan := make(chan *schemas.BifrostStream)
+	streamChan := make(chan *schemas.BifrostStreamChunk)
 
 	go func() {
 		defer close(streamChan)
@@ -312,14 +337,14 @@ func (plugin *Plugin) buildStreamingResponseFromResult(ctx *schemas.BifrostConte
 		for i, chunkData := range streamArray {
 			chunkStr, ok := chunkData.(string)
 			if !ok {
-				plugin.logger.Warn(fmt.Sprintf("%s Stream chunk %d is not a string, skipping", PluginLoggerPrefix, i))
+				plugin.logger.Warn("%s Stream chunk %d is not a string, skipping", PluginLoggerPrefix, i)
 				continue
 			}
 
 			// Unmarshal the chunk as BifrostResponse
 			var cachedResponse schemas.BifrostResponse
 			if err := json.Unmarshal([]byte(chunkStr), &cachedResponse); err != nil {
-				plugin.logger.Warn(fmt.Sprintf("%s Failed to unmarshal stream chunk %d, skipping: %v", PluginLoggerPrefix, i, err))
+				plugin.logger.Warn("%s Failed to unmarshal stream chunk %d, skipping: %v", PluginLoggerPrefix, i, err)
 				continue
 			}
 
@@ -353,17 +378,18 @@ func (plugin *Plugin) buildStreamingResponseFromResult(ctx *schemas.BifrostConte
 			extraFields.Provider = provider
 
 			// Send chunk to stream
-			streamChan <- &schemas.BifrostStream{
-				BifrostTextCompletionResponse:      cachedResponse.TextCompletionResponse,
-				BifrostChatResponse:                cachedResponse.ChatResponse,
-				BifrostResponsesStreamResponse:     cachedResponse.ResponsesStreamResponse,
-				BifrostSpeechStreamResponse:        cachedResponse.SpeechStreamResponse,
-				BifrostTranscriptionStreamResponse: cachedResponse.TranscriptionStreamResponse,
+			streamChan <- &schemas.BifrostStreamChunk{
+				BifrostTextCompletionResponse:        cachedResponse.TextCompletionResponse,
+				BifrostChatResponse:                  cachedResponse.ChatResponse,
+				BifrostResponsesStreamResponse:       cachedResponse.ResponsesStreamResponse,
+				BifrostSpeechStreamResponse:          cachedResponse.SpeechStreamResponse,
+				BifrostTranscriptionStreamResponse:   cachedResponse.TranscriptionStreamResponse,
+				BifrostImageGenerationStreamResponse: cachedResponse.ImageGenerationStreamResponse,
 			}
 		}
 	}()
 
-	return &schemas.PluginShortCircuit{
+	return &schemas.LLMPluginShortCircuit{
 		Stream: streamChan,
 	}, nil
 }

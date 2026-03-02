@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/maximhq/bifrost/core/internal/testutil"
+	"github.com/maximhq/bifrost/core/internal/llmtests"
 
 	"github.com/maximhq/bifrost/core/schemas"
 )
@@ -16,20 +16,20 @@ func TestOpenRouter(t *testing.T) {
 		t.Skip("Skipping OpenRouter tests because OPENROUTER_API_KEY is not set")
 	}
 
-	client, ctx, cancel, err := testutil.SetupTest()
+	client, ctx, cancel, err := llmtests.SetupTest()
 	if err != nil {
 		t.Fatalf("Error initializing test setup: %v", err)
 	}
 	defer cancel()
 
-	testConfig := testutil.ComprehensiveTestConfig{
+	testConfig := llmtests.ComprehensiveTestConfig{
 		Provider:       schemas.OpenRouter,
-		ChatModel:      "openai/gpt-4o",
+		ChatModel:      "openai/gpt-4.1",
 		VisionModel:    "openai/gpt-4o",
 		TextModel:      "google/gemini-2.5-flash",
 		EmbeddingModel: "",
-		ReasoningModel: "openai/o1",
-		Scenarios: testutil.TestScenarios{
+		ReasoningModel: "openai/gpt-oss-120b",
+		Scenarios: llmtests.TestScenarios{
 			TextCompletion:        true,
 			SimpleChat:            true,
 			CompletionStream:      true,
@@ -42,14 +42,17 @@ func TestOpenRouter(t *testing.T) {
 			ImageURL:              false, // OpenRouter's responses API is in Beta
 			ImageBase64:           false, // OpenRouter's responses API is in Beta
 			MultipleImages:        false, // OpenRouter's responses API is in Beta
+			FileBase64:            true,
+			FileURL:               true,
 			CompleteEnd2End:       false, // OpenRouter's responses API is in Beta
 			Reasoning:             true,
 			ListModels:            true,
+			StructuredOutputs:     true, // Structured outputs with nullable enum support
 		},
 	}
 
 	t.Run("OpenRouterTests", func(t *testing.T) {
-		testutil.RunAllComprehensiveTests(t, client, ctx, testConfig)
+		llmtests.RunAllComprehensiveTests(t, client, ctx, testConfig)
 	})
 	client.Shutdown()
 }

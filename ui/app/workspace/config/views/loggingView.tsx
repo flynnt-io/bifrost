@@ -4,38 +4,27 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { getErrorMessage, useGetCoreConfigQuery, useUpdateCoreConfigMutation } from "@/lib/store";
-import { CoreConfig } from "@/lib/types/config";
+import { CoreConfig, DefaultCoreConfig } from "@/lib/types/config";
+import { parseArrayFromText } from "@/lib/utils/array";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-
-const defaultConfig: CoreConfig = {
-	drop_excess_requests: false,
-	initial_pool_size: 1000,
-	prometheus_labels: [],
-	enable_logging: true,
-	disable_content_logging: false,
-	log_retention_days: 365,
-	enable_governance: true,
-	enforce_governance_header: false,
-	allow_direct_keys: false,
-	allowed_origins: [],
-	max_request_body_size_mb: 100,
-	enable_litellm_fallbacks: false,
-};
 
 export default function LoggingView() {
 	const hasSettingsUpdateAccess = useRbac(RbacResource.Settings, RbacOperation.Update);
 	const { data: bifrostConfig } = useGetCoreConfigQuery({ fromDB: true });
 	const config = bifrostConfig?.client_config;
 	const [updateCoreConfig, { isLoading }] = useUpdateCoreConfigMutation();
-	const [localConfig, setLocalConfig] = useState<CoreConfig>(defaultConfig);
+	const [localConfig, setLocalConfig] = useState<CoreConfig>(DefaultCoreConfig);
 	const [needsRestart, setNeedsRestart] = useState<boolean>(false);
+	const [loggingHeadersText, setLoggingHeadersText] = useState<string>("");
 
 	useEffect(() => {
 		if (config) {
 			setLocalConfig(config);
+			setLoggingHeadersText(config.logging_headers?.join(", ") || "");
 		}
 	}, [config]);
 
@@ -44,7 +33,8 @@ export default function LoggingView() {
 		return (
 			localConfig.enable_logging !== config.enable_logging ||
 			localConfig.disable_content_logging !== config.disable_content_logging ||
-			localConfig.log_retention_days !== config.log_retention_days
+			localConfig.log_retention_days !== config.log_retention_days ||
+			JSON.stringify(localConfig.logging_headers || []) !== JSON.stringify(config.logging_headers || [])
 		);
 	}, [config, localConfig]);
 
@@ -53,6 +43,11 @@ export default function LoggingView() {
 		if (field === "enable_logging" || field === "disable_content_logging") {
 			setNeedsRestart(true);
 		}
+	}, []);
+
+	const handleLoggingHeadersChange = useCallback((value: string) => {
+		setLoggingHeadersText(value);
+		setLocalConfig((prev) => ({ ...prev, logging_headers: parseArrayFromText(value) }));
 	}, []);
 
 	const handleSave = useCallback(async () => {
@@ -76,15 +71,10 @@ export default function LoggingView() {
 	}, [bifrostConfig, localConfig, updateCoreConfig]);
 
 	return (
-		<div className="space-y-4">
-			<div className="flex items-center justify-between">
-				<div>
-					<h2 className="text-2xl font-semibold tracking-tight">Logging</h2>
-					<p className="text-muted-foreground text-sm">Configure logging settings for requests and responses.</p>
-				</div>
-				<Button onClick={handleSave} disabled={!hasChanges || isLoading || !hasSettingsUpdateAccess}>
-					{isLoading ? "Saving..." : "Save Changes"}
-				</Button>
+		<div className="mx-auto w-full max-w-4xl space-y-4">
+			<div>
+				<h2 className="text-lg font-semibold tracking-tight">Logs Settings</h2>
+				<p className="text-muted-foreground text-sm">Configure logging settings for requests and responses.</p>
 			</div>
 
 			<div className="space-y-4">
@@ -126,7 +116,8 @@ export default function LoggingView() {
 									Disable Content Logging
 								</label>
 								<p className="text-muted-foreground text-sm">
-									When enabled, only usage metadata (latency, cost, token count, etc.) will be logged. Request/response content will not be stored.
+									When enabled, only usage metadata (latency, cost, token count, etc.) will be logged. Request/response content will not be
+									stored.
 								</p>
 							</div>
 							<Switch
@@ -164,6 +155,34 @@ export default function LoggingView() {
 						/>
 					</div>
 				)}
+
+				{/* Logging Headers */}
+				{localConfig.enable_logging && bifrostConfig?.is_logs_connected && (
+					<div className="space-y-2 rounded-lg border p-4">
+						<label htmlFor="logging-headers" className="text-sm font-medium">
+							Logging Headers
+						</label>
+						<p className="text-muted-foreground text-sm">
+							Comma-separated list of request headers to capture in log metadata. Values are extracted from incoming requests and stored in
+							the metadata field of log entries. Headers with the <code className="text-xs">x-bf-lh-</code> prefix are always captured
+							automatically.
+						</p>
+						<Textarea
+							id="logging-headers"
+							data-testid="workspace-logging-headers-textarea"
+							className="h-24"
+							placeholder="X-Tenant-ID, X-Request-Source, X-Correlation-ID"
+							value={loggingHeadersText}
+							onChange={(e) => handleLoggingHeadersChange(e.target.value)}
+						/>
+					</div>
+				)}
+			</div>
+
+			<div className="flex justify-end pt-2">
+				<Button onClick={handleSave} disabled={!hasChanges || isLoading || !hasSettingsUpdateAccess}>
+					{isLoading ? "Saving..." : "Save Changes"}
+				</Button>
 			</div>
 		</div>
 	);
@@ -172,5 +191,3 @@ export default function LoggingView() {
 const RestartWarning = () => {
 	return <div className="text-muted-foreground mt-2 pl-4 text-xs font-semibold">Need to restart Bifrost to apply changes.</div>;
 };
-
-

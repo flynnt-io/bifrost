@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -11,6 +12,7 @@ var NoDeadline time.Time
 
 var reservedKeys = []any{
 	BifrostContextKeyVirtualKey,
+	BifrostContextKeyAPIKeyName,
 	BifrostContextKeyRequestID,
 	BifrostContextKeyFallbackRequestID,
 	BifrostContextKeyDirectKey,
@@ -18,28 +20,29 @@ var reservedKeys = []any{
 	BifrostContextKeySelectedKeyName,
 	BifrostContextKeyNumberOfRetries,
 	BifrostContextKeyFallbackIndex,
-	BifrostContextKeyStreamEndIndicator,
 	BifrostContextKeySkipKeySelection,
 	BifrostContextKeyExtraHeaders,
 	BifrostContextKeyURLPath,
+	BifrostContextKeyDeferTraceCompletion,
 }
 
 // BifrostContext is a custom context.Context implementation that tracks user-set values.
 // It supports deadlines, can be derived from other contexts, and provides layered
 // value inheritance when derived from another BifrostContext.
 type BifrostContext struct {
-	parent      context.Context
-	deadline    time.Time
-	hasDeadline bool
-	done        chan struct{}
-	doneOnce    sync.Once
-	err         error
-	errMu       sync.RWMutex
-	userValues  map[any]any
-	valuesMu    sync.RWMutex
+	parent                context.Context
+	deadline              time.Time
+	hasDeadline           bool
+	done                  chan struct{}
+	doneOnce              sync.Once
+	err                   error
+	errMu                 sync.RWMutex
+	userValues            map[any]any
+	valuesMu              sync.RWMutex
+	blockRestrictedWrites atomic.Bool
 }
 
-// NewBifrostContext creates a new PluginContext with the given parent context and deadline.
+// NewBifrostContext creates a new BifrostContext with the given parent context and deadline.
 // If the deadline is zero, no deadline is set on this context (though the parent may have one).
 // The context will be cancelled when the deadline expires or when the parent context is cancelled.
 func NewBifrostContext(parent context.Context, deadline time.Time) *BifrostContext {
@@ -47,27 +50,63 @@ func NewBifrostContext(parent context.Context, deadline time.Time) *BifrostConte
 		parent = context.Background()
 	}
 	ctx := &BifrostContext{
-		parent:      parent,
-		deadline:    deadline,
-		hasDeadline: !deadline.IsZero(),
-		done:        make(chan struct{}),
-		userValues:  make(map[any]any),
+		parent:                parent,
+		deadline:              deadline,
+		hasDeadline:           !deadline.IsZero(),
+		done:                  make(chan struct{}),
+		userValues:            make(map[any]any),
+		blockRestrictedWrites: atomic.Bool{},
 	}
+	ctx.blockRestrictedWrites.Store(false)
 	// Only start goroutine if there's something to watch:
 	// - If we have a deadline, we need the timer
-	// - If parent can be cancelled (Done() != nil), we need to propagate cancellation
-	if ctx.hasDeadline || parent.Done() != nil {
+	// - If parent can be cancelled (Done() != nil) AND is not a non-cancelling context
+	// - If parent has a deadline, we need a timer (parent may not properly cancel via Done())
+	_, parentHasDeadline := parent.Deadline()
+	parentCanCancel := parent.Done() != nil && !isNonCancellingContext(parent)
+	if ctx.hasDeadline || parentCanCancel || parentHasDeadline {
 		go ctx.watchCancellation()
 	}
 	return ctx
 }
 
-// NewBifrostContextWithTimeout creates a new PluginContext with a timeout duration.
-// This is a convenience wrapper around NewPluginContext.
+// NewBifrostContextWithValue creates a new BifrostContext with the given value set.
+func NewBifrostContextWithValue(parent context.Context, deadline time.Time, key any, value any) *BifrostContext {
+	ctx := NewBifrostContext(parent, deadline)
+	ctx.SetValue(key, value)
+	return ctx
+}
+
+// NewBifrostContextWithTimeout creates a new BifrostContext with a timeout duration.
+// This is a convenience wrapper around NewBifrostContext.
 // Returns the context and a cancel function that should be called to release resources.
 func NewBifrostContextWithTimeout(parent context.Context, timeout time.Duration) (*BifrostContext, context.CancelFunc) {
 	ctx := NewBifrostContext(parent, time.Now().Add(timeout))
 	return ctx, func() { ctx.Cancel() }
+}
+
+// NewBifrostContextWithCancel creates a new BifrostContext with a cancel function.
+// This is a convenience wrapper around NewBifrostContext.
+// Returns the context and a cancel function that should be called to release resources.
+func NewBifrostContextWithCancel(parent context.Context) (*BifrostContext, context.CancelFunc) {
+	ctx := NewBifrostContext(parent, NoDeadline)
+	return ctx, func() { ctx.Cancel() }
+}
+
+// WithValue returns a new context with the given value set.
+func (bc *BifrostContext) WithValue(key any, value any) *BifrostContext {
+	bc.SetValue(key, value)
+	return bc
+}
+
+// BlockRestrictedWrites returns true if restricted writes are blocked.
+func (bc *BifrostContext) BlockRestrictedWrites() {
+	bc.blockRestrictedWrites.Store(true)
+}
+
+// UnblockRestrictedWrites unblocks restricted writes.
+func (bc *BifrostContext) UnblockRestrictedWrites() {
+	bc.blockRestrictedWrites.Store(false)
 }
 
 // Cancel cancels the context, closing the Done channel and setting the error to context.Canceled.
@@ -78,8 +117,12 @@ func (bc *BifrostContext) Cancel() {
 // watchCancellation monitors for deadline expiration and parent cancellation.
 func (bc *BifrostContext) watchCancellation() {
 	var timer <-chan time.Time
-	if bc.hasDeadline {
-		duration := time.Until(bc.deadline)
+
+	// Use effective deadline (considers both own and parent deadlines)
+	// This handles cases where parent has a deadline but doesn't properly
+	// cancel via Done() (e.g., fasthttp.RequestCtx)
+	if effectiveDeadline, hasDeadline := bc.Deadline(); hasDeadline {
+		duration := time.Until(effectiveDeadline)
 		if duration <= 0 {
 			// Deadline already passed
 			bc.cancel(context.DeadlineExceeded)
@@ -88,6 +131,18 @@ func (bc *BifrostContext) watchCancellation() {
 		t := time.NewTimer(duration)
 		defer t.Stop()
 		timer = t.C
+	}
+
+	// Don't watch parent.Done() for contexts known to never close it
+	// (e.g., fasthttp.RequestCtx pools contexts and never cancels them)
+	if isNonCancellingContext(bc.parent) {
+		select {
+		case <-timer:
+			bc.cancel(context.DeadlineExceeded)
+		case <-bc.done:
+			// Already cancelled
+		}
+		return
 	}
 
 	select {
@@ -164,13 +219,33 @@ func (bc *BifrostContext) Value(key any) any {
 // This is thread-safe and can be called concurrently.
 func (bc *BifrostContext) SetValue(key, value any) {
 	// Check if the key is a reserved key
-	if slices.Contains(reservedKeys, key) {
+	if bc.blockRestrictedWrites.Load() && slices.Contains(reservedKeys, key) {
 		// we silently drop writes for these reserved keys
 		return
 	}
 	bc.valuesMu.Lock()
 	defer bc.valuesMu.Unlock()
+	if bc.userValues == nil {
+		bc.userValues = make(map[any]any)
+	}
 	bc.userValues[key] = value
+}
+
+// GetAndSetValue gets a value from the internal userValues map and sets it
+func (bc *BifrostContext) GetAndSetValue(key any, value any) any {
+	bc.valuesMu.Lock()
+	defer bc.valuesMu.Unlock()
+	// Check if the key is a reserved key
+	if bc.blockRestrictedWrites.Load() && slices.Contains(reservedKeys, key) {
+		// we silently drop writes for these reserved keys
+		return bc.userValues[key]
+	}
+	if bc.userValues == nil {
+		bc.userValues = make(map[any]any)
+	}
+	oldValue := bc.userValues[key]
+	bc.userValues[key] = value
+	return oldValue
 }
 
 // GetUserValues returns a copy of all user-set values in this context.
@@ -205,4 +280,49 @@ func (bc *BifrostContext) GetParentCtxWithUserValues() context.Context {
 	}
 	bc.valuesMu.RUnlock()
 	return parentCtx
+}
+
+// AppendRoutingEngineLog appends a routing engine log entry to the context.
+// Parameters:
+//   - ctx: The Bifrost context
+//   - engineName: Name of the routing engine (e.g., "governance", "routing-rule")
+//   - message: Human-readable log message describing the decision/action
+func (bc *BifrostContext) AppendRoutingEngineLog(engineName string, message string) {
+	entry := RoutingEngineLogEntry{
+		Engine:    engineName,
+		Message:   message,
+		Timestamp: time.Now().UnixMilli(),
+	}
+	AppendToContextList(bc, BifrostContextKeyRoutingEngineLogs, entry)
+}
+
+// GetRoutingEngineLogs retrieves all routing engine logs from the context.
+// Parameters:
+//   - ctx: The Bifrost context
+//
+// Returns:
+//   - []RoutingEngineLogEntry: Slice of routing engine log entries (nil if none)
+func (bc *BifrostContext) GetRoutingEngineLogs() []RoutingEngineLogEntry {
+	if val := bc.Value(BifrostContextKeyRoutingEngineLogs); val != nil {
+		if logs, ok := val.([]RoutingEngineLogEntry); ok {
+			return logs
+		}
+	}
+	return nil
+}
+
+// AppendToContext appends a value to the context list value.
+// Parameters:
+//   - ctx: The Bifrost context
+//   - key: The key to append the value to
+//   - value: The value to append
+func AppendToContextList[T any](ctx *BifrostContext, key BifrostContextKey, value T) {
+	if ctx == nil {
+		return
+	}
+	existingValues, ok := ctx.Value(key).([]T)
+	if !ok {
+		existingValues = []T{}
+	}
+	ctx.SetValue(key, append(existingValues, value))
 }

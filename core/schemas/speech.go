@@ -2,8 +2,6 @@ package schemas
 
 import (
 	"fmt"
-
-	"github.com/bytedance/sonic"
 )
 
 type BifrostSpeechRequest struct {
@@ -81,13 +79,13 @@ func (vi *SpeechVoiceInput) MarshalJSON() ([]byte, error) {
 	}
 
 	if vi.Voice != nil {
-		return sonic.Marshal(*vi.Voice)
+		return Marshal(*vi.Voice)
 	}
 	if len(vi.MultiVoiceConfig) > 0 {
-		return sonic.Marshal(vi.MultiVoiceConfig)
+		return Marshal(vi.MultiVoiceConfig)
 	}
 	// If both are nil, return null
-	return sonic.Marshal(nil)
+	return Marshal(nil)
 }
 
 // UnmarshalJSON implements custom JSON unmarshalling for SpeechVoiceInput.
@@ -100,14 +98,14 @@ func (vi *SpeechVoiceInput) UnmarshalJSON(data []byte) error {
 
 	// First, try to unmarshal as a direct string
 	var stringContent string
-	if err := sonic.Unmarshal(data, &stringContent); err == nil {
+	if err := Unmarshal(data, &stringContent); err == nil {
 		vi.Voice = &stringContent
 		return nil
 	}
 
 	// Try to unmarshal as an array of VoiceConfig objects
 	var voiceConfigs []VoiceConfig
-	if err := sonic.Unmarshal(data, &voiceConfigs); err == nil {
+	if err := Unmarshal(data, &voiceConfigs); err == nil {
 		// Validate each VoiceConfig and build a new slice deterministically
 		validConfigs := make([]VoiceConfig, 0, len(voiceConfigs))
 		for _, config := range voiceConfigs {
@@ -137,8 +135,13 @@ type BifrostSpeechStreamResponse struct {
 	ExtraFields BifrostResponseExtraFields `json:"extra_fields"`
 }
 
+type SpeechUsageInputTokenDetails struct {
+	TextTokens  int `json:"text_tokens,omitempty"`
+	AudioTokens int `json:"audio_tokens,omitempty"`
+}
 type SpeechUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens       int                           `json:"input_tokens"`
+	InputTokenDetails *SpeechUsageInputTokenDetails `json:"input_token_details,omitempty"`
+	OutputTokens      int                           `json:"output_tokens"`
+	TotalTokens       int                           `json:"total_tokens"`
 }

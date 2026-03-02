@@ -25,11 +25,11 @@ const (
 type WeaviateConfig struct {
 	// Connection settings
 	Scheme     string              `json:"scheme"`                // "http" or "https" - REQUIRED
-	Host       string              `json:"host"`                  // "localhost:8080" - REQUIRED
+	Host       *schemas.EnvVar     `json:"host"`                  // "localhost:8080" - REQUIRED
 	GrpcConfig *WeaviateGrpcConfig `json:"grpc_config,omitempty"` // grpc config for weaviate (optional)
 
 	// Authentication settings (optional)
-	APIKey  string            `json:"api_key,omitempty"` // API key for authentication
+	APIKey  *schemas.EnvVar   `json:"api_key,omitempty"` // API key for authentication
 	Headers map[string]string `json:"headers,omitempty"` // Additional headers
 
 	// Connection settings
@@ -39,7 +39,7 @@ type WeaviateConfig struct {
 type WeaviateGrpcConfig struct {
 	// Host is the host of the weaviate server (host:port).
 	// If host is without a port number then the 80 port for insecured and 443 port for secured connections will be used.
-	Host string `json:"host"`
+	Host *schemas.EnvVar `json:"host"`
 	// Secured is a boolean flag indicating if the connection is secured
 	Secured bool `json:"secured"`
 }
@@ -348,6 +348,17 @@ func (s *WeaviateStore) Delete(ctx context.Context, className string, id string)
 }
 
 func (s *WeaviateStore) DeleteAll(ctx context.Context, className string, queries []Query) ([]DeleteResult, error) {
+	// Check if class exists first to avoid 500 errors from Weaviate
+	exists, err := s.client.Schema().ClassExistenceChecker().
+		WithClassName(className).
+		Do(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check class existence: %w", err)
+	}
+	if !exists {
+		return []DeleteResult{}, nil // Class doesn't exist, nothing to delete
+	}
+
 	where := buildWeaviateFilter(queries)
 
 	res, err := s.client.Batch().ObjectsBatchDeleter().
@@ -395,28 +406,36 @@ func (s *WeaviateStore) Close(ctx context.Context, className string) error {
 	return nil
 }
 
+// RequiresVectors returns true because Weaviate's HNSW index
+// requires vectors for proper object indexing and retrieval.
+func (s *WeaviateStore) RequiresVectors() bool {
+	return true
+}
+
 // newWeaviateStore creates a new Weaviate vector store.
 func newWeaviateStore(ctx context.Context, config *WeaviateConfig, logger schemas.Logger) (*WeaviateStore, error) {
 	// Validate required config
-	if config.Scheme == "" || config.Host == "" {
+	if config.Scheme == "" || (config.Host == nil || config.Host.GetValue() == "") {
 		return nil, fmt.Errorf("weaviate scheme and host are required")
 	}
-
 	// Build client configuration
 	cfg := weaviate.Config{
 		Scheme: config.Scheme,
-		Host:   config.Host,
+		Host:   config.Host.GetValue(),
 	}
 
 	// Add authentication if provided
-	if config.APIKey != "" {
-		cfg.AuthConfig = auth.ApiKey{Value: config.APIKey}
+	if config.APIKey != nil && config.APIKey.GetValue() != "" {
+		cfg.AuthConfig = auth.ApiKey{Value: config.APIKey.GetValue()}
 	}
 
 	// Add grpc config if provided
 	if config.GrpcConfig != nil {
+		if config.GrpcConfig.Host == nil || config.GrpcConfig.Host.GetValue() == "" {
+			return nil, fmt.Errorf("weaviate grpc host is required")
+		}
 		cfg.GrpcConfig = &grpc.Config{
-			Host:    config.GrpcConfig.Host,
+			Host:    config.GrpcConfig.Host.GetValue(),
 			Secured: config.GrpcConfig.Secured,
 		}
 	}

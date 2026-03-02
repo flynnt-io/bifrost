@@ -19,6 +19,8 @@ exclude_dir = [
     "tests",
     "docs",
     "npx",
+    "test-reports",
+    "playwright-report",
 ]
 exclude_file = []
 exclude_regex = ["_test.go"]

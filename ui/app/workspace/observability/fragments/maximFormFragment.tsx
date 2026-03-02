@@ -6,8 +6,9 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { maximFormSchema, type MaximFormSchema } from "@/lib/types/schemas";
+import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm, type Resolver } from "react-hook-form";
 
@@ -18,10 +19,13 @@ interface MaximFormFragmentProps {
 		log_repo_id?: string;
 	};
 	onSave: (config: MaximFormSchema) => Promise<void>;
+	onDelete?: () => void;
+	isDeleting?: boolean;
 	isLoading?: boolean;
 }
 
-export function MaximFormFragment({ initialConfig, onSave, isLoading = false }: MaximFormFragmentProps) {
+export function MaximFormFragment({ initialConfig, onSave, onDelete, isDeleting = false, isLoading = false }: MaximFormFragmentProps) {
+	const hasMaximAccess = useRbac(RbacResource.Observability, RbacOperation.Update);
 	const [showApiKey, setShowApiKey] = useState(false);
 	const [isSaving, setIsSaving] = useState(false);
 
@@ -30,7 +34,7 @@ export function MaximFormFragment({ initialConfig, onSave, isLoading = false }: 
 		mode: "onChange",
 		reValidateMode: "onChange",
 		defaultValues: {
-			enabled: initialConfig?.enabled ?? false,
+			enabled: initialConfig?.enabled ?? true,
 			maxim_config: {
 				api_key: initialConfig?.api_key ?? "",
 				log_repo_id: initialConfig?.log_repo_id ?? "",
@@ -46,7 +50,7 @@ export function MaximFormFragment({ initialConfig, onSave, isLoading = false }: 
 	useEffect(() => {
 		// Reset form with new initial config when it changes
 		form.reset({
-			enabled: initialConfig?.enabled ?? false,
+			enabled: initialConfig?.enabled ?? true,
 			maxim_config: {
 				api_key: initialConfig?.api_key ?? "",
 				log_repo_id: initialConfig?.log_repo_id ?? "",
@@ -67,13 +71,14 @@ export function MaximFormFragment({ initialConfig, onSave, isLoading = false }: 
 									<FormLabel>API Key</FormLabel>
 									<FormControl>
 										<div className="relative">
-											<Input type={showApiKey ? "text" : "password"} placeholder="Enter your Maxim API key" {...field} className="pr-10" />
+											<Input type={showApiKey ? "text" : "password"} placeholder="Enter your Maxim API key" disabled={!hasMaximAccess} {...field} className="pr-10" />
 											<Button
 												type="button"
 												variant="ghost"
 												size="sm"
 												className="absolute top-0 right-0 h-full px-3 py-2 hover:bg-transparent"
 												onClick={() => setShowApiKey(!showApiKey)}
+												disabled={!hasMaximAccess}
 											>
 												{showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
 											</Button>
@@ -91,7 +96,7 @@ export function MaximFormFragment({ initialConfig, onSave, isLoading = false }: 
 								<FormItem>
 									<FormLabel>Log Repository ID (Optional)</FormLabel>
 									<FormControl>
-										<Input placeholder="Enter log repository ID" {...field} value={field.value ?? ""} />
+										<Input placeholder="Enter log repository ID" disabled={!hasMaximAccess} {...field} value={field.value ?? ""} />
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -106,33 +111,52 @@ export function MaximFormFragment({ initialConfig, onSave, isLoading = false }: 
 						control={form.control}
 						name="enabled"
 						render={({ field }) => (
-							<FormItem className="flex flex-row items-center gap-2">
-								<FormLabel>Enabled</FormLabel>
-								<Switch checked={form.watch("enabled")} onCheckedChange={field.onChange} disabled={isLoading || !form.formState.isValid} />
+							<FormItem className="flex items-center gap-2 py-2">
+								<FormLabel className="text-muted-foreground text-sm font-medium">Enabled</FormLabel>
+								<FormControl>
+									<Switch
+										checked={field.value}
+										onCheckedChange={field.onChange}
+										disabled={!hasMaximAccess}
+										data-testid="maxim-connector-enable-toggle"
+									/>
+								</FormControl>
 							</FormItem>
 						)}
 					/>
 					<div className="ml-auto flex justify-end space-x-2 py-2">
+						{onDelete && (
+							<Button
+								type="button"
+								variant="outline"
+								onClick={onDelete}
+								disabled={isDeleting}
+								title="Delete connector"
+								aria-label="Delete connector"
+							>
+								<Trash2 className="size-4" />
+							</Button>
+						)}
 						<Button
 							type="button"
 							variant="outline"
 							onClick={() => {
 								form.reset({
-									enabled: initialConfig?.enabled ?? false,
+									enabled: initialConfig?.enabled ?? true,
 									maxim_config: {
 										api_key: initialConfig?.api_key ?? "",
 										log_repo_id: initialConfig?.log_repo_id ?? "",
 									},
 								});
 							}}
-							disabled={isLoading || !form.formState.isDirty}
+							disabled={!hasMaximAccess || isLoading || !form.formState.isDirty}
 						>
 							Reset
 						</Button>
 						<TooltipProvider>
 							<Tooltip>
 								<TooltipTrigger asChild>
-									<Button type="submit" disabled={!form.formState.isDirty || !form.formState.isValid} isLoading={isSaving}>
+									<Button type="submit" disabled={!hasMaximAccess || !form.formState.isDirty || !form.formState.isValid} isLoading={isSaving}>
 										Save Maxim Configuration
 									</Button>
 								</TooltipTrigger>

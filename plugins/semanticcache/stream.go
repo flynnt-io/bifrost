@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,7 @@ func (plugin *Plugin) createStreamAccumulator(requestID string, embedding []floa
 		Embedding:  embedding,
 		Metadata:   metadata,
 		TTL:        ttl,
+		mu:         sync.Mutex{},
 	}
 
 	plugin.streamAccumulators.Store(requestID, accumulator)
@@ -71,11 +73,11 @@ func (plugin *Plugin) processAccumulatedStream(ctx context.Context, requestID st
 
 	accumulator := accumulatorInterface.(*StreamAccumulator)
 	accumulator.mu.Lock()
-	
+
 	// Ensure unlock happens after cleanup
 	defer accumulator.mu.Unlock()
 	// Ensure cleanup happens
-	defer plugin.cleanupStreamAccumulator(requestID)	
+	defer plugin.cleanupStreamAccumulator(requestID)
 
 	// STEP 1: Check if any chunk in the entire stream had an error
 	if accumulator.HasError {
@@ -116,6 +118,13 @@ func (plugin *Plugin) processAccumulatedStream(ctx context.Context, requestID st
 		if accumulator.Chunks[i].Response.TranscriptionStreamResponse != nil {
 			return accumulator.Chunks[i].Response.TranscriptionStreamResponse.ExtraFields.ChunkIndex < accumulator.Chunks[j].Response.TranscriptionStreamResponse.ExtraFields.ChunkIndex
 		}
+		if accumulator.Chunks[i].Response.ImageGenerationStreamResponse != nil {
+			// For image generation, sort by Index first, then ChunkIndex
+			if accumulator.Chunks[i].Response.ImageGenerationStreamResponse.Index != accumulator.Chunks[j].Response.ImageGenerationStreamResponse.Index {
+				return accumulator.Chunks[i].Response.ImageGenerationStreamResponse.Index < accumulator.Chunks[j].Response.ImageGenerationStreamResponse.Index
+			}
+			return accumulator.Chunks[i].Response.ImageGenerationStreamResponse.ChunkIndex < accumulator.Chunks[j].Response.ImageGenerationStreamResponse.ChunkIndex
+		}
 		return false
 	})
 
@@ -124,7 +133,7 @@ func (plugin *Plugin) processAccumulatedStream(ctx context.Context, requestID st
 		if chunk.Response != nil {
 			chunkData, err := json.Marshal(chunk.Response)
 			if err != nil {
-				plugin.logger.Warn(fmt.Sprintf("%s Failed to marshal stream chunk %d: %v", PluginLoggerPrefix, i, err))
+				plugin.logger.Warn("%s Failed to marshal stream chunk %d: %v", PluginLoggerPrefix, i, err)
 				continue
 			}
 			streamResponses = append(streamResponses, string(chunkData))
@@ -133,7 +142,7 @@ func (plugin *Plugin) processAccumulatedStream(ctx context.Context, requestID st
 
 	// STEP 3: Validate we have valid chunks to cache
 	if len(streamResponses) == 0 {
-		plugin.logger.Warn(fmt.Sprintf("%s Stream for request %s has no valid response chunks, skipping cache storage", PluginLoggerPrefix, requestID))
+		plugin.logger.Warn("%s Stream for request %s has no valid response chunks, skipping cache storage", PluginLoggerPrefix, requestID)
 		return nil
 	}
 

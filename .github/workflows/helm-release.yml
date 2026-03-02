@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -34,6 +34,16 @@ jobs:
       - name: Run chart-testing (lint)
         run: |
           helm lint helm-charts/bifrost
+
+      - name: Validate Helm templates
+        run: |
+          chmod +x .github/workflows/scripts/validate-helm-templates.sh
+          .github/workflows/scripts/validate-helm-templates.sh
+
+      - name: Validate Helm config fields
+        run: |
+          chmod +x .github/workflows/scripts/validate-helm-config-fields.sh
+          .github/workflows/scripts/validate-helm-config-fields.sh
 
       - name: Get chart version
         id: chart-version

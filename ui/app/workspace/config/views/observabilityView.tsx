@@ -4,34 +4,19 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrorMessage, useGetCoreConfigQuery, useUpdateCoreConfigMutation } from "@/lib/store";
-import { CoreConfig } from "@/lib/types/config";
+import { CoreConfig, DefaultCoreConfig } from "@/lib/types/config";
 import { parseArrayFromText } from "@/lib/utils/array";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { AlertTriangle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-const defaultConfig: CoreConfig = {
-	drop_excess_requests: false,
-	initial_pool_size: 1000,
-	prometheus_labels: [],
-	enable_logging: true,
-	enable_governance: true,
-	enforce_governance_header: false,
-	allow_direct_keys: false,
-	allowed_origins: [],
-	max_request_body_size_mb: 100,
-	enable_litellm_fallbacks: false,
-	disable_content_logging: false,
-	log_retention_days: 365,
-};
-
 export default function ObservabilityView() {
 	const hasSettingsUpdateAccess = useRbac(RbacResource.Settings, RbacOperation.Update);
 	const { data: bifrostConfig } = useGetCoreConfigQuery({ fromDB: true });
 	const config = bifrostConfig?.client_config;
 	const [updateCoreConfig, { isLoading }] = useUpdateCoreConfigMutation();
-	const [localConfig, setLocalConfig] = useState<CoreConfig>(defaultConfig);
+	const [localConfig, setLocalConfig] = useState<CoreConfig>(DefaultCoreConfig);
 	const [needsRestart, setNeedsRestart] = useState<boolean>(false);
 
 	const [localValues, setLocalValues] = useState<{
@@ -76,15 +61,8 @@ export default function ObservabilityView() {
 	}, [bifrostConfig, localConfig, updateCoreConfig]);
 
 	return (
-		<div className="space-y-4">
+		<div className="mx-auto w-full max-w-4xl space-y-4">
 			<div className="flex items-center justify-between">
-				<div>
-					<h2 className="text-2xl font-semibold tracking-tight">Observability Settings</h2>
-					<p className="text-muted-foreground text-sm">Configure monitoring and observability features.</p>
-				</div>
-				<Button onClick={handleSave} disabled={!hasChanges || isLoading || !hasSettingsUpdateAccess}>
-					{isLoading ? "Saving..." : "Save Changes"}
-				</Button>
 			</div>
 
 			<Alert variant="destructive">
@@ -115,6 +93,11 @@ export default function ObservabilityView() {
 					</div>
 					{needsRestart && <RestartWarning />}
 				</div>
+			</div>
+			<div className="pt-2 flex justify-end">
+				<Button onClick={handleSave} disabled={!hasChanges || isLoading || !hasSettingsUpdateAccess}>
+					{isLoading ? "Saving..." : "Save Changes"}
+				</Button>
 			</div>
 		</div>
 	);

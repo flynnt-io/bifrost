@@ -10,6 +10,15 @@ import (
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 )
 
+// getAccumulatorID extracts the ID for accumulator lookup from context.
+// Returns the value of BifrostContextKeyAccumulatorID.
+func getAccumulatorID(ctx *schemas.BifrostContext) (string, bool) {
+	if id, ok := ctx.Value(schemas.BifrostContextKeyAccumulatorID).(string); ok && id != "" {
+		return id, true
+	}
+	return "", false
+}
+
 // Accumulator manages accumulation of streaming chunks
 type Accumulator struct {
 	logger schemas.Logger
@@ -20,11 +29,13 @@ type Accumulator struct {
 	responsesStreamChunkPool     sync.Pool // Pool for reusing ResponsesStreamChunk structs
 	audioStreamChunkPool         sync.Pool // Pool for reusing AudioStreamChunk structs
 	transcriptionStreamChunkPool sync.Pool // Pool for reusing TranscriptionStreamChunk structs
+	imageStreamChunkPool         sync.Pool // Pool for reusing ImageStreamChunk structs
 
 	pricingManager *modelcatalog.ModelCatalog
 
 	stopCleanup   chan struct{}
 	cleanupWg     sync.WaitGroup
+	cleanupOnce   sync.Once
 	ttl           time.Duration
 	cleanupTicker *time.Ticker
 }
@@ -43,6 +54,7 @@ func (a *Accumulator) putChatStreamChunk(chunk *ChatStreamChunk) {
 	chunk.ErrorDetails = nil
 	chunk.FinishReason = nil
 	chunk.TokenUsage = nil
+	chunk.RawResponse = nil
 	a.chatStreamChunkPool.Put(chunk)
 }
 
@@ -60,6 +72,7 @@ func (a *Accumulator) putAudioStreamChunk(chunk *AudioStreamChunk) {
 	chunk.ErrorDetails = nil
 	chunk.FinishReason = nil
 	chunk.TokenUsage = nil
+	chunk.RawResponse = nil
 	a.audioStreamChunkPool.Put(chunk)
 }
 
@@ -77,6 +90,7 @@ func (a *Accumulator) putTranscriptionStreamChunk(chunk *TranscriptionStreamChun
 	chunk.ErrorDetails = nil
 	chunk.FinishReason = nil
 	chunk.TokenUsage = nil
+	chunk.RawResponse = nil
 	a.transcriptionStreamChunkPool.Put(chunk)
 }
 
@@ -94,29 +108,93 @@ func (a *Accumulator) putResponsesStreamChunk(chunk *ResponsesStreamChunk) {
 	chunk.ErrorDetails = nil
 	chunk.FinishReason = nil
 	chunk.TokenUsage = nil
+	chunk.RawResponse = nil
 	a.responsesStreamChunkPool.Put(chunk)
 }
 
-// CreateStreamAccumulator creates a new stream accumulator for a request
+// getImageStreamChunk gets an image stream chunk from the pool
+func (a *Accumulator) getImageStreamChunk() *ImageStreamChunk {
+	return a.imageStreamChunkPool.Get().(*ImageStreamChunk)
+}
+
+// putImageStreamChunk returns an image stream chunk to the pool
+func (a *Accumulator) putImageStreamChunk(chunk *ImageStreamChunk) {
+	chunk.Timestamp = time.Time{}
+	chunk.Delta = nil
+	chunk.FinishReason = nil
+	chunk.ErrorDetails = nil
+	chunk.ChunkIndex = 0
+	chunk.ImageIndex = 0
+	chunk.Cost = nil
+	chunk.SemanticCacheDebug = nil
+	chunk.TokenUsage = nil
+	chunk.RawResponse = nil
+	a.imageStreamChunkPool.Put(chunk)
+}
+
+// createStreamAccumulator creates a new stream accumulator for a request
+// StartTimestamp is set to current time if not provided via CreateStreamAccumulator
 func (a *Accumulator) createStreamAccumulator(requestID string) *StreamAccumulator {
+	now := time.Now()
 	sc := &StreamAccumulator{
-		RequestID:             requestID,
-		ChatStreamChunks:      make([]*ChatStreamChunk, 0),
-		ResponsesStreamChunks: make([]*ResponsesStreamChunk, 0),
-		IsComplete:            false,
-		Timestamp:             time.Now(),
+		RequestID:                  requestID,
+		ChatStreamChunks:           make([]*ChatStreamChunk, 0),
+		ResponsesStreamChunks:      make([]*ResponsesStreamChunk, 0),
+		ImageStreamChunks:          make([]*ImageStreamChunk, 0),
+		TranscriptionStreamChunks:  make([]*TranscriptionStreamChunk, 0),
+		AudioStreamChunks:          make([]*AudioStreamChunk, 0),
+		ChatChunksSeen:             make(map[int]struct{}),
+		ResponsesChunksSeen:        make(map[int]struct{}),
+		TranscriptionChunksSeen:    make(map[int]struct{}),
+		AudioChunksSeen:            make(map[int]struct{}),
+		ImageChunksSeen:            make(map[string]struct{}),
+		MaxChatChunkIndex:          -1,
+		MaxResponsesChunkIndex:     -1,
+		MaxTranscriptionChunkIndex: -1,
+		MaxAudioChunkIndex:         -1,
+		IsComplete:                 false,
+		mu:                         sync.Mutex{},
+		Timestamp:                  now,
+		StartTimestamp:             now, // Set default StartTimestamp for proper TTFT/latency calculation
 	}
 	a.streamAccumulators.Store(requestID, sc)
 	return sc
 }
 
-// GetOrCreateStreamAccumulator gets or creates a stream accumulator for a request
+// getOrCreateStreamAccumulator gets or creates a stream accumulator for a request
 func (a *Accumulator) getOrCreateStreamAccumulator(requestID string) *StreamAccumulator {
-	if accumulator, exists := a.streamAccumulators.Load(requestID); exists {
-		return accumulator.(*StreamAccumulator)
+	// Fast path: check if already exists (no allocation)
+	if acc, exists := a.streamAccumulators.Load(requestID); exists {
+		return acc.(*StreamAccumulator)
 	}
-	// Create new accumulator if it doesn't exist
-	return a.createStreamAccumulator(requestID)
+
+	// Slow path: create new accumulator
+	now := time.Now()
+	newAcc := &StreamAccumulator{
+		RequestID:                  requestID,
+		ChatStreamChunks:           make([]*ChatStreamChunk, 0),
+		ResponsesStreamChunks:      make([]*ResponsesStreamChunk, 0),
+		ImageStreamChunks:          make([]*ImageStreamChunk, 0),
+		TranscriptionStreamChunks:  make([]*TranscriptionStreamChunk, 0),
+		AudioStreamChunks:          make([]*AudioStreamChunk, 0),
+		ChatChunksSeen:             make(map[int]struct{}),
+		ResponsesChunksSeen:        make(map[int]struct{}),
+		TranscriptionChunksSeen:    make(map[int]struct{}),
+		AudioChunksSeen:            make(map[int]struct{}),
+		ImageChunksSeen:            make(map[string]struct{}),
+		MaxChatChunkIndex:          -1,
+		MaxResponsesChunkIndex:     -1,
+		MaxTranscriptionChunkIndex: -1,
+		MaxAudioChunkIndex:         -1,
+		IsComplete:                 false,
+		mu:                         sync.Mutex{},
+		Timestamp:                  now,
+		StartTimestamp:             now,
+	}
+
+	// LoadOrStore atomically: if key exists, return existing; else store new
+	actual, _ := a.streamAccumulators.LoadOrStore(requestID, newAcc)
+	return actual.(*StreamAccumulator)
 }
 
 // AddStreamChunk adds a chunk to the stream accumulator
@@ -128,8 +206,19 @@ func (a *Accumulator) addChatStreamChunk(requestID string, chunk *ChatStreamChun
 	if accumulator.StartTimestamp.IsZero() {
 		accumulator.StartTimestamp = chunk.Timestamp
 	}
-	// Add chunk to the list (chunks arrive in order)
-	accumulator.ChatStreamChunks = append(accumulator.ChatStreamChunks, chunk)
+	// Track first chunk timestamp for TTFT calculation
+	if accumulator.FirstChunkTimestamp.IsZero() {
+		accumulator.FirstChunkTimestamp = chunk.Timestamp
+	}
+	// De-dup check - only add if not seen (handles out-of-order arrival and multiple plugins)
+	if _, seen := accumulator.ChatChunksSeen[chunk.ChunkIndex]; !seen {
+		accumulator.ChatChunksSeen[chunk.ChunkIndex] = struct{}{}
+		accumulator.ChatStreamChunks = append(accumulator.ChatStreamChunks, chunk)
+		// Track max index for metadata extraction
+		if chunk.ChunkIndex > accumulator.MaxChatChunkIndex {
+			accumulator.MaxChatChunkIndex = chunk.ChunkIndex
+		}
+	}
 	// Check if this is the final chunk
 	// Set FinalTimestamp when either FinishReason is present or token usage exists
 	// This handles both normal completion chunks and usage-only last chunks
@@ -148,8 +237,18 @@ func (a *Accumulator) addTranscriptionStreamChunk(requestID string, chunk *Trans
 	if accumulator.StartTimestamp.IsZero() {
 		accumulator.StartTimestamp = chunk.Timestamp
 	}
-	// Add chunk to the list (chunks arrive in order)
-	accumulator.TranscriptionStreamChunks = append(accumulator.TranscriptionStreamChunks, chunk)
+	// Track first chunk timestamp for TTFT calculation
+	if accumulator.FirstChunkTimestamp.IsZero() {
+		accumulator.FirstChunkTimestamp = chunk.Timestamp
+	}
+	if _, seen := accumulator.TranscriptionChunksSeen[chunk.ChunkIndex]; !seen {
+		accumulator.TranscriptionChunksSeen[chunk.ChunkIndex] = struct{}{}
+		accumulator.TranscriptionStreamChunks = append(accumulator.TranscriptionStreamChunks, chunk)
+		// Track max index for metadata extraction
+		if chunk.ChunkIndex > accumulator.MaxTranscriptionChunkIndex {
+			accumulator.MaxTranscriptionChunkIndex = chunk.ChunkIndex
+		}
+	}
 	// Check if this is the final chunk
 	// Set FinalTimestamp when either FinishReason is present or token usage exists
 	// This handles both normal completion chunks and usage-only last chunks
@@ -159,7 +258,7 @@ func (a *Accumulator) addTranscriptionStreamChunk(requestID string, chunk *Trans
 	return nil
 }
 
-// AddAudioStreamChunk adds an audio stream chunk to the stream accumulator
+// addAudioStreamChunk adds an audio stream chunk to the stream accumulator
 func (a *Accumulator) addAudioStreamChunk(requestID string, chunk *AudioStreamChunk, isFinalChunk bool) error {
 	accumulator := a.getOrCreateStreamAccumulator(requestID)
 	// Lock the accumulator
@@ -168,8 +267,18 @@ func (a *Accumulator) addAudioStreamChunk(requestID string, chunk *AudioStreamCh
 	if accumulator.StartTimestamp.IsZero() {
 		accumulator.StartTimestamp = chunk.Timestamp
 	}
-	// Add chunk to the list (chunks arrive in order)
-	accumulator.AudioStreamChunks = append(accumulator.AudioStreamChunks, chunk)
+	// Track first chunk timestamp for TTFT calculation
+	if accumulator.FirstChunkTimestamp.IsZero() {
+		accumulator.FirstChunkTimestamp = chunk.Timestamp
+	}
+	if _, seen := accumulator.AudioChunksSeen[chunk.ChunkIndex]; !seen {
+		accumulator.AudioChunksSeen[chunk.ChunkIndex] = struct{}{}
+		accumulator.AudioStreamChunks = append(accumulator.AudioStreamChunks, chunk)
+		// Track max index for metadata extraction
+		if chunk.ChunkIndex > accumulator.MaxAudioChunkIndex {
+			accumulator.MaxAudioChunkIndex = chunk.ChunkIndex
+		}
+	}
 	// Check if this is the final chunk
 	// Set FinalTimestamp when either FinishReason is present or token usage exists
 	// This handles both normal completion chunks and usage-only last chunks
@@ -188,13 +297,56 @@ func (a *Accumulator) addResponsesStreamChunk(requestID string, chunk *Responses
 	if accumulator.StartTimestamp.IsZero() {
 		accumulator.StartTimestamp = chunk.Timestamp
 	}
-	// Add chunk to the list (chunks arrive in order)
-	accumulator.ResponsesStreamChunks = append(accumulator.ResponsesStreamChunks, chunk)
+	// Track first chunk timestamp for TTFT calculation
+	if accumulator.FirstChunkTimestamp.IsZero() {
+		accumulator.FirstChunkTimestamp = chunk.Timestamp
+	}
+	if _, seen := accumulator.ResponsesChunksSeen[chunk.ChunkIndex]; !seen {
+		accumulator.ResponsesChunksSeen[chunk.ChunkIndex] = struct{}{}
+		accumulator.ResponsesStreamChunks = append(accumulator.ResponsesStreamChunks, chunk)
+		// Track max index for metadata extraction
+		if chunk.ChunkIndex > accumulator.MaxResponsesChunkIndex {
+			accumulator.MaxResponsesChunkIndex = chunk.ChunkIndex
+		}
+	}
 	// Check if this is the final chunk
 	// Set FinalTimestamp when either FinishReason is present or token usage exists
 	// This handles both normal completion chunks and usage-only last chunks
 	if isFinalChunk {
 		accumulator.FinalTimestamp = chunk.Timestamp
+	}
+	return nil
+}
+
+// imageChunkKey creates a composite key for image chunk de-duplication
+func imageChunkKey(imageIndex, chunkIndex int) string {
+	return fmt.Sprintf("%d:%d", imageIndex, chunkIndex)
+}
+
+// addImageStreamChunk adds an image stream chunk to the stream accumulator
+func (a *Accumulator) addImageStreamChunk(requestID string, chunk *ImageStreamChunk, isFinalChunk bool) error {
+	acc := a.getOrCreateStreamAccumulator(requestID)
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+
+	if acc.StartTimestamp.IsZero() {
+		acc.StartTimestamp = chunk.Timestamp
+	}
+	if acc.FirstChunkTimestamp.IsZero() {
+		acc.FirstChunkTimestamp = chunk.Timestamp
+	}
+
+	// De-dup check - only add if not seen (handles out-of-order arrival and multiple plugins)
+	chunkKey := imageChunkKey(chunk.ImageIndex, chunk.ChunkIndex)
+	if _, seen := acc.ImageChunksSeen[chunkKey]; !seen {
+		acc.ImageChunksSeen[chunkKey] = struct{}{}
+		acc.ImageStreamChunks = append(acc.ImageStreamChunks, chunk)
+	}
+	// Check if this is the final chunk
+	// Set FinalTimestamp when this is the final chunk, regardless of de-dup status
+	// This handles cases where final chunk arrives after duplicates or is itself duplicated
+	if isFinalChunk {
+		acc.FinalTimestamp = chunk.Timestamp
 	}
 	return nil
 }
@@ -219,6 +371,9 @@ func (a *Accumulator) cleanupStreamAccumulator(requestID string) {
 		for _, chunk := range acc.TranscriptionStreamChunks {
 			a.putTranscriptionStreamChunk(chunk)
 		}
+		for _, chunk := range acc.ImageStreamChunks {
+			a.putImageStreamChunk(chunk)
+		}
 		a.streamAccumulators.Delete(requestID)
 	}
 }
@@ -232,35 +387,76 @@ func (a *Accumulator) accumulateToolCallsInMessage(message *schemas.ChatMessage,
 		message.ChatAssistantMessage = &schemas.ChatAssistantMessage{}
 	}
 	existingToolCalls := message.ChatAssistantMessage.ToolCalls
+	if len(existingToolCalls) == 0 {
+		existingToolCalls = []schemas.ChatAssistantMessageToolCall{}
+	}
+
+	// Build lookup maps for existing tool calls to support interleaved/parallel deltas
+	idToIndex := make(map[string]int, len(existingToolCalls))
+	indexToIndex := make(map[uint16]int, len(existingToolCalls))
+	for i, toolCall := range existingToolCalls {
+		if toolCall.ID != nil && *toolCall.ID != "" {
+			idToIndex[*toolCall.ID] = i
+		}
+		indexToIndex[toolCall.Index] = i
+	}
+
 	for _, deltaToolCall := range deltaToolCalls {
-		var toolCallToModify *schemas.ChatAssistantMessageToolCall
-		// Checking if delta tool name is present,
-		// If present, then it could be different tool call
-		if deltaToolCall.Function.Name != nil {
+		index := -1
+		if deltaToolCall.ID != nil && *deltaToolCall.ID != "" {
+			if existingIndex, ok := idToIndex[*deltaToolCall.ID]; ok {
+				index = existingIndex
+			}
+		}
+		if index == -1 {
+			if existingIndex, ok := indexToIndex[deltaToolCall.Index]; ok {
+				index = existingIndex
+			}
+		}
+
+		if index == -1 {
+			// Cannot place a delta without a tool name or known identifier
+			if deltaToolCall.Function.Name == nil {
+				a.logger.Warn("received tool call delta without name, but no existing tool calls to append to")
+				continue
+			}
 			// Creating a new tool call
 			// Only set arguments if they're not empty or just empty braces
 			args := deltaToolCall.Function.Arguments
 			if args == "{}" {
 				args = "" // Reset empty braces to empty string to avoid duplication
 			}
-			toolCallToModify = &schemas.ChatAssistantMessageToolCall{
-				Index: uint16(len(existingToolCalls)),
+			newToolCall := schemas.ChatAssistantMessageToolCall{
+				Index: deltaToolCall.Index,
+				Type:  deltaToolCall.Type,
 				ID:    deltaToolCall.ID,
 				Function: schemas.ChatAssistantMessageToolCallFunction{
 					Name:      deltaToolCall.Function.Name,
 					Arguments: args,
 				},
 			}
-			existingToolCalls = append(existingToolCalls, *toolCallToModify)
-		} else {
-			// Ensure there's at least one tool call to modify
-			if len(existingToolCalls) == 0 {
-				a.logger.Warn("received tool call delta without name, but no existing tool calls to append to")
-				continue
+			existingToolCalls = append(existingToolCalls, newToolCall)
+			index = len(existingToolCalls) - 1
+			indexToIndex[newToolCall.Index] = index
+			if newToolCall.ID != nil && *newToolCall.ID != "" {
+				idToIndex[*newToolCall.ID] = index
 			}
-			// Otherwise we will modify the last tool call
-			toolCallToModify = &existingToolCalls[len(existingToolCalls)-1]
-			toolCallToModify.Function.Arguments += deltaToolCall.Function.Arguments
+			continue
+		}
+
+		// Update existing tool call
+		if deltaToolCall.Type != nil {
+			existingToolCalls[index].Type = deltaToolCall.Type
+		}
+		if deltaToolCall.ID != nil && *deltaToolCall.ID != "" {
+			existingToolCalls[index].ID = deltaToolCall.ID
+			idToIndex[*deltaToolCall.ID] = index
+		}
+		if deltaToolCall.Function.Name != nil && *deltaToolCall.Function.Name != "" {
+			existingToolCalls[index].Function.Name = deltaToolCall.Function.Name
+		}
+		if deltaToolCall.Function.Arguments != "" {
+			existingToolCalls[index].Function.Arguments += deltaToolCall.Function.Arguments
 		}
 	}
 	message.ChatAssistantMessage.ToolCalls = existingToolCalls
@@ -309,6 +505,8 @@ func (a *Accumulator) ProcessStreamingResponse(ctx *schemas.BifrostContext, resu
 	isAudioStreaming := requestType == schemas.SpeechStreamRequest || requestType == schemas.TranscriptionStreamRequest
 	isChatStreaming := requestType == schemas.ChatCompletionStreamRequest || requestType == schemas.TextCompletionStreamRequest
 	isResponsesStreaming := requestType == schemas.ResponsesStreamRequest
+	// Edit images/ Image variation requests will be added here
+	isImageStreaming := requestType == schemas.ImageGenerationStreamRequest || requestType == schemas.ImageEditStreamRequest
 
 	if isChatStreaming {
 		// Handle text-based streaming with ordered accumulation
@@ -324,6 +522,9 @@ func (a *Accumulator) ProcessStreamingResponse(ctx *schemas.BifrostContext, resu
 	} else if isResponsesStreaming {
 		// Handle responses streaming with responses accumulation
 		return a.processResponsesStreamingResponse(ctx, result, bifrostErr)
+	} else if isImageStreaming {
+		// Handle image streaming
+		return a.processImageStreamingResponse(ctx, result, bifrostErr)
 	}
 	return nil, fmt.Errorf("request type missing/invalid for accumulator: %s", requestType)
 }
@@ -337,30 +538,38 @@ func (a *Accumulator) Cleanup() {
 		// Lock before accessing chunk slices
 		accumulator.mu.Lock()
 		for _, chunk := range accumulator.ChatStreamChunks {
-			a.chatStreamChunkPool.Put(chunk)
+			a.putChatStreamChunk(chunk)
 		}
 		for _, chunk := range accumulator.ResponsesStreamChunks {
-			a.responsesStreamChunkPool.Put(chunk)
+			a.putResponsesStreamChunk(chunk)
 		}
 		for _, chunk := range accumulator.TranscriptionStreamChunks {
-			a.transcriptionStreamChunkPool.Put(chunk)
+			a.putTranscriptionStreamChunk(chunk)
 		}
 		for _, chunk := range accumulator.AudioStreamChunks {
-			a.audioStreamChunkPool.Put(chunk)
+			a.putAudioStreamChunk(chunk)
+		}
+		for _, chunk := range accumulator.ImageStreamChunks {
+			a.putImageStreamChunk(chunk)
 		}
 		accumulator.mu.Unlock()
 
 		a.streamAccumulators.Delete(key)
 		return true
 	})
-	close(a.stopCleanup)
+	a.cleanupOnce.Do(func() {
+		close(a.stopCleanup)
+	})
 	a.cleanupTicker.Stop()
 	a.cleanupWg.Wait()
 }
 
 // CreateStreamAccumulator creates a new stream accumulator for a request
+// It increments the reference counter atomically for concurrent access tracking
 func (a *Accumulator) CreateStreamAccumulator(requestID string, startTimestamp time.Time) *StreamAccumulator {
 	sc := a.getOrCreateStreamAccumulator(requestID)
+	// Atomically increment reference counter
+	sc.refCount.Add(1)
 	// Lock before writing to StartTimestamp
 	sc.mu.Lock()
 	sc.StartTimestamp = startTimestamp
@@ -368,16 +577,25 @@ func (a *Accumulator) CreateStreamAccumulator(requestID string, startTimestamp t
 	return sc
 }
 
-// CleanupStreamAccumulator cleans up the stream accumulator for a request
+// CleanupStreamAccumulator decrements the reference counter for a stream accumulator.
+// The accumulator is only cleaned up when the reference counter reaches 0.
+// This function is idempotent - calling it after cleanup has already happened is safe.
 func (a *Accumulator) CleanupStreamAccumulator(requestID string) error {
 	acc, exists := a.streamAccumulators.Load(requestID)
 	if !exists {
-		return fmt.Errorf("accumulator not found for request ID: %s", requestID)
+		// Accumulator already cleaned up - this is expected when multiple callers
+		// (e.g., completeDeferredSpan and HTTP middleware) both call cleanup
+		return nil
 	}
 	if accumulator, ok := acc.(*StreamAccumulator); ok {
-		accumulator.mu.Lock()
-		defer accumulator.mu.Unlock()
-		a.cleanupStreamAccumulator(requestID)
+		// Atomically decrement reference counter
+		newCount := accumulator.refCount.Add(-1)
+		// Only cleanup when reference counter reaches 0
+		if newCount <= 0 {
+			accumulator.mu.Lock()
+			defer accumulator.mu.Unlock()
+			a.cleanupStreamAccumulator(requestID)
+		}
 	}
 	return nil
 }
@@ -437,6 +655,11 @@ func NewAccumulator(pricingManager *modelcatalog.ModelCatalog, logger schemas.Lo
 				return &TranscriptionStreamChunk{}
 			},
 		},
+		imageStreamChunkPool: sync.Pool{
+			New: func() any {
+				return &ImageStreamChunk{}
+			},
+		},
 		pricingManager: pricingManager,
 		logger:         logger,
 		ttl:            30 * time.Minute,
@@ -451,6 +674,7 @@ func NewAccumulator(pricingManager *modelcatalog.ModelCatalog, logger schemas.Lo
 		a.responsesStreamChunkPool.Put(&ResponsesStreamChunk{})
 		a.audioStreamChunkPool.Put(&AudioStreamChunk{})
 		a.transcriptionStreamChunkPool.Put(&TranscriptionStreamChunk{})
+		a.imageStreamChunkPool.Put(&ImageStreamChunk{})
 	}
 	go a.startAccumulatorMapCleanup()
 	return a

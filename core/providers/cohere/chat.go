@@ -1,15 +1,18 @@
 package cohere
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/maximhq/bifrost/core/providers/anthropic"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
 // ToCohereChatCompletionRequest converts a Bifrost request to Cohere v2 format
-func ToCohereChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest) *CohereChatRequest {
+func ToCohereChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest) (*CohereChatRequest, error) {
 	if bifrostReq == nil || bifrostReq.Input == nil {
-		return nil
+		return nil, fmt.Errorf("bifrost request is nil")
 	}
 
 	messages := bifrostReq.Input
@@ -99,32 +102,80 @@ func ToCohereChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest) *Cohe
 		cohereReq.FrequencyPenalty = bifrostReq.Params.FrequencyPenalty
 		cohereReq.PresencePenalty = bifrostReq.Params.PresencePenalty
 
+		// Convert reasoning
+		if bifrostReq.Params.Reasoning != nil {
+			if bifrostReq.Params.Reasoning.MaxTokens != nil {
+				thinking := &CohereThinking{
+					Type: ThinkingTypeEnabled,
+				}
+				if *bifrostReq.Params.Reasoning.MaxTokens == -1 {
+					// cohere does not support dynamic reasoning budget like gemini
+					// setting it to minimum reasoning budget
+					thinking.TokenBudget = schemas.Ptr(anthropic.MinimumReasoningMaxTokens)
+				} else {
+					thinking.TokenBudget = bifrostReq.Params.Reasoning.MaxTokens
+				}
+				cohereReq.Thinking = thinking
+			} else if bifrostReq.Params.Reasoning.Effort != nil {
+				if *bifrostReq.Params.Reasoning.Effort != "none" {
+					maxCompletionTokens := DefaultCompletionMaxTokens
+					if bifrostReq.Params.MaxCompletionTokens != nil {
+						maxCompletionTokens = *bifrostReq.Params.MaxCompletionTokens
+					}
+					budgetTokens, err := providerUtils.GetBudgetTokensFromReasoningEffort(*bifrostReq.Params.Reasoning.Effort, MinimumReasoningMaxTokens, maxCompletionTokens)
+					if err != nil {
+						return nil, err
+					}
+					cohereReq.Thinking = &CohereThinking{
+						Type:        ThinkingTypeEnabled,
+						TokenBudget: schemas.Ptr(budgetTokens), // Max tokens for reasoning
+					}
+				} else {
+					cohereReq.Thinking = &CohereThinking{
+						Type: ThinkingTypeDisabled,
+					}
+				}
+			}
+		}
+
+		// Convert response format
+		if bifrostReq.Params.ResponseFormat != nil {
+			cohereReq.ResponseFormat = convertResponseFormatToCohere(bifrostReq.Params.ResponseFormat)
+		}
+
 		// Convert extra params
 		if bifrostReq.Params.ExtraParams != nil {
 			// Handle thinking parameter
+			cohereReq.ExtraParams = bifrostReq.Params.ExtraParams
 			if thinkingParam, ok := schemas.SafeExtractFromMap(bifrostReq.Params.ExtraParams, "thinking"); ok {
 				if thinkingMap, ok := thinkingParam.(map[string]interface{}); ok {
 					thinking := &CohereThinking{}
 					if typeStr, ok := schemas.SafeExtractString(thinkingMap["type"]); ok {
+						delete(thinkingMap, "type")
 						thinking.Type = CohereThinkingType(typeStr)
 					}
 					if tokenBudget, ok := schemas.SafeExtractIntPointer(thinkingMap["token_budget"]); ok {
+						delete(thinkingMap, "token_budget")
 						thinking.TokenBudget = tokenBudget
 					}
 					cohereReq.Thinking = thinking
+					cohereReq.ExtraParams["thinking"] = thinkingMap
 				}
 			}
 
 			// Handle other Cohere-specific extra params
 			if safetyMode, ok := schemas.SafeExtractStringPointer(bifrostReq.Params.ExtraParams["safety_mode"]); ok {
+				delete(cohereReq.ExtraParams, "safety_mode")
 				cohereReq.SafetyMode = safetyMode
 			}
 
 			if logProbs, ok := schemas.SafeExtractBoolPointer(bifrostReq.Params.ExtraParams["log_probs"]); ok {
+				delete(cohereReq.ExtraParams, "log_probs")
 				cohereReq.LogProbs = logProbs
 			}
 
 			if strictToolChoice, ok := schemas.SafeExtractBoolPointer(bifrostReq.Params.ExtraParams["strict_tool_choice"]); ok {
+				delete(cohereReq.ExtraParams, "strict_tool_choice")
 				cohereReq.StrictToolChoice = strictToolChoice
 			}
 		}
@@ -174,24 +225,30 @@ func ToCohereChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest) *Cohe
 		}
 	}
 
-	return cohereReq
+	return cohereReq, nil
 }
 
 // ToBifrostChatRequest converts a Cohere v2 chat request to Bifrost format
-func (req *CohereChatRequest) ToBifrostChatRequest() *schemas.BifrostChatRequest {
+func (req *CohereChatRequest) ToBifrostChatRequest(ctx *schemas.BifrostContext) *schemas.BifrostChatRequest {
 	if req == nil {
 		return nil
 	}
 
-	provider, model := schemas.ParseModelString(req.Model, schemas.Cohere)
+	provider, model := schemas.ParseModelString(req.Model, providerUtils.CheckAndSetDefaultProvider(ctx, schemas.Cohere))
 
 	bifrostReq := &schemas.BifrostChatRequest{
 		Provider: provider,
 		Model:    model,
-		Input:    convertCohereMessagesToBifrost(req.Messages),
 		Params:   &schemas.ChatParameters{},
 	}
-
+	// Convert messages
+	if req.Messages != nil {
+		bifrostMessages := make([]schemas.ChatMessage, len(req.Messages))
+		for i, message := range req.Messages {
+			bifrostMessages[i] = *message.ToBifrostChatMessage()
+		}
+		bifrostReq.Input = bifrostMessages
+	}
 	// Convert parameters
 	if req.MaxTokens != nil {
 		bifrostReq.Params.MaxCompletionTokens = req.MaxTokens
@@ -210,6 +267,25 @@ func (req *CohereChatRequest) ToBifrostChatRequest() *schemas.BifrostChatRequest
 	}
 	if req.PresencePenalty != nil {
 		bifrostReq.Params.PresencePenalty = req.PresencePenalty
+	}
+
+	// Convert reasoning
+	if req.Thinking != nil {
+		if req.Thinking.Type == ThinkingTypeDisabled {
+			bifrostReq.Params.Reasoning = &schemas.ChatReasoning{
+				Effort: schemas.Ptr("none"),
+			}
+		} else {
+			bifrostReq.Params.Reasoning = &schemas.ChatReasoning{
+				Effort: schemas.Ptr("auto"),
+			}
+			if req.Thinking.TokenBudget != nil {
+				bifrostReq.Params.Reasoning.MaxTokens = req.Thinking.TokenBudget
+			}
+		}
+	}
+	if req.ResponseFormat != nil {
+		bifrostReq.Params.ResponseFormat = convertCohereResponseFormatToBifrost(req.ResponseFormat)
 	}
 
 	// Convert tools
@@ -285,12 +361,8 @@ func (response *CohereChatResponse) ToBifrostChatResponse(model string) *schemas
 		Object: "chat.completion",
 		Choices: []schemas.BifrostResponseChoice{
 			{
-				Index: 0,
-				ChatNonStreamResponseChoice: &schemas.ChatNonStreamResponseChoice{
-					Message: &schemas.ChatMessage{
-						Role: schemas.ChatMessageRoleAssistant,
-					},
-				},
+				Index:                       0,
+				ChatNonStreamResponseChoice: &schemas.ChatNonStreamResponseChoice{},
 			},
 		},
 		Created: int(time.Now().Unix()),
@@ -300,95 +372,10 @@ func (response *CohereChatResponse) ToBifrostChatResponse(model string) *schemas
 		},
 	}
 
-	var content *string
-	var contentBlocks []schemas.ChatContentBlock
-	var toolCalls []schemas.ChatAssistantMessageToolCall
-
-	// Convert message content
+	// Convert messages
 	if response.Message != nil {
-		if response.Message.Content != nil {
-			if response.Message.Content.IsString() ||
-				(response.Message.Content.IsBlocks() &&
-					len(response.Message.Content.GetBlocks()) == 1 &&
-					response.Message.Content.GetBlocks()[0].Type == CohereContentBlockTypeText) {
-				if response.Message.Content.IsString() {
-					content = response.Message.Content.GetString()
-				} else {
-					content = response.Message.Content.GetBlocks()[0].Text
-				}
-			} else if response.Message.Content.IsBlocks() {
-				for _, block := range response.Message.Content.GetBlocks() {
-					if block.Type == CohereContentBlockTypeText && block.Text != nil {
-						contentBlocks = append(contentBlocks, schemas.ChatContentBlock{
-							Type: schemas.ChatContentBlockTypeText,
-							Text: block.Text,
-						})
-					} else if block.Type == CohereContentBlockTypeImage && block.ImageURL != nil {
-						contentBlocks = append(contentBlocks, schemas.ChatContentBlock{
-							Type: schemas.ChatContentBlockTypeImage,
-							ImageURLStruct: &schemas.ChatInputImage{
-								URL: block.ImageURL.URL,
-							},
-						})
-					}
-				}
-			}
-		}
-
-		// Create the message content
-		messageContent := &schemas.ChatMessageContent{
-			ContentStr:    content,
-			ContentBlocks: contentBlocks,
-		}
-
-		// Convert tool calls
-		if response.Message.ToolCalls != nil {
-			for _, toolCall := range response.Message.ToolCalls {
-				// Check if Function is nil to avoid nil pointer dereference
-				if toolCall.Function == nil {
-					// Skip this tool call if Function is nil
-					continue
-				}
-
-				// Safely extract function name and arguments
-				var functionName *string
-				var functionArguments string
-
-				if toolCall.Function.Name != nil {
-					functionName = toolCall.Function.Name
-				} else {
-					// Use empty string if Name is nil
-					functionName = schemas.Ptr("")
-				}
-
-				// Arguments is a string, not a pointer, so it's safe to access directly
-				functionArguments = toolCall.Function.Arguments
-
-				bifrostToolCall := schemas.ChatAssistantMessageToolCall{
-					Index: uint16(len(toolCalls)),
-					ID:    toolCall.ID,
-					Function: schemas.ChatAssistantMessageToolCallFunction{
-						Name:      functionName,
-						Arguments: functionArguments,
-					},
-				}
-				toolCalls = append(toolCalls, bifrostToolCall)
-			}
-		}
-
-		// Create assistant message if we have tool calls
-		var assistantMessage *schemas.ChatAssistantMessage
-		if len(toolCalls) > 0 {
-			assistantMessage = &schemas.ChatAssistantMessage{
-				ToolCalls: toolCalls,
-			}
-		}
-
-		bifrostResponse.Choices[0].ChatNonStreamResponseChoice.Message = &schemas.ChatMessage{
-			Role:                 schemas.ChatMessageRoleAssistant,
-			Content:              messageContent,
-			ChatAssistantMessage: assistantMessage,
-		}
+		bifrostMessage := response.Message.ToBifrostChatMessage()
+		bifrostResponse.Choices[0].ChatNonStreamResponseChoice.Message = bifrostMessage
 	}
 
 	// Convert finish reason
@@ -448,24 +435,49 @@ func (chunk *CohereStreamEvent) ToBifrostChatCompletionStream() (*schemas.Bifros
 		if chunk.Delta != nil &&
 			chunk.Delta.Message != nil &&
 			chunk.Delta.Message.Content != nil &&
-			chunk.Delta.Message.Content.CohereStreamContentObject != nil &&
-			chunk.Delta.Message.Content.CohereStreamContentObject.Text != nil {
-			// Try to cast content to CohereStreamContent
-			streamResponse := &schemas.BifrostChatResponse{
-				Object: "chat.completion.chunk",
-				Choices: []schemas.BifrostResponseChoice{
-					{
-						Index: 0,
-						ChatStreamResponseChoice: &schemas.ChatStreamResponseChoice{
-							Delta: &schemas.ChatStreamResponseChoiceDelta{
-								Content: chunk.Delta.Message.Content.CohereStreamContentObject.Text,
+			chunk.Delta.Message.Content.CohereStreamContentObject != nil {
+			if chunk.Delta.Message.Content.CohereStreamContentObject.Text != nil {
+				// Try to cast content to CohereStreamContent
+				streamResponse := &schemas.BifrostChatResponse{
+					Object: "chat.completion.chunk",
+					Choices: []schemas.BifrostResponseChoice{
+						{
+							Index: 0,
+							ChatStreamResponseChoice: &schemas.ChatStreamResponseChoice{
+								Delta: &schemas.ChatStreamResponseChoiceDelta{
+									Content: chunk.Delta.Message.Content.CohereStreamContentObject.Text,
+								},
 							},
 						},
 					},
-				},
-			}
+				}
 
-			return streamResponse, nil, false
+				return streamResponse, nil, false
+			} else if chunk.Delta.Message.Content.CohereStreamContentObject.Thinking != nil {
+				thinkingText := *chunk.Delta.Message.Content.CohereStreamContentObject.Thinking
+				streamResponse := &schemas.BifrostChatResponse{
+					Object: "chat.completion.chunk",
+					Choices: []schemas.BifrostResponseChoice{
+						{
+							Index: 0,
+							ChatStreamResponseChoice: &schemas.ChatStreamResponseChoice{
+								Delta: &schemas.ChatStreamResponseChoiceDelta{
+									Reasoning: schemas.Ptr(thinkingText),
+									ReasoningDetails: []schemas.ChatReasoningDetails{
+										{
+											Index: 0,
+											Type:  schemas.BifrostReasoningDetailsTypeText,
+											Text:  schemas.Ptr(thinkingText),
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+
+				return streamResponse, nil, false
+			}
 		}
 
 	case StreamEventToolPlanDelta:
@@ -477,7 +489,7 @@ func (chunk *CohereStreamEvent) ToBifrostChatCompletionStream() (*schemas.Bifros
 						Index: 0,
 						ChatStreamResponseChoice: &schemas.ChatStreamResponseChoice{
 							Delta: &schemas.ChatStreamResponseChoiceDelta{
-								Thought: chunk.Delta.Message.ToolPlan,
+								Reasoning: chunk.Delta.Message.ToolPlan,
 							},
 						},
 					},
@@ -575,84 +587,129 @@ func (chunk *CohereStreamEvent) ToBifrostChatCompletionStream() (*schemas.Bifros
 	return nil, nil, false
 }
 
-// convertCohereMessagesToBifrost converts Cohere messages to Bifrost format
-func convertCohereMessagesToBifrost(messages []CohereMessage) []schemas.ChatMessage {
-	if messages == nil {
+func (cm *CohereMessage) ToBifrostChatMessage() *schemas.ChatMessage {
+	if cm == nil {
 		return nil
 	}
 
-	bifrostMessages := make([]schemas.ChatMessage, len(messages))
-	for i, msg := range messages {
-		bifrostMsg := schemas.ChatMessage{
-			Role: schemas.ChatMessageRole(msg.Role),
-		}
+	var content *string
+	var contentBlocks []schemas.ChatContentBlock
+	var toolCalls []schemas.ChatAssistantMessageToolCall
+	var reasoningDetails []schemas.ChatReasoningDetails
+	var reasoningText string
 
-		// Convert content
-		if msg.Content != nil {
-			if msg.Content.IsString() {
-				bifrostMsg.Content = &schemas.ChatMessageContent{
-					ContentStr: msg.Content.GetString(),
-				}
-			} else if msg.Content.IsBlocks() {
-				var contentBlocks []schemas.ChatContentBlock
-				for _, block := range msg.Content.GetBlocks() {
-					switch block.Type {
-					case CohereContentBlockTypeText:
-						contentBlocks = append(contentBlocks, schemas.ChatContentBlock{
-							Type: schemas.ChatContentBlockTypeText,
-							Text: block.Text,
-						})
-					case CohereContentBlockTypeImage:
-						if block.ImageURL != nil {
-							contentBlocks = append(contentBlocks, schemas.ChatContentBlock{
-								Type: schemas.ChatContentBlockTypeImage,
-								ImageURLStruct: &schemas.ChatInputImage{
-									URL: block.ImageURL.URL,
-								},
-							})
-						}
+	// Convert message content
+	if cm.Content != nil {
+		if cm.Content.IsString() ||
+			(cm.Content.IsBlocks() &&
+				len(cm.Content.GetBlocks()) == 1 &&
+				cm.Content.GetBlocks()[0].Type == CohereContentBlockTypeText) {
+			if cm.Content.IsString() {
+				content = cm.Content.GetString()
+			} else {
+				content = cm.Content.GetBlocks()[0].Text
+			}
+		} else if cm.Content.IsBlocks() {
+			for _, block := range cm.Content.GetBlocks() {
+				if block.Type == CohereContentBlockTypeText && block.Text != nil {
+					contentBlocks = append(contentBlocks, schemas.ChatContentBlock{
+						Type: schemas.ChatContentBlockTypeText,
+						Text: block.Text,
+					})
+				} else if block.Type == CohereContentBlockTypeImage && block.ImageURL != nil {
+					contentBlocks = append(contentBlocks, schemas.ChatContentBlock{
+						Type: schemas.ChatContentBlockTypeImage,
+						ImageURLStruct: &schemas.ChatInputImage{
+							URL: block.ImageURL.URL,
+						},
+					})
+				} else if block.Type == CohereContentBlockTypeThinking && block.Thinking != nil {
+					reasoningDetails = append(reasoningDetails, schemas.ChatReasoningDetails{
+						Index: len(reasoningDetails),
+						Type:  schemas.BifrostReasoningDetailsTypeText,
+						Text:  block.Thinking,
+					})
+					if len(reasoningText) > 0 {
+						reasoningText += "\n"
 					}
-				}
-				if len(contentBlocks) > 0 {
-					bifrostMsg.Content = &schemas.ChatMessageContent{
-						ContentBlocks: contentBlocks,
-					}
+					reasoningText += *block.Thinking
 				}
 			}
 		}
-
-		// Convert tool calls (for assistant messages)
-		if msg.ToolCalls != nil {
-			var toolCalls []schemas.ChatAssistantMessageToolCall
-			for j, tc := range msg.ToolCalls {
-				toolCall := schemas.ChatAssistantMessageToolCall{
-					Index: uint16(j),
-					ID:    tc.ID,
-				}
-				if tc.Function != nil {
-					toolCall.Function = schemas.ChatAssistantMessageToolCallFunction{
-						Name:      tc.Function.Name,
-						Arguments: tc.Function.Arguments,
-					}
-				}
-				toolCalls = append(toolCalls, toolCall)
-			}
-			if len(toolCalls) > 0 {
-				bifrostMsg.ChatAssistantMessage = &schemas.ChatAssistantMessage{
-					ToolCalls: toolCalls,
-				}
-			}
-		}
-
-		// Convert tool call ID (for tool messages)
-		if msg.ToolCallID != nil {
-			bifrostMsg.ChatToolMessage = &schemas.ChatToolMessage{
-				ToolCallID: msg.ToolCallID,
-			}
-		}
-
-		bifrostMessages[i] = bifrostMsg
 	}
 
-	return bifrostMessages
+	if len(contentBlocks) == 1 && contentBlocks[0].Type == schemas.ChatContentBlockTypeText {
+		content = contentBlocks[0].Text
+		contentBlocks = nil
+	}
+
+	// Create the message content
+	messageContent := &schemas.ChatMessageContent{
+		ContentStr:    content,
+		ContentBlocks: contentBlocks,
+	}
+
+	// Convert tool calls
+	if cm.ToolCalls != nil {
+		for _, toolCall := range cm.ToolCalls {
+			// Check if Function is nil to avoid nil pointer dereference
+			if toolCall.Function == nil {
+				// Skip this tool call if Function is nil
+				continue
+			}
+
+			// Safely extract function name and arguments
+			var functionName *string
+			var functionArguments string
+
+			if toolCall.Function.Name != nil {
+				functionName = toolCall.Function.Name
+			} else {
+				// Use empty string if Name is nil
+				functionName = schemas.Ptr("")
+			}
+
+			// Arguments is a string, not a pointer, so it's safe to access directly
+			functionArguments = toolCall.Function.Arguments
+
+			bifrostToolCall := schemas.ChatAssistantMessageToolCall{
+				Index: uint16(len(toolCalls)),
+				ID:    toolCall.ID,
+				Function: schemas.ChatAssistantMessageToolCallFunction{
+					Name:      functionName,
+					Arguments: functionArguments,
+				},
+			}
+			toolCalls = append(toolCalls, bifrostToolCall)
+		}
+	}
+
+	// Create assistant message if we have tool calls
+	var assistantMessage *schemas.ChatAssistantMessage
+	if len(toolCalls) > 0 {
+		assistantMessage = &schemas.ChatAssistantMessage{
+			ToolCalls: toolCalls,
+		}
+	}
+
+	if len(reasoningDetails) > 0 {
+		if assistantMessage == nil {
+			assistantMessage = &schemas.ChatAssistantMessage{}
+		}
+		assistantMessage.ReasoningDetails = reasoningDetails
+		assistantMessage.Reasoning = schemas.Ptr(reasoningText)
+	}
+
+	bifrostMessage := &schemas.ChatMessage{
+		Role:                 schemas.ChatMessageRole(cm.Role),
+		Content:              messageContent,
+		ChatAssistantMessage: assistantMessage,
+	}
+
+	if cm.Role == "tool" {
+		bifrostMessage.ChatToolMessage = &schemas.ChatToolMessage{
+			ToolCallID: cm.ToolCallID,
+		}
+	}
+	return bifrostMessage
 }

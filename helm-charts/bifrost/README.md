@@ -1,8 +1,90 @@
 # Bifrost Helm Charts
 
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/bifrost)](https://artifacthub.io/packages/search?repo=bifrost)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/bifrost)](https://artifacthub.io/packages/helm/bifrost/bifrost)
 
 Official Helm charts for deploying [Bifrost](https://github.com/maximhq/bifrost) - a high-performance AI gateway with unified interface for multiple providers.
+
+**Latest Version:** 2.0.9
+
+## Changelog
+
+### v2.0.9
+
+- Bumped appVersion to 1.4.8
+
+### v2.0.8
+
+- Added comprehensive config field coverage for all `config.schema.json` fields
+- Added Pinecone vector store support (external only) with secret injection
+- Added governance routing rules template support
+- Added OTEL metrics fields (metrics_enabled, metrics_endpoint, metrics_push_interval)
+- Added advanced Redis connection pool fields (pool_size, timeouts, idle conns, etc.)
+- Added Weaviate timeout and className fields
+- Expanded values.yaml with commented examples for all provider types (Azure, Vertex, Bedrock), network config, concurrency, proxy config, and governance entities
+- Added helm config field validation CI test (246 assertions covering all config.schema.json fields)
+
+### v2.0.7
+
+- Previous release
+
+### v2.0.6
+
+- Fixes MCP client config template to convert camelCase Helm values to snake_case config format
+
+### v2.0.5
+
+- Fixes config field validation parity
+
+### v2.0.2
+
+- Added Qdrant vector store support with deployment, service, and PVC templates
+- Added headless service template for StatefulSet DNS resolution
+- Fixed gitignore pattern that was excluding template files from version control
+
+### v2.0.1
+
+- Added missing StatefulSet template for SQLite with persistence mode
+- Added headless service for StatefulSet DNS resolution
+- v2.0.0 documented StatefulSet support but the template was not included - this release fixes that
+
+### v2.0.0 (Breaking Change)
+
+#### StatefulSet for SQLite with Persistence
+
+This release fixes the multi-attach volume error when running multiple replicas with SQLite storage mode.
+
+#### What Changed
+
+- When using `storage.mode: sqlite` with `storage.persistence.enabled: true`, Bifrost now deploys as a **StatefulSet** instead of a Deployment
+- Each pod gets its own dedicated PersistentVolumeClaim (e.g., `data-bifrost-0`, `data-bifrost-1`, `data-bifrost-2`)
+- A headless service is created for StatefulSet DNS resolution
+- HorizontalPodAutoscaler now correctly references StatefulSet or Deployment based on storage configuration
+
+#### Who Is Affected
+
+- Users running SQLite mode with persistence enabled and multiple replicas
+- Users upgrading existing SQLite deployments need to migrate (see below)
+
+#### Who Is NOT Affected
+
+- Users running PostgreSQL mode (`storage.mode: postgres`) - no changes, still uses Deployment
+- Users running SQLite without persistence (`storage.persistence.enabled: false`)
+- Users running SQLite with an existing PVC claim (`storage.persistence.existingClaim`)
+
+#### Migration Guide for Existing SQLite Deployments
+
+Since Kubernetes doesn't allow in-place conversion from Deployment to StatefulSet, you need to:
+
+1. Back up your data (if needed)
+2. Uninstall the existing release: `helm uninstall bifrost`
+3. Delete the old PVC: `kubectl delete pvc bifrost-data`
+4. Install with the new chart version: `helm install bifrost bifrost/bifrost --set image.tag=<latest-image>`
+
+**Note:** For production high-availability setups, we recommend using PostgreSQL mode which scales horizontally without these concerns.
+
+### v1.7.0
+
+- Previous stable release with Deployment-based architecture for all storage modes
 
 ## Quick Start
 
@@ -14,7 +96,7 @@ helm repo add bifrost https://maximhq.github.io/bifrost/helm-charts
 helm repo update
 
 # Install Bifrost with default configuration (SQLite storage)
-helm install bifrost bifrost/bifrost --set image.tag=v1.3.37
+helm install bifrost bifrost/bifrost --set image.tag=v1.4.3
 ```
 
 ## Prerequisites
@@ -33,7 +115,7 @@ helm repo add bifrost https://maximhq.github.io/bifrost/helm-charts
 helm repo update
 
 # Install with default values
-helm install bifrost bifrost/bifrost --set image.tag=v1.3.37
+helm install bifrost bifrost/bifrost --set image.tag=v1.4.3
 
 # Or install with custom values
 helm install bifrost bifrost/bifrost -f my-values.yaml
@@ -47,7 +129,7 @@ git clone https://github.com/maximhq/bifrost.git
 cd bifrost/helm-charts
 
 # Install from local chart
-helm install bifrost ./bifrost --set image.tag=v1.3.37
+helm install bifrost ./bifrost --set image.tag=v1.5.2
 ```
 
 ### Interactive Installation
@@ -71,17 +153,84 @@ cd bifrost/helm-charts/bifrost
 
 > **Important:** You must specify the `image.tag`. See available tags at [Docker Hub](https://hub.docker.com/r/maximhq/bifrost/tags).
 
+### Enterprise Private Registry
+
+For enterprise customers with private container registries, simply override the `image.repository` with your full registry URL:
+
+```yaml
+# Google Artifact Registry
+image:
+  repository: us-west1-docker.pkg.dev/bifrost-enterprise/your-org/bifrost
+  tag: v1.5.0
+
+# AWS ECR
+image:
+  repository: 123456789.dkr.ecr.us-east-1.amazonaws.com/bifrost
+  tag: v1.5.0
+
+# Azure Container Registry
+image:
+  repository: yourregistry.azurecr.io/bifrost
+  tag: v1.5.0
+
+# Self-hosted registry
+image:
+  repository: registry.yourcompany.com/ai/bifrost
+  tag: v1.5.0
+```
+
+If your private registry requires authentication, configure `imagePullSecrets`:
+
+```yaml
+image:
+  repository: us-west1-docker.pkg.dev/bifrost-enterprise/your-org/bifrost
+  tag: v1.5.0
+
+imagePullSecrets:
+  - name: my-registry-secret
+```
+
+Create the secret beforehand:
+```bash
+kubectl create secret docker-registry my-registry-secret \
+  --docker-server=us-west1-docker.pkg.dev \
+  --docker-username=_json_key \
+  --docker-password="$(cat key.json)" \
+  --docker-email=your-email@example.com
+```
+
 ### Storage Configuration
 
-Bifrost supports two storage backends:
+Bifrost supports two storage backends (SQLite and PostgreSQL) that can be configured independently for config and logs stores.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `storage.mode` | Storage backend: `sqlite` or `postgres` | `sqlite` |
+| `storage.mode` | Default storage backend (fallback when per-store type not set) | `sqlite` |
 | `storage.persistence.enabled` | Enable persistent storage for SQLite | `true` |
 | `storage.persistence.size` | Storage size | `10Gi` |
 | `storage.configStore.enabled` | Enable configuration store | `true` |
+| `storage.configStore.type` | Config store backend: `sqlite`, `postgres`, or `""` | `""` (uses `storage.mode`) |
 | `storage.logsStore.enabled` | Enable logs store | `true` |
+| `storage.logsStore.type` | Logs store backend: `sqlite`, `postgres`, or `""` | `""` (uses `storage.mode`) |
+
+#### Mixed Backend Example
+
+You can use different backends for config and logs stores:
+
+```yaml
+storage:
+  mode: sqlite  # Default fallback
+  configStore:
+    enabled: true
+    type: sqlite   # Config in SQLite (fast, local)
+  logsStore:
+    enabled: true
+    type: postgres # Logs in PostgreSQL (scalable, queryable)
+
+postgresql:
+  enabled: true
+  # ... PostgreSQL configuration for logs store
+```
 
 ### PostgreSQL Configuration
 
@@ -182,6 +331,41 @@ bifrost:
 | Semantic Cache | `bifrost.plugins.semanticCache.enabled` | Enable semantic caching |
 | OTEL | `bifrost.plugins.otel.enabled` | Enable OpenTelemetry integration |
 | Maxim | `bifrost.plugins.maxim.enabled` | Enable Maxim observability |
+| Datadog | `bifrost.plugins.datadog.enabled` | Enable Datadog APM integration |
+| Custom | `bifrost.plugins.custom` | Array of custom/dynamic plugins |
+
+#### Custom Plugins
+
+You can add custom/dynamic plugins using the `bifrost.plugins.custom` array:
+
+```yaml
+bifrost:
+  plugins:
+    custom:
+      - name: "my-custom-plugin"
+        enabled: true
+        path: "/plugins/my-plugin.so"
+        version: 1
+        config:
+          key: value
+```
+
+### Client Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `bifrost.client.disableDbPingsInHealth` | Disable DB pings in health check | `false` |
+| `bifrost.client.headerFilterConfig.allowlist` | Headers allowed to forward to LLM providers | `[]` |
+| `bifrost.client.headerFilterConfig.denylist` | Headers blocked from forwarding | `[]` |
+
+### MCP Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `bifrost.mcp.enabled` | Enable MCP (Model Context Protocol) | `false` |
+| `bifrost.mcp.clientConfigs` | Array of MCP client configurations | `[]` |
+| `bifrost.mcp.toolManagerConfig.toolExecutionTimeout` | Tool execution timeout in seconds | `30` |
+| `bifrost.mcp.toolManagerConfig.maxAgentDepth` | Maximum agent depth | `10` |
 
 ### Ingress Configuration
 
@@ -221,6 +405,7 @@ The chart includes pre-configured examples in `values-examples/`:
 |---------------|-------------|
 | `sqlite-only.yaml` | Simple setup with SQLite (local development) |
 | `postgres-only.yaml` | PostgreSQL for config and logs |
+| `mixed-backend.yaml` | SQLite for config + PostgreSQL for logs (mixed backend) |
 | `postgres-weaviate.yaml` | PostgreSQL + Weaviate for semantic caching |
 | `postgres-redis.yaml` | PostgreSQL + Redis for semantic caching |
 | `postgres-qdrant.yaml` | PostgreSQL + Qdrant for semantic caching |
@@ -236,7 +421,7 @@ The chart includes pre-configured examples in `values-examples/`:
 # From Helm repository
 helm install bifrost bifrost/bifrost \
   -f https://raw.githubusercontent.com/maximhq/bifrost/main/helm-charts/bifrost/values-examples/postgres-only.yaml \
-  --set image.tag=v1.3.37
+  --set image.tag=v1.5.2
 
 # From local source
 helm install bifrost ./bifrost -f ./bifrost/values-examples/postgres-only.yaml
@@ -318,7 +503,7 @@ bifrost:
 helm repo update
 
 # Upgrade release
-helm upgrade bifrost bifrost/bifrost --set image.tag=v1.3.37
+helm upgrade bifrost bifrost/bifrost --set image.tag=v1.5.2
 
 # Or with custom values
 helm upgrade bifrost bifrost/bifrost -f my-values.yaml

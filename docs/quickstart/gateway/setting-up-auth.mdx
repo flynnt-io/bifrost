@@ -45,7 +45,7 @@ This option is useful if you want to protect your dashboard and admin functions 
 ### Step 4: Save Changes
 
 1. Click **Save Changes** to apply your authentication settings
-2. You may need to **restart Bifrost** for the changes to take effect (a warning will be displayed if a restart is required)
+2. Changes take effect immediately - no restart required
 
 ## Logging In
 
@@ -70,12 +70,16 @@ Bifrost supports different authentication methods depending on the type of reque
 
 ### API Calls
 
-When authentication is enabled, API calls can use:
+When authentication is enabled, API calls can be made using
 
-- **Basic Authentication**: For inference calls, you can use HTTP Basic Auth with your username and password
-- **Bearer Token**: For admin API calls, use the Bearer token obtained from the login session
+- **Basic Authentication**: Username and password encoded as base64 via HTTP Basic auth
+- **Bearer Token**: Session token issued after login (Bearer token from session)
 
-### Example: Using Basic Auth for API Calls
+When authentication is enabled for inference calls (i.e., the "Disable authentication on inference calls" toggle is OFF), inference calls can be made using:
+
+- **Basic Authentication**: Username and Password in Basic auth
+- **Bearer Token**: base64 string of username:password as bearer token
+### Example: Using Basic Auth for Inference Calls
 
 ```bash
 # Using curl with Basic Auth
@@ -90,7 +94,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ## Important Notes
 
-- **Restart Required**: After enabling or changing authentication settings, you may need to restart Bifrost for changes to take effect
+- **No Restart Required**: Authentication changes take effect immediately without requiring a server restart
 - **Session Duration**: Login sessions last for 30 days
 - **Password Security**: Passwords are hashed and stored securely in the database
 - **Inference Calls**: If you disable authentication on inference calls, only dashboard and admin API endpoints will be protected
@@ -102,6 +106,5 @@ To disable authentication:
 1. Navigate to **Workspace** → **Config** → **Security**
 2. Toggle off the **Password protect the dashboard** switch
 3. Click **Save Changes**
-4. Restart Bifrost if prompted
 
-After disabling, the dashboard will be accessible without authentication.
+After disabling, the dashboard will be accessible without authentication immediately.

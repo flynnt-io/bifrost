@@ -9,7 +9,7 @@ This guide walks you through setting up the Bifrost repository for local develop
 ## Prerequisites
 
 Before setting up the repository, ensure you have the following tools installed:
-- [Go](https://go.dev/doc/install) (1.24.3)
+- [Go](https://go.dev/doc/install) (1.25.5)
 - [Node.js](https://nodejs.org/en/download) (>= 18.0.0) and npm
 - [Make](/deployment-guides/how-to/install-make)
 - [Docker](https://www.docker.com) (optional, for containerized development)
@@ -167,6 +167,9 @@ make test-core    # Run all core tests
 make test-core PROVIDER=openai  # Run specific provider tests
 make test-core PROVIDER=openai TESTCASE=SpeechSynthesisStreamAdvanced/MultipleVoices_Streaming/StreamingVoice_echo  # Run specific test case
 make test-plugins # Run plugin tests
+make test-governance  # Run governance tests
+make test-governance TESTCASE=TestVKBudgetExceeded  # Run specific governance test
+make test-governance PATTERN=Budget  # Run governance tests matching pattern
 make test-all     # Run all tests
 make clean-test-reports  # Clean test reports
 make generate-html-reports  # Convert XML to HTML reports

@@ -19,13 +19,12 @@ func getWeaviateConfigFromEnv() vectorstore.WeaviateConfig {
 	if scheme == "" {
 		scheme = "http"
 	}
-
-	host := os.Getenv("WEAVIATE_HOST")
-	if host == "" {
-		host = "localhost:9000"
+	host := schemas.NewEnvVar("env.WEAVIATE_HOST")
+	if host.GetValue() == "" {
+		host = schemas.NewEnvVar("localhost:9000")
 	}
 
-	apiKey := os.Getenv("WEAVIATE_API_KEY")
+	apiKey := schemas.NewEnvVar("env.WEAVIATE_API_KEY")
 
 	timeoutStr := os.Getenv("WEAVIATE_TIMEOUT")
 	timeout := 30 // default
@@ -45,20 +44,13 @@ func getWeaviateConfigFromEnv() vectorstore.WeaviateConfig {
 
 // getRedisConfigFromEnv retrieves Redis configuration from environment variables
 func getRedisConfigFromEnv() vectorstore.RedisConfig {
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
+	addr := schemas.NewEnvVar("env.REDIS_ADDR")
+	if addr.GetValue() == "" {
+		addr = schemas.NewEnvVar("localhost:6379")
 	}
-	username := os.Getenv("REDIS_USERNAME")
-	password := os.Getenv("REDIS_PASSWORD")
-	db := os.Getenv("REDIS_DB")
-	if db == "" {
-		db = "0"
-	}
-	dbInt, err := strconv.Atoi(db)
-	if err != nil {
-		dbInt = 0
-	}
+	username := schemas.NewEnvVar("env.REDIS_USERNAME")
+	password := schemas.NewEnvVar("env.REDIS_PASSWORD")
+	db := schemas.NewEnvVar("env.REDIS_DB")
 
 	timeoutStr := os.Getenv("REDIS_TIMEOUT")
 	if timeoutStr == "" {
@@ -73,8 +65,49 @@ func getRedisConfigFromEnv() vectorstore.RedisConfig {
 		Addr:           addr,
 		Username:       username,
 		Password:       password,
-		DB:             dbInt,
+		DB:             db,
 		ContextTimeout: timeout,
+	}
+}
+
+// getQdrantConfigFromEnv retrieves Qdrant configuration from environment variables
+func getQdrantConfigFromEnv() vectorstore.QdrantConfig {
+	host := schemas.NewEnvVar("env.QDRANT_HOST")
+	if host.GetValue() == "" {
+		host = schemas.NewEnvVar("localhost")
+	}
+	port := schemas.NewEnvVar("env.QDRANT_PORT")
+	if port.GetValue() == "" {
+		port = schemas.NewEnvVar("6334")
+	}
+	apiKey := schemas.NewEnvVar("env.QDRANT_API_KEY")
+	useTLS := schemas.NewEnvVar("env.QDRANT_USE_TLS")
+	if useTLS.GetValue() == "" {
+		useTLS = schemas.NewEnvVar("false")
+	}
+
+	return vectorstore.QdrantConfig{
+		Host:   *host,
+		Port:   *port,
+		APIKey: *apiKey,
+		UseTLS: *useTLS,
+	}
+}
+
+// getPineconeConfigFromEnv retrieves Pinecone configuration from environment variables
+func getPineconeConfigFromEnv() vectorstore.PineconeConfig {
+	apiKey := schemas.NewEnvVar("env.PINECONE_API_KEY")
+	if apiKey.GetValue() == "" {
+		apiKey = schemas.NewEnvVar("pclocal") // Pinecone Local doesn't validate API keys
+	}
+	indexHost := schemas.NewEnvVar("env.PINECONE_INDEX_HOST")
+	if indexHost.GetValue() == "" {
+		indexHost = schemas.NewEnvVar("localhost:5081") // Pinecone Local default port
+	}
+
+	return vectorstore.PineconeConfig{
+		APIKey:    *apiKey,
+		IndexHost: *indexHost,
 	}
 }
 
@@ -85,10 +118,10 @@ func (baseAccount *BaseAccount) GetConfiguredProviders() ([]schemas.ModelProvide
 	return []schemas.ModelProvider{schemas.OpenAI}, nil
 }
 
-func (baseAccount *BaseAccount) GetKeysForProvider(ctx *context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
+func (baseAccount *BaseAccount) GetKeysForProvider(ctx context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
 	return []schemas.Key{
 		{
-			Value:  os.Getenv("OPENAI_API_KEY"),
+			Value:  *schemas.NewEnvVar("env.OPENAI_API_KEY"),
 			Models: []string{}, // Empty models array means it supports ALL models
 			Weight: 1.0,
 		},
@@ -297,7 +330,7 @@ func getMockRules() []mocker.MockRule {
 }
 
 // getMockedBifrostClient creates a Bifrost client with a mocker plugin for testing
-func getMockedBifrostClient(t *testing.T, ctx context.Context, logger schemas.Logger, semanticCachePlugin schemas.Plugin) *bifrost.Bifrost {
+func getMockedBifrostClient(t *testing.T, ctx *schemas.BifrostContext, logger schemas.Logger, semanticCachePlugin schemas.LLMPlugin) *bifrost.Bifrost {
 	mockerCfg := mocker.MockerConfig{
 		Enabled: true,
 		Rules:   getMockRules(),
@@ -310,9 +343,9 @@ func getMockedBifrostClient(t *testing.T, ctx context.Context, logger schemas.Lo
 
 	account := &BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-		Account: account,
-		Plugins: []schemas.Plugin{semanticCachePlugin, mockerPlugin},
-		Logger:  logger,
+		Account:    account,
+		LLMPlugins: []schemas.LLMPlugin{semanticCachePlugin, mockerPlugin},
+		Logger:     logger,
 	})
 	if err != nil {
 		t.Fatalf("Error initializing Bifrost with mocker: %v", err)
@@ -325,7 +358,7 @@ func getMockedBifrostClient(t *testing.T, ctx context.Context, logger schemas.Lo
 type TestSetup struct {
 	Logger schemas.Logger
 	Store  vectorstore.VectorStore
-	Plugin schemas.Plugin
+	Plugin schemas.LLMPlugin
 	Client *bifrost.Bifrost
 	Config *Config
 }
@@ -335,11 +368,12 @@ func NewTestSetup(t *testing.T) *TestSetup {
 	return NewTestSetupWithConfig(t, &Config{
 		Provider:          schemas.OpenAI,
 		EmbeddingModel:    "text-embedding-3-small",
+		Dimension:         1536,
 		Threshold:         0.8,
 		CleanUpOnShutdown: true,
 		Keys: []schemas.Key{
 			{
-				Value:  os.Getenv("OPENAI_API_KEY"),
+				Value:  *schemas.NewEnvVar("env.OPENAI_API_KEY"),
 				Models: []string{},
 				Weight: 1.0,
 			},
@@ -349,20 +383,39 @@ func NewTestSetup(t *testing.T) *TestSetup {
 
 // NewTestSetupWithConfig creates a new test setup with custom configuration
 func NewTestSetupWithConfig(t *testing.T, config *Config) *TestSetup {
-	ctx := context.Background()
+	return NewTestSetupWithVectorStore(t, config, vectorstore.VectorStoreTypeWeaviate)
+}
+
+// NewTestSetupWithVectorStore creates a new test setup with custom configuration and vector store type
+func NewTestSetupWithVectorStore(t *testing.T, config *Config, storeType vectorstore.VectorStoreType) *TestSetup {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	logger := bifrost.NewDefaultLogger(schemas.LogLevelDebug)
 
-	// Keep Weaviate for embeddings, as mocker only affects chat completions
+	// Get the appropriate config for the vector store type
+	var storeConfig interface{}
+	switch storeType {
+	case vectorstore.VectorStoreTypeWeaviate:
+		storeConfig = getWeaviateConfigFromEnv()
+	case vectorstore.VectorStoreTypeRedis:
+		storeConfig = getRedisConfigFromEnv()
+	case vectorstore.VectorStoreTypeQdrant:
+		storeConfig = getQdrantConfigFromEnv()
+	case vectorstore.VectorStoreTypePinecone:
+		storeConfig = getPineconeConfigFromEnv()
+	default:
+		t.Fatalf("Unsupported vector store type: %s", storeType)
+	}
+
 	store, err := vectorstore.NewVectorStore(context.Background(), &vectorstore.Config{
-		Type:    vectorstore.VectorStoreTypeWeaviate,
-		Config:  getWeaviateConfigFromEnv(),
+		Type:    storeType,
+		Config:  storeConfig,
 		Enabled: true,
 	}, logger)
 	if err != nil {
-		t.Fatalf("Vector store not available or failed to connect: %v", err)
+		t.Skipf("Vector store %s not available or failed to connect: %v", storeType, err)
 	}
 
-	plugin, err := Init(context.Background(), config, logger, store)
+	plugin, err := Init(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), config, logger, store)
 	if err != nil {
 		t.Fatalf("Failed to initialize plugin: %v", err)
 	}
@@ -487,7 +540,7 @@ func AssertNoCacheHit(t *testing.T, response *schemas.BifrostResponse) {
 
 // WaitForCache waits for async cache operations to complete
 func WaitForCache() {
-	time.Sleep(1 * time.Second)
+	time.Sleep(2 * time.Second)
 }
 
 // CreateEmbeddingRequest creates an embedding request for testing
@@ -541,33 +594,45 @@ func CreateStreamingResponsesRequest(content string, temperature float64, maxTok
 	return CreateBasicResponsesRequest(content, temperature, maxTokens)
 }
 
+// CreateImageGenerationRequest creates an image generation request for testing
+func CreateImageGenerationRequest(prompt string, size string, quality string) *schemas.BifrostImageGenerationRequest {
+	return &schemas.BifrostImageGenerationRequest{
+		Provider: schemas.OpenAI,
+		Model:    "gpt-image-1",
+		Input: &schemas.ImageGenerationInput{
+			Prompt: prompt,
+		},
+		Params: &schemas.ImageGenerationParameters{
+			Size:    bifrost.Ptr(size),
+			Quality: bifrost.Ptr(quality),
+			N:       bifrost.Ptr(1),
+		},
+	}
+}
+
 // CreateContextWithCacheKey creates a context with the test cache key
-func CreateContextWithCacheKey(value string) context.Context {
-	return context.WithValue(context.Background(), CacheKey, value)
+func CreateContextWithCacheKey(value string) *schemas.BifrostContext {
+	return schemas.NewBifrostContextWithValue(context.Background(), schemas.NoDeadline, CacheKey, value)
 }
 
 // CreateContextWithCacheKeyAndType creates a context with cache key and cache type
-func CreateContextWithCacheKeyAndType(value string, cacheType CacheType) context.Context {
-	ctx := context.WithValue(context.Background(), CacheKey, value)
-	return context.WithValue(ctx, CacheTypeKey, cacheType)
+func CreateContextWithCacheKeyAndType(value string, cacheType CacheType) *schemas.BifrostContext {
+	return schemas.NewBifrostContextWithValue(context.Background(), schemas.NoDeadline, CacheKey, value).WithValue(CacheTypeKey, cacheType)
 }
 
 // CreateContextWithCacheKeyAndTTL creates a context with cache key and custom TTL
-func CreateContextWithCacheKeyAndTTL(value string, ttl time.Duration) context.Context {
-	ctx := context.WithValue(context.Background(), CacheKey, value)
-	return context.WithValue(ctx, CacheTTLKey, ttl)
+func CreateContextWithCacheKeyAndTTL(value string, ttl time.Duration) *schemas.BifrostContext {
+	return schemas.NewBifrostContextWithValue(context.Background(), schemas.NoDeadline, CacheKey, value).WithValue(CacheTTLKey, ttl)
 }
 
 // CreateContextWithCacheKeyAndThreshold creates a context with cache key and custom threshold
-func CreateContextWithCacheKeyAndThreshold(value string, threshold float64) context.Context {
-	ctx := context.WithValue(context.Background(), CacheKey, value)
-	return context.WithValue(ctx, CacheThresholdKey, threshold)
+func CreateContextWithCacheKeyAndThreshold(value string, threshold float64) *schemas.BifrostContext {
+	return schemas.NewBifrostContext(context.Background(), schemas.NoDeadline).WithValue(CacheKey, value).WithValue(CacheThresholdKey, threshold)
 }
 
 // CreateContextWithCacheKeyAndNoStore creates a context with cache key and no-store flag
-func CreateContextWithCacheKeyAndNoStore(value string, noStore bool) context.Context {
-	ctx := context.WithValue(context.Background(), CacheKey, value)
-	return context.WithValue(ctx, CacheNoStoreKey, noStore)
+func CreateContextWithCacheKeyAndNoStore(value string, noStore bool) *schemas.BifrostContext {
+	return schemas.NewBifrostContext(context.Background(), schemas.NoDeadline).WithValue(CacheKey, value).WithValue(CacheNoStoreKey, noStore)
 }
 
 // CreateTestSetupWithConversationThreshold creates a test setup with custom conversation history threshold
@@ -575,12 +640,13 @@ func CreateTestSetupWithConversationThreshold(t *testing.T, threshold int) *Test
 	config := &Config{
 		Provider:                     schemas.OpenAI,
 		EmbeddingModel:               "text-embedding-3-small",
+		Dimension:                    1536,
 		CleanUpOnShutdown:            true,
 		Threshold:                    0.8,
 		ConversationHistoryThreshold: threshold,
 		Keys: []schemas.Key{
 			{
-				Value:  os.Getenv("OPENAI_API_KEY"),
+				Value:  *schemas.NewEnvVar("env.OPENAI_API_KEY"),
 				Models: []string{},
 				Weight: 1.0,
 			},
@@ -595,12 +661,13 @@ func CreateTestSetupWithExcludeSystemPrompt(t *testing.T, excludeSystem bool) *T
 	config := &Config{
 		Provider:            schemas.OpenAI,
 		EmbeddingModel:      "text-embedding-3-small",
+		Dimension:           1536,
 		CleanUpOnShutdown:   true,
 		Threshold:           0.8,
 		ExcludeSystemPrompt: &excludeSystem,
 		Keys: []schemas.Key{
 			{
-				Value:  os.Getenv("OPENAI_API_KEY"),
+				Value:  *schemas.NewEnvVar("env.OPENAI_API_KEY"),
 				Models: []string{},
 				Weight: 1.0,
 			},
@@ -615,13 +682,14 @@ func CreateTestSetupWithThresholdAndExcludeSystem(t *testing.T, threshold int, e
 	config := &Config{
 		Provider:                     schemas.OpenAI,
 		EmbeddingModel:               "text-embedding-3-small",
+		Dimension:                    1536,
 		CleanUpOnShutdown:            true,
 		Threshold:                    0.8,
 		ConversationHistoryThreshold: threshold,
 		ExcludeSystemPrompt:          &excludeSystem,
 		Keys: []schemas.Key{
 			{
-				Value:  os.Getenv("OPENAI_API_KEY"),
+				Value:  *schemas.NewEnvVar("env.OPENAI_API_KEY"),
 				Models: []string{},
 				Weight: 1.0,
 			},

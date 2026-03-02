@@ -1,6 +1,9 @@
 package cohere
 
-import "github.com/maximhq/bifrost/core/schemas"
+import (
+	"github.com/maximhq/bifrost/core/providers/utils"
+	"github.com/maximhq/bifrost/core/schemas"
+)
 
 // ToCohereEmbeddingRequest converts a Bifrost embedding request to Cohere format
 func ToCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest) *CohereEmbeddingRequest {
@@ -30,9 +33,10 @@ func ToCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest) *Cohe
 
 	if bifrostReq.Params != nil {
 		cohereReq.OutputDimension = bifrostReq.Params.Dimensions
-
+		cohereReq.ExtraParams = bifrostReq.Params.ExtraParams
 		if bifrostReq.Params.ExtraParams != nil {
 			if maxTokens, ok := schemas.SafeExtractIntPointer(bifrostReq.Params.ExtraParams["max_tokens"]); ok {
+				delete(cohereReq.ExtraParams, "max_tokens")
 				cohereReq.MaxTokens = maxTokens
 			}
 		}
@@ -42,18 +46,21 @@ func ToCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest) *Cohe
 	if bifrostReq.Params != nil && bifrostReq.Params.ExtraParams != nil {
 		// Input type
 		if inputType, ok := schemas.SafeExtractString(bifrostReq.Params.ExtraParams["input_type"]); ok {
+			delete(cohereReq.ExtraParams, "input_type")
 			cohereReq.InputType = inputType
 		}
 
 		// Embedding types
 		if embeddingTypes, ok := schemas.SafeExtractStringSlice(bifrostReq.Params.ExtraParams["embedding_types"]); ok {
 			if len(embeddingTypes) > 0 {
+				delete(cohereReq.ExtraParams, "embedding_types")
 				cohereReq.EmbeddingTypes = embeddingTypes
 			}
 		}
 
 		// Truncate
 		if truncate, ok := schemas.SafeExtractStringPointer(bifrostReq.Params.ExtraParams["truncate"]); ok {
+			delete(cohereReq.ExtraParams, "truncate")
 			cohereReq.Truncate = truncate
 		}
 	}
@@ -62,12 +69,12 @@ func ToCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest) *Cohe
 }
 
 // ToBifrostEmbeddingRequest converts a Cohere embedding request to Bifrost format
-func (req *CohereEmbeddingRequest) ToBifrostEmbeddingRequest() *schemas.BifrostEmbeddingRequest {
+func (req *CohereEmbeddingRequest) ToBifrostEmbeddingRequest(ctx *schemas.BifrostContext) *schemas.BifrostEmbeddingRequest {
 	if req == nil {
 		return nil
 	}
 
-	provider, model := schemas.ParseModelString(req.Model, schemas.Cohere)
+	provider, model := schemas.ParseModelString(req.Model, utils.CheckAndSetDefaultProvider(ctx, schemas.Cohere))
 
 	bifrostReq := &schemas.BifrostEmbeddingRequest{
 		Provider: provider,
@@ -165,6 +172,15 @@ func (response *CohereEmbeddingResponse) ToBifrostEmbeddingResponse() *schemas.B
 			}
 			if response.Meta.Tokens.OutputTokens != nil {
 				bifrostResponse.Usage.CompletionTokens = int(*response.Meta.Tokens.OutputTokens)
+			}
+			bifrostResponse.Usage.TotalTokens = bifrostResponse.Usage.PromptTokens + bifrostResponse.Usage.CompletionTokens
+		} else if response.Meta.BilledUnits != nil {
+			bifrostResponse.Usage = &schemas.BifrostLLMUsage{}
+			if response.Meta.BilledUnits.InputTokens != nil {
+				bifrostResponse.Usage.PromptTokens = int(*response.Meta.BilledUnits.InputTokens)
+			}
+			if response.Meta.BilledUnits.OutputTokens != nil {
+				bifrostResponse.Usage.CompletionTokens = int(*response.Meta.BilledUnits.OutputTokens)
 			}
 			bifrostResponse.Usage.TotalTokens = bifrostResponse.Usage.PromptTokens + bifrostResponse.Usage.CompletionTokens
 		}

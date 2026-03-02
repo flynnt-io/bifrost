@@ -113,6 +113,130 @@ func (rt *ResponsesTool) ToChatTool() *ChatTool {
 	return ct
 }
 
+// ToChatAssistantMessageToolCall converts a ResponsesToolMessage to ChatAssistantMessageToolCall format.
+// This is useful for executing Responses API tool calls using the Chat API tool executor.
+//
+// Returns:
+//   - *ChatAssistantMessageToolCall: The converted tool call in Chat API format
+//
+// Example:
+//
+//	responsesToolMsg := &ResponsesToolMessage{
+//	    CallID:    Ptr("call-123"),
+//	    Name:      Ptr("calculate"),
+//	    Arguments: Ptr("{\"x\": 10, \"y\": 20}"),
+//	}
+//	chatToolCall := responsesToolMsg.ToChatAssistantMessageToolCall()
+func (rtm *ResponsesToolMessage) ToChatAssistantMessageToolCall() *ChatAssistantMessageToolCall {
+	if rtm == nil {
+		return nil
+	}
+
+	toolCall := &ChatAssistantMessageToolCall{
+		ID:   rtm.CallID,
+		Type: Ptr("function"),
+		Function: ChatAssistantMessageToolCallFunction{
+			Name:      rtm.Name,
+			Arguments: "{}", // Default to empty JSON object for valid JSON unmarshaling
+		},
+	}
+
+	// Extract arguments string
+	if rtm.Arguments != nil {
+		toolCall.Function.Arguments = *rtm.Arguments
+	}
+
+	return toolCall
+}
+
+// ToResponsesToolMessage converts a ChatToolMessage (tool execution result) to ResponsesToolMessage format.
+// This creates a function_call_output message suitable for the Responses API.
+//
+// Returns:
+//   - *ResponsesMessage: A ResponsesMessage with type=function_call_output containing the tool result
+//
+// Example:
+//
+//	chatToolMsg := &ChatMessage{
+//	    Role: ChatMessageRoleTool,
+//	    ChatToolMessage: &ChatToolMessage{
+//	        ToolCallID: Ptr("call-123"),
+//	    },
+//	    Content: &ChatMessageContent{
+//	        ContentStr: Ptr("Result: 30"),
+//	    },
+//	}
+//	responsesMsg := chatToolMsg.ToResponsesToolMessage()
+func (cm *ChatMessage) ToResponsesToolMessage() *ResponsesMessage {
+	if cm == nil || cm.ChatToolMessage == nil {
+		return nil
+	}
+
+	msgType := ResponsesMessageTypeFunctionCallOutput
+
+	respMsg := &ResponsesMessage{
+		Type: &msgType,
+		ResponsesToolMessage: &ResponsesToolMessage{
+			CallID: cm.ChatToolMessage.ToolCallID,
+		},
+	}
+
+	// Extract output from content
+	if cm.Content != nil {
+		if cm.Content.ContentStr != nil {
+			output := *cm.Content.ContentStr
+			respMsg.ResponsesToolMessage.Output = &ResponsesToolMessageOutputStruct{
+				ResponsesToolCallOutputStr: &output,
+			}
+		} else if len(cm.Content.ContentBlocks) > 0 {
+			// For structured content blocks, convert to ResponsesMessageContentBlock
+			respBlocks := make([]ResponsesMessageContentBlock, len(cm.Content.ContentBlocks))
+			for i, block := range cm.Content.ContentBlocks {
+				respBlocks[i] = ResponsesMessageContentBlock{
+					Type:         ResponsesMessageContentBlockType(block.Type),
+					Text:         block.Text,
+					CacheControl: block.CacheControl,
+				}
+
+				// Map image
+				if block.ImageURLStruct != nil {
+					respBlocks[i].ResponsesInputMessageContentBlockImage = &ResponsesInputMessageContentBlockImage{
+						ImageURL: &block.ImageURLStruct.URL,
+						Detail:   block.ImageURLStruct.Detail,
+					}
+				}
+
+				// Map file
+				if block.File != nil {
+					respBlocks[i].FileID = block.File.FileID
+					respBlocks[i].ResponsesInputMessageContentBlockFile = &ResponsesInputMessageContentBlockFile{
+						FileData: block.File.FileData,
+						Filename: block.File.Filename,
+						FileType: block.File.FileType,
+					}
+				}
+
+				// Map audio
+				if block.InputAudio != nil {
+					format := ""
+					if block.InputAudio.Format != nil {
+						format = *block.InputAudio.Format
+					}
+					respBlocks[i].Audio = &ResponsesInputMessageContentBlockAudio{
+						Data:   block.InputAudio.Data,
+						Format: format,
+					}
+				}
+			}
+			respMsg.ResponsesToolMessage.Output = &ResponsesToolMessageOutputStruct{
+				ResponsesFunctionToolCallOutputBlocks: respBlocks,
+			}
+		}
+	}
+
+	return respMsg
+}
+
 // =============================================================================
 // TOOL CHOICE CONVERSION METHODS
 // =============================================================================
@@ -145,13 +269,13 @@ func (ctc *ChatToolChoice) ToResponsesToolChoice() *ResponsesToolChoice {
 
 		case ChatToolChoiceTypeFunction:
 			// Map function choice
-			if ctc.ChatToolChoiceStruct.Function.Name != "" {
+			if ctc.ChatToolChoiceStruct.Function != nil && ctc.ChatToolChoiceStruct.Function.Name != "" {
 				rtc.ResponsesToolChoiceStruct.Name = &ctc.ChatToolChoiceStruct.Function.Name
 			}
 
 		case ChatToolChoiceTypeAllowedTools:
 			// Map allowed tools
-			if len(ctc.ChatToolChoiceStruct.AllowedTools.Tools) > 0 {
+			if ctc.ChatToolChoiceStruct.AllowedTools != nil && len(ctc.ChatToolChoiceStruct.AllowedTools.Tools) > 0 {
 				tools := make([]ResponsesToolChoiceAllowedToolDef, len(ctc.ChatToolChoiceStruct.AllowedTools.Tools))
 				for i, tool := range ctc.ChatToolChoiceStruct.AllowedTools.Tools {
 					tools[i] = ResponsesToolChoiceAllowedToolDef{
@@ -165,14 +289,14 @@ func (ctc *ChatToolChoice) ToResponsesToolChoice() *ResponsesToolChoice {
 				rtc.ResponsesToolChoiceStruct.Tools = tools
 			}
 			// Copy the mode (e.g., "auto", "required")
-			if ctc.ChatToolChoiceStruct.AllowedTools.Mode != "" {
+			if ctc.ChatToolChoiceStruct.AllowedTools != nil && ctc.ChatToolChoiceStruct.AllowedTools.Mode != "" {
 				mode := ctc.ChatToolChoiceStruct.AllowedTools.Mode
 				rtc.ResponsesToolChoiceStruct.Mode = &mode
 			}
 
 		case ChatToolChoiceTypeCustom:
 			// Map custom choice
-			if ctc.ChatToolChoiceStruct.Custom.Name != "" {
+			if ctc.ChatToolChoiceStruct.Custom != nil && ctc.ChatToolChoiceStruct.Custom.Name != "" {
 				rtc.ResponsesToolChoiceStruct.Name = &ctc.ChatToolChoiceStruct.Custom.Name
 			}
 		}
@@ -215,14 +339,14 @@ func (tc *ResponsesToolChoice) ToChatToolChoice() *ChatToolChoice {
 
 		// Handle function choice
 		if tc.ResponsesToolChoiceStruct.Type == ResponsesToolChoiceTypeFunction && tc.ResponsesToolChoiceStruct.Name != nil {
-			ctc.ChatToolChoiceStruct.Function = ChatToolChoiceFunction{
+			ctc.ChatToolChoiceStruct.Function = &ChatToolChoiceFunction{
 				Name: *tc.ResponsesToolChoiceStruct.Name,
 			}
 		}
 
 		// Handle custom choice
 		if tc.ResponsesToolChoiceStruct.Type == ResponsesToolChoiceTypeCustom && tc.ResponsesToolChoiceStruct.Name != nil {
-			ctc.ChatToolChoiceStruct.Custom = ChatToolChoiceCustom{
+			ctc.ChatToolChoiceStruct.Custom = &ChatToolChoiceCustom{
 				Name: *tc.ResponsesToolChoiceStruct.Name,
 			}
 		}
@@ -244,7 +368,7 @@ func (tc *ResponsesToolChoice) ToChatToolChoice() *ChatToolChoice {
 			if tc.ResponsesToolChoiceStruct.Mode != nil && *tc.ResponsesToolChoiceStruct.Mode != "" {
 				mode = *tc.ResponsesToolChoiceStruct.Mode
 			}
-			ctc.ChatToolChoiceStruct.AllowedTools = ChatToolChoiceAllowedTools{
+			ctc.ChatToolChoiceStruct.AllowedTools = &ChatToolChoiceAllowedTools{
 				Mode:  mode,
 				Tools: tools,
 			}
@@ -292,8 +416,10 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 			}
 
 			rm := ResponsesMessage{
-				Type: &messageType,
-				Role: Ptr(ResponsesInputMessageRoleAssistant),
+				ID:     Ptr("fc_" + GetRandomString(50)),
+				Type:   &messageType,
+				Role:   Ptr(ResponsesInputMessageRoleAssistant),
+				Status: Ptr("completed"),
 				ResponsesToolMessage: &ResponsesToolMessage{
 					CallID:    callID,
 					Name:      namePtr,
@@ -324,14 +450,21 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 		role = ResponsesInputMessageRoleSystem
 	case ChatMessageRoleTool:
 		messageType = ResponsesMessageTypeFunctionCallOutput
-		role = ResponsesInputMessageRoleUser // Tool messages are typically user role in responses
+		role = "" // tool call output messages don't include a role field
 	case ChatMessageRoleDeveloper:
 		role = ResponsesInputMessageRoleDeveloper
 	}
 
 	rm := ResponsesMessage{
 		Type: &messageType,
-		Role: &role,
+	}
+
+	if role != "" {
+		rm.Role = &role
+	}
+
+	if role == ResponsesInputMessageRoleAssistant && messageType != ResponsesMessageTypeFunctionCallOutput {
+		rm.ID = Ptr("msg_" + GetRandomString(50))
 	}
 
 	// Handle refusal content specifically - use content blocks with ResponsesOutputMessageContentRefusal
@@ -347,12 +480,24 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 		}
 	} else if cm.Content != nil && cm.Content.ContentStr != nil {
 		// Convert regular string content (if input message then ContentStr, else ContentBlocks)
-		if cm.Role == ChatMessageRoleAssistant {
+		// Skip setting content for function_call_output - content should only be in output field
+		if messageType == ResponsesMessageTypeFunctionCallOutput {
+			// Don't set content for function_call_output - it will be set in ResponsesToolMessage.Output
+		} else if cm.Role == ChatMessageRoleAssistant {
 			rm.Content = &ResponsesMessageContent{
 				ContentBlocks: []ResponsesMessageContentBlock{
-					{Type: ResponsesOutputMessageContentTypeText, Text: cm.Content.ContentStr},
+					{
+						Type: ResponsesOutputMessageContentTypeText,
+						Text: cm.Content.ContentStr,
+						ResponsesOutputMessageContentText: &ResponsesOutputMessageContentText{
+							LogProbs:    []ResponsesOutputMessageContentTextLogProb{},
+							Annotations: []ResponsesOutputMessageContentTextAnnotation{},
+						},
+					},
 				},
 			}
+
+			rm.Status = Ptr("completed")
 		} else {
 			rm.Content = &ResponsesMessageContent{
 				ContentStr: cm.Content.ContentStr,
@@ -360,57 +505,62 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 		}
 	} else if cm.Content != nil && cm.Content.ContentBlocks != nil {
 		// Convert content blocks
-		responseBlocks := make([]ResponsesMessageContentBlock, len(cm.Content.ContentBlocks))
-		for i, block := range cm.Content.ContentBlocks {
-			blockType := ResponsesMessageContentBlockType(block.Type)
+		// Skip setting content blocks for function_call_output
+		if messageType == ResponsesMessageTypeFunctionCallOutput {
+			// Don't set content for function_call_output - it will be set in ResponsesToolMessage.Output
+		} else {
+			responseBlocks := make([]ResponsesMessageContentBlock, len(cm.Content.ContentBlocks))
+			for i, block := range cm.Content.ContentBlocks {
+				blockType := ResponsesMessageContentBlockType(block.Type)
 
-			switch block.Type {
-			case ChatContentBlockTypeText:
-				if cm.Role == ChatMessageRoleAssistant {
-					blockType = ResponsesOutputMessageContentTypeText
-				} else {
-					blockType = ResponsesInputMessageContentBlockTypeText
+				switch block.Type {
+				case ChatContentBlockTypeText:
+					if cm.Role == ChatMessageRoleAssistant {
+						blockType = ResponsesOutputMessageContentTypeText
+					} else {
+						blockType = ResponsesInputMessageContentBlockTypeText
+					}
+				case ChatContentBlockTypeImage:
+					blockType = ResponsesInputMessageContentBlockTypeImage
+				case ChatContentBlockTypeFile:
+					blockType = ResponsesInputMessageContentBlockTypeFile
+				case ChatContentBlockTypeInputAudio:
+					blockType = ResponsesInputMessageContentBlockTypeAudio
 				}
-			case ChatContentBlockTypeImage:
-				blockType = ResponsesInputMessageContentBlockTypeImage
-			case ChatContentBlockTypeFile:
-				blockType = ResponsesInputMessageContentBlockTypeFile
-			case ChatContentBlockTypeInputAudio:
-				blockType = ResponsesInputMessageContentBlockTypeAudio
-			}
 
-			responseBlocks[i] = ResponsesMessageContentBlock{
-				Type: blockType,
-				Text: block.Text,
-			}
+				responseBlocks[i] = ResponsesMessageContentBlock{
+					Type: blockType,
+					Text: block.Text,
+				}
 
-			// Convert specific block types
-			if block.ImageURLStruct != nil {
-				responseBlocks[i].ResponsesInputMessageContentBlockImage = &ResponsesInputMessageContentBlockImage{
-					ImageURL: &block.ImageURLStruct.URL,
-					Detail:   block.ImageURLStruct.Detail,
+				// Convert specific block types
+				if block.ImageURLStruct != nil {
+					responseBlocks[i].ResponsesInputMessageContentBlockImage = &ResponsesInputMessageContentBlockImage{
+						ImageURL: &block.ImageURLStruct.URL,
+						Detail:   block.ImageURLStruct.Detail,
+					}
+				}
+				if block.File != nil {
+					responseBlocks[i].ResponsesInputMessageContentBlockFile = &ResponsesInputMessageContentBlockFile{
+						FileData: block.File.FileData,
+						Filename: block.File.Filename,
+					}
+					responseBlocks[i].FileID = block.File.FileID
+				}
+				if block.InputAudio != nil {
+					format := ""
+					if block.InputAudio.Format != nil {
+						format = *block.InputAudio.Format
+					}
+					responseBlocks[i].Audio = &ResponsesInputMessageContentBlockAudio{
+						Data:   block.InputAudio.Data,
+						Format: format,
+					}
 				}
 			}
-			if block.File != nil {
-				responseBlocks[i].ResponsesInputMessageContentBlockFile = &ResponsesInputMessageContentBlockFile{
-					FileData: block.File.FileData,
-					Filename: block.File.Filename,
-				}
-				responseBlocks[i].FileID = block.File.FileID
+			rm.Content = &ResponsesMessageContent{
+				ContentBlocks: responseBlocks,
 			}
-			if block.InputAudio != nil {
-				format := ""
-				if block.InputAudio.Format != nil {
-					format = *block.InputAudio.Format
-				}
-				responseBlocks[i].Audio = &ResponsesInputMessageContentBlockAudio{
-					Data:   block.InputAudio.Data,
-					Format: format,
-				}
-			}
-		}
-		rm.Content = &ResponsesMessageContent{
-			ContentBlocks: responseBlocks,
 		}
 	}
 
@@ -422,9 +572,56 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 		}
 
 		// If tool output content exists, add it to function_call_output
-		if rm.Content != nil && rm.Content.ContentStr != nil && *rm.Content.ContentStr != "" {
-			rm.ResponsesToolMessage.Output = &ResponsesToolMessageOutputStruct{
-				ResponsesToolCallOutputStr: rm.Content.ContentStr,
+		// For function_call_output, get content from cm.Content since rm.Content is not set
+		if messageType == ResponsesMessageTypeFunctionCallOutput && cm.Content != nil {
+			// Prefer ContentStr if present
+			if cm.Content.ContentStr != nil && *cm.Content.ContentStr != "" {
+				rm.ResponsesToolMessage.Output = &ResponsesToolMessageOutputStruct{
+					ResponsesToolCallOutputStr: cm.Content.ContentStr,
+				}
+			} else if len(cm.Content.ContentBlocks) > 0 {
+				// For structured content blocks, convert to ResponsesMessageContentBlock
+				respBlocks := make([]ResponsesMessageContentBlock, len(cm.Content.ContentBlocks))
+				for i, block := range cm.Content.ContentBlocks {
+					respBlocks[i] = ResponsesMessageContentBlock{
+						Type:         ResponsesMessageContentBlockType(block.Type),
+						Text:         block.Text,
+						CacheControl: block.CacheControl,
+					}
+
+					// Map image
+					if block.ImageURLStruct != nil {
+						respBlocks[i].ResponsesInputMessageContentBlockImage = &ResponsesInputMessageContentBlockImage{
+							ImageURL: &block.ImageURLStruct.URL,
+							Detail:   block.ImageURLStruct.Detail,
+						}
+					}
+
+					// Map file
+					if block.File != nil {
+						respBlocks[i].FileID = block.File.FileID
+						respBlocks[i].ResponsesInputMessageContentBlockFile = &ResponsesInputMessageContentBlockFile{
+							FileData: block.File.FileData,
+							Filename: block.File.Filename,
+							FileType: block.File.FileType,
+						}
+					}
+
+					// Map audio
+					if block.InputAudio != nil {
+						format := ""
+						if block.InputAudio.Format != nil {
+							format = *block.InputAudio.Format
+						}
+						respBlocks[i].Audio = &ResponsesInputMessageContentBlockAudio{
+							Data:   block.InputAudio.Data,
+							Format: format,
+						}
+					}
+				}
+				rm.ResponsesToolMessage.Output = &ResponsesToolMessageOutputStruct{
+					ResponsesFunctionToolCallOutputBlocks: respBlocks,
+				}
 			}
 		}
 	}
@@ -575,7 +772,7 @@ func ToChatMessages(rms []ResponsesMessage) []ChatMessage {
 					case ResponsesInputMessageContentBlockTypeImage:
 						chatBlockType = ChatContentBlockTypeImage // "input_image" -> "image_url"
 					case ResponsesInputMessageContentBlockTypeFile:
-						chatBlockType = ChatContentBlockTypeFile // "input_file" -> "input_file" (same)
+						chatBlockType = ChatContentBlockTypeFile // "input_file" -> "file"
 					case ResponsesInputMessageContentBlockTypeAudio:
 						chatBlockType = ChatContentBlockTypeInputAudio // "input_audio" -> "input_audio" (same)
 					default:
@@ -651,12 +848,15 @@ func (cu *BifrostLLMUsage) ToResponsesResponseUsage() *ResponsesResponseUsage {
 
 	if cu.PromptTokensDetails != nil {
 		usage.InputTokensDetails = &ResponsesResponseInputTokens{
+			TextTokens:   cu.PromptTokensDetails.TextTokens,
 			AudioTokens:  cu.PromptTokensDetails.AudioTokens,
+			ImageTokens:  cu.PromptTokensDetails.ImageTokens,
 			CachedTokens: cu.PromptTokensDetails.CachedTokens,
 		}
 	}
 	if cu.CompletionTokensDetails != nil {
 		usage.OutputTokensDetails = &ResponsesResponseOutputTokens{
+			TextTokens:               cu.CompletionTokensDetails.TextTokens,
 			AcceptedPredictionTokens: cu.CompletionTokensDetails.AcceptedPredictionTokens,
 			AudioTokens:              cu.CompletionTokensDetails.AudioTokens,
 			ReasoningTokens:          cu.CompletionTokensDetails.ReasoningTokens,
@@ -684,14 +884,18 @@ func (ru *ResponsesResponseUsage) ToBifrostLLMUsage() *BifrostLLMUsage {
 
 	if ru.InputTokensDetails != nil {
 		usage.PromptTokensDetails = &ChatPromptTokensDetails{
+			TextTokens:   ru.InputTokensDetails.TextTokens,
 			AudioTokens:  ru.InputTokensDetails.AudioTokens,
+			ImageTokens:  ru.InputTokensDetails.ImageTokens,
 			CachedTokens: ru.InputTokensDetails.CachedTokens,
 		}
 	}
 	if ru.OutputTokensDetails != nil {
 		usage.CompletionTokensDetails = &ChatCompletionTokensDetails{
+			TextTokens:               ru.OutputTokensDetails.TextTokens,
 			AcceptedPredictionTokens: ru.OutputTokensDetails.AcceptedPredictionTokens,
 			AudioTokens:              ru.OutputTokensDetails.AudioTokens,
+			ImageTokens:              ru.OutputTokensDetails.ImageTokens,
 			ReasoningTokens:          ru.OutputTokensDetails.ReasoningTokens,
 			RejectedPredictionTokens: ru.OutputTokensDetails.RejectedPredictionTokens,
 			CitationTokens:           ru.OutputTokensDetails.CitationTokens,
@@ -708,55 +912,55 @@ func (ru *ResponsesResponseUsage) ToBifrostLLMUsage() *BifrostLLMUsage {
 // =============================================================================
 
 // ToResponsesRequest converts a BifrostChatRequest to BifrostResponsesRequest format
-func (bcr *BifrostChatRequest) ToResponsesRequest() *BifrostResponsesRequest {
-	if bcr == nil {
+func (cr *BifrostChatRequest) ToResponsesRequest() *BifrostResponsesRequest {
+	if cr == nil {
 		return &BifrostResponsesRequest{}
 	}
 
 	brr := &BifrostResponsesRequest{
-		Provider:  bcr.Provider,
-		Model:     bcr.Model,
-		Fallbacks: bcr.Fallbacks, // Copy fallbacks as-is
+		Provider:  cr.Provider,
+		Model:     cr.Model,
+		Fallbacks: cr.Fallbacks, // Copy fallbacks as-is
 	}
 
 	// Convert Input messages using existing ChatMessage.ToResponsesMessages()
 	var allResponsesMessages []ResponsesMessage
-	for _, chatMsg := range bcr.Input {
+	for _, chatMsg := range cr.Input {
 		responsesMessages := chatMsg.ToResponsesMessages()
 		allResponsesMessages = append(allResponsesMessages, responsesMessages...)
 	}
 	brr.Input = allResponsesMessages
 
 	// Convert Parameters
-	if bcr.Params != nil {
+	if cr.Params != nil {
 		brr.Params = &ResponsesParameters{
 			// Map common fields
-			ParallelToolCalls: bcr.Params.ParallelToolCalls,
-			PromptCacheKey:    bcr.Params.PromptCacheKey,
-			SafetyIdentifier:  bcr.Params.SafetyIdentifier,
-			ServiceTier:       bcr.Params.ServiceTier,
-			Store:             bcr.Params.Store,
-			Temperature:       bcr.Params.Temperature,
-			TopLogProbs:       bcr.Params.TopLogProbs,
-			TopP:              bcr.Params.TopP,
-			ExtraParams:       bcr.Params.ExtraParams,
+			ParallelToolCalls: cr.Params.ParallelToolCalls,
+			PromptCacheKey:    cr.Params.PromptCacheKey,
+			SafetyIdentifier:  cr.Params.SafetyIdentifier,
+			ServiceTier:       cr.Params.ServiceTier,
+			Store:             cr.Params.Store,
+			Temperature:       cr.Params.Temperature,
+			TopLogProbs:       cr.Params.TopLogProbs,
+			TopP:              cr.Params.TopP,
+			ExtraParams:       cr.Params.ExtraParams,
 
 			// Map specific fields
-			MaxOutputTokens: bcr.Params.MaxCompletionTokens, // max_completion_tokens -> max_output_tokens
-			Metadata:        bcr.Params.Metadata,
+			MaxOutputTokens: cr.Params.MaxCompletionTokens, // max_completion_tokens -> max_output_tokens
+			Metadata:        cr.Params.Metadata,
 		}
 
 		// Convert StreamOptions
-		if bcr.Params.StreamOptions != nil {
+		if cr.Params.StreamOptions != nil {
 			brr.Params.StreamOptions = &ResponsesStreamOptions{
-				IncludeObfuscation: bcr.Params.StreamOptions.IncludeObfuscation,
+				IncludeObfuscation: cr.Params.StreamOptions.IncludeObfuscation,
 			}
 		}
 
 		// Convert Tools using existing ChatTool.ToResponsesTool()
-		if len(bcr.Params.Tools) > 0 {
-			responsesTools := make([]ResponsesTool, 0, len(bcr.Params.Tools))
-			for _, chatTool := range bcr.Params.Tools {
+		if len(cr.Params.Tools) > 0 {
+			responsesTools := make([]ResponsesTool, 0, len(cr.Params.Tools))
+			for _, chatTool := range cr.Params.Tools {
 				responsesTool := chatTool.ToResponsesTool()
 				responsesTools = append(responsesTools, *responsesTool)
 			}
@@ -764,28 +968,29 @@ func (bcr *BifrostChatRequest) ToResponsesRequest() *BifrostResponsesRequest {
 		}
 
 		// Convert ToolChoice using existing ChatToolChoice.ToResponsesToolChoice()
-		if bcr.Params.ToolChoice != nil {
-			responsesToolChoice := bcr.Params.ToolChoice.ToResponsesToolChoice()
+		if cr.Params.ToolChoice != nil {
+			responsesToolChoice := cr.Params.ToolChoice.ToResponsesToolChoice()
 			brr.Params.ToolChoice = responsesToolChoice
 		}
 
 		// Handle Reasoning from reasoning_effort
-		if bcr.Params.ReasoningEffort != nil {
+		if cr.Params.Reasoning != nil && (cr.Params.Reasoning.Effort != nil || cr.Params.Reasoning.MaxTokens != nil) {
 			brr.Params.Reasoning = &ResponsesParametersReasoning{
-				Effort: bcr.Params.ReasoningEffort,
+				Effort:    cr.Params.Reasoning.Effort,
+				MaxTokens: cr.Params.Reasoning.MaxTokens,
 			}
 		}
 
 		// Handle Verbosity
-		if bcr.Params.Verbosity != nil {
+		if cr.Params.Verbosity != nil {
 			if brr.Params.Text == nil {
 				brr.Params.Text = &ResponsesTextConfig{}
 			}
-			brr.Params.Text.Verbosity = bcr.Params.Verbosity
+			brr.Params.Text.Verbosity = cr.Params.Verbosity
 		}
 	}
 
-	brr.RawRequestBody = bcr.RawRequestBody
+	brr.RawRequestBody = cr.RawRequestBody
 
 	return brr
 }
@@ -848,9 +1053,12 @@ func (brr *BifrostResponsesRequest) ToChatRequest() *BifrostChatRequest {
 			bcr.Params.ToolChoice = chatToolChoice
 		}
 
-		// Handle ReasoningEffort from Reasoning
-		if brr.Params.Reasoning != nil && brr.Params.Reasoning.Effort != nil {
-			bcr.Params.ReasoningEffort = brr.Params.Reasoning.Effort
+		// Handle Reasoning from Reasoning
+		if brr.Params.Reasoning != nil {
+			bcr.Params.Reasoning = &ChatReasoning{
+				Effort:    brr.Params.Reasoning.Effort,
+				MaxTokens: brr.Params.Reasoning.MaxTokens,
+			}
 		}
 
 		// Handle Verbosity from Text config
@@ -877,6 +1085,8 @@ func (cr *BifrostChatResponse) ToBifrostResponsesResponse() *BifrostResponsesRes
 
 	// Create new BifrostResponsesResponse from Chat fields
 	responsesResp := &BifrostResponsesResponse{
+		ID:            Ptr(cr.ID),
+		Object:        "response",
 		CreatedAt:     cr.Created,
 		Model:         cr.Model,
 		Citations:     cr.Citations,
@@ -892,7 +1102,6 @@ func (cr *BifrostChatResponse) ToBifrostResponsesResponse() *BifrostResponsesRes
 			responsesMessages := choice.ChatNonStreamResponseChoice.Message.ToResponsesMessages()
 			outputMessages = append(outputMessages, responsesMessages...)
 		}
-		// Note: Stream choices would need different handling if needed
 	}
 
 	if len(outputMessages) > 0 {
@@ -1143,8 +1352,12 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 	}
 
 	// Handle different types of streaming content
-	if delta.Content != nil && *delta.Content != "" {
-		// Text content delta
+	hasContent := delta.Content != nil && *delta.Content != ""
+	hasReasoning := delta.Reasoning != nil && *delta.Reasoning != ""
+
+	// Create output items if we have content OR reasoning (for reasoning-only models)
+	if hasContent || (hasReasoning && !state.TextItemAdded) {
+		// Text content delta (or reasoning-only response)
 		if !state.TextItemAdded {
 			// Add text item if not already added
 			outputIndex := 0
@@ -1185,6 +1398,10 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 			part := &ResponsesMessageContentBlock{
 				Type: ResponsesOutputMessageContentTypeText,
 				Text: &emptyText,
+				ResponsesOutputMessageContentText: &ResponsesOutputMessageContentText{
+					LogProbs:    []ResponsesOutputMessageContentTextLogProb{},
+					Annotations: []ResponsesOutputMessageContentTextAnnotation{},
+				},
 			}
 			responses = append(responses, &BifrostResponsesStreamResponse{
 				Type:           ResponsesStreamResponseTypeContentPartAdded,
@@ -1198,22 +1415,35 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 			state.SequenceNumber++
 		}
 
-		// Emit text delta
-		itemID := state.ItemIDs["text"]
-		response := &BifrostResponsesStreamResponse{
-			Type:           ResponsesStreamResponseTypeOutputTextDelta,
-			SequenceNumber: state.SequenceNumber,
-			OutputIndex:    Ptr(0),
-			ContentIndex:   Ptr(0),
-			Delta:          delta.Content,
-			ExtraFields:    cr.ExtraFields,
+		// Emit text delta - at least one is required for lifecycle validation
+		// Even for reasoning-only responses, we emit an empty delta on the first chunk
+		if hasContent || (!state.TextItemHasContent && (hasReasoning || hasContent)) {
+			itemID := state.ItemIDs["text"]
+
+			var contentDelta string
+			if hasContent {
+				contentDelta = *delta.Content
+			} else {
+				// For reasoning-only responses, emit empty delta on first chunk
+				contentDelta = ""
+			}
+
+			response := &BifrostResponsesStreamResponse{
+				Type:           ResponsesStreamResponseTypeOutputTextDelta,
+				SequenceNumber: state.SequenceNumber,
+				OutputIndex:    Ptr(0),
+				ContentIndex:   Ptr(0),
+				Delta:          &contentDelta,
+				LogProbs:       []ResponsesOutputMessageContentTextLogProb{},
+				ExtraFields:    cr.ExtraFields,
+			}
+			if itemID != "" {
+				response.ItemID = &itemID
+			}
+			responses = append(responses, response)
+			state.SequenceNumber++
+			state.TextItemHasContent = true
 		}
-		if itemID != "" {
-			response.ItemID = &itemID
-		}
-		responses = append(responses, response)
-		state.SequenceNumber++
-		state.TextItemHasContent = true
 	}
 
 	if len(delta.ToolCalls) > 0 {
@@ -1253,25 +1483,42 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 						ContentIndex:   Ptr(0),
 						ItemID:         &itemID,
 						Text:           &emptyText,
+						LogProbs:       []ResponsesOutputMessageContentTextLogProb{},
 						ExtraFields:    cr.ExtraFields,
 					})
 					state.SequenceNumber++
 
 					// Emit content_part.done
+					part := &ResponsesMessageContentBlock{
+						Type: ResponsesOutputMessageContentTypeText,
+						Text: &emptyText,
+						ResponsesOutputMessageContentText: &ResponsesOutputMessageContentText{
+							LogProbs:    []ResponsesOutputMessageContentTextLogProb{},
+							Annotations: []ResponsesOutputMessageContentTextAnnotation{},
+						},
+					}
 					responses = append(responses, &BifrostResponsesStreamResponse{
 						Type:           ResponsesStreamResponseTypeContentPartDone,
 						SequenceNumber: state.SequenceNumber,
 						OutputIndex:    Ptr(outputIndex),
 						ContentIndex:   Ptr(0),
 						ItemID:         &itemID,
+						Part:           part,
 						ExtraFields:    cr.ExtraFields,
 					})
 					state.SequenceNumber++
 
 					// Emit output_item.done
 					statusCompleted := "completed"
+					messageType := ResponsesMessageTypeMessage
+					role := ResponsesInputMessageRoleAssistant
 					doneItem := &ResponsesMessage{
+						Type:   &messageType,
+						Role:   &role,
 						Status: &statusCompleted,
+						Content: &ResponsesMessageContent{
+							ContentBlocks: []ResponsesMessageContentBlock{},
+						},
 					}
 					if itemID != "" {
 						doneItem.ID = &itemID
@@ -1354,13 +1601,13 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 		}
 	}
 
-	if delta.Thought != nil && *delta.Thought != "" {
+	if delta.Reasoning != nil && *delta.Reasoning != "" {
 		// Reasoning/thought content delta (for models that support reasoning)
 		response := &BifrostResponsesStreamResponse{
 			Type:           ResponsesStreamResponseTypeReasoningSummaryTextDelta,
 			SequenceNumber: state.SequenceNumber,
 			OutputIndex:    Ptr(0),
-			Delta:          delta.Thought,
+			Delta:          delta.Reasoning,
 			ExtraFields:    cr.ExtraFields,
 		}
 		responses = append(responses, response)
@@ -1382,8 +1629,8 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 
 	// Check if this is a completion chunk with finish_reason
 	if choice.FinishReason != nil {
-		// Close text item if still open and has content
-		if state.TextItemAdded && !state.TextItemClosed && state.TextItemHasContent {
+		// Close text item if still open (regardless of whether it has content, to support reasoning-only responses)
+		if state.TextItemAdded && !state.TextItemClosed {
 			outputIndex := 0
 			itemID := state.ItemIDs["text"]
 
@@ -1396,25 +1643,42 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 				ContentIndex:   Ptr(0),
 				ItemID:         &itemID,
 				Text:           &emptyText,
+				LogProbs:       []ResponsesOutputMessageContentTextLogProb{},
 				ExtraFields:    cr.ExtraFields,
 			})
 			state.SequenceNumber++
 
 			// Emit content_part.done
+			part := &ResponsesMessageContentBlock{
+				Type: ResponsesOutputMessageContentTypeText,
+				Text: &emptyText,
+				ResponsesOutputMessageContentText: &ResponsesOutputMessageContentText{
+					LogProbs:    []ResponsesOutputMessageContentTextLogProb{},
+					Annotations: []ResponsesOutputMessageContentTextAnnotation{},
+				},
+			}
 			responses = append(responses, &BifrostResponsesStreamResponse{
 				Type:           ResponsesStreamResponseTypeContentPartDone,
 				SequenceNumber: state.SequenceNumber,
 				OutputIndex:    Ptr(outputIndex),
 				ContentIndex:   Ptr(0),
 				ItemID:         &itemID,
+				Part:           part,
 				ExtraFields:    cr.ExtraFields,
 			})
 			state.SequenceNumber++
 
 			// Emit output_item.done
 			statusCompleted := "completed"
+			messageType := ResponsesMessageTypeMessage
+			role := ResponsesInputMessageRoleAssistant
 			doneItem := &ResponsesMessage{
+				Type:   &messageType,
+				Role:   &role,
 				Status: &statusCompleted,
+				Content: &ResponsesMessageContent{
+					ContentBlocks: []ResponsesMessageContentBlock{},
+				},
 			}
 			if itemID != "" {
 				doneItem.ID = &itemID
@@ -1455,8 +1719,21 @@ func (cr *BifrostChatResponse) ToBifrostResponsesStreamResponse(state *ChatToRes
 
 				// Emit output_item.done for function call
 				statusCompleted := "completed"
+				messageType := ResponsesMessageTypeFunctionCall
+				callName, hasName := state.ToolCallNames[toolCallID]
+				var callNamePtr *string
+				if hasName && callName != "" {
+					callNamePtr = &callName
+				}
+				argsValue := args
 				outputItemDone := &ResponsesMessage{
+					Type:   &messageType,
 					Status: &statusCompleted,
+					ResponsesToolMessage: &ResponsesToolMessage{
+						CallID:    &toolCallID,
+						Name:      callNamePtr,
+						Arguments: &argsValue,
+					},
 				}
 				if itemID != "" {
 					outputItemDone.ID = &itemID

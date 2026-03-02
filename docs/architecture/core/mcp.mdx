@@ -137,7 +137,7 @@ graph TB
 - **Security:** Similar to HTTP with streaming capabilities
 - **Benefits:** Real-time updates, persistent connections, event-driven
 
-> **MCP Configuration:** [MCP Setup Guide →](../../features/mcp)
+> **MCP Configuration:** [MCP Setup Guide →](../../mcp/overview)
 
 ---
 
@@ -252,9 +252,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   -H "x-bf-mcp-include-clients: filesystem,websearch" \
   -d '{"model": "gpt-4o-mini", "messages": [...]}'
 
-# Include only specific tools 
+# Include only specific tools
 curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "x-bf-mcp-include-tools: filesystem/read_file,websearch/search" \
+  -H "x-bf-mcp-include-tools: filesystem-read_file,websearch-search" \
   -d '{"model": "gpt-4o-mini", "messages": [...]}'
 ```
 
@@ -272,7 +272,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 - **Audit Trail** - Track which tools are used by which requests
 - **Risk Mitigation** - Prevent access to dangerous operations
 
-> **📖 Tool Filtering:** [MCP Tool Control →](../../features/mcp)
+> **📖 Tool Filtering:** [MCP Tool Control →](../../mcp/filtering)
 
 ---
 
@@ -441,6 +441,435 @@ This flow ensures that while AI models can discover and request tool usage, all 
 
 ---
 
+## Agent Mode Architecture
+
+Agent Mode transforms Bifrost into an autonomous agent runtime by automatically executing pre-approved tools. This section details the internal architecture of the agent execution loop.
+
+### **Agent Execution Loop**
+
+The agent mode operates as an iterative loop that continues until one of the termination conditions is met:
+
+```mermaid
+flowchart TD
+    subgraph "Agent Mode Entry"
+        A["📥 Incoming Chat Request"] --> B{"🔍 Check MCP Config<br/>Any tools_to_auto_execute?"}
+        B -->|No| C["📤 Standard Flow<br/>Return tool_calls for manual execution"]
+        B -->|Yes| D["🤖 Enter Agent Loop"]
+    end
+
+    subgraph "Agent Execution Loop"
+        D --> E["🌐 Send to LLM Provider<br/>With available tools"]
+        E --> F{"🔧 Response has<br/>tool_calls?"}
+        F -->|No| G["✅ Return Final Response<br/>No more tools needed"]
+        F -->|Yes| H["📋 Classify Tool Calls"]
+
+        H --> I{"🔐 Separate by<br/>auto-execute status"}
+        I --> J["⚡ Auto-Executable Tools"]
+        I --> K["🛡️ Non-Auto-Executable Tools"]
+
+        J --> L["🔄 Execute in Parallel<br/>Via ToolsManager"]
+        L --> M["📊 Collect Results"]
+
+        K --> N{"Any non-auto<br/>tools found?"}
+        N -->|Yes| O["🛑 Exit Loop Early<br/>Return mixed response"]
+        N -->|No| P{"⏱️ Max depth<br/>reached?"}
+
+        M --> P
+        P -->|Yes| Q["⚠️ Return Current State<br/>May have pending tools"]
+        P -->|No| R["📝 Add results to history"]
+        R --> E
+    end
+
+    subgraph "Response Handling"
+        O --> S["📦 Create Mixed Response<br/>• Content: executed results JSON<br/>• tool_calls: pending tools<br/>• finish_reason: stop"]
+        G --> T["📦 Standard Response<br/>Final answer from LLM"]
+        Q --> U["📦 Depth Limit Response<br/>Current state with any pending"]
+    end
+
+    style D fill:#e3f2fd
+    style L fill:#e8f5e9
+    style O fill:#fff3e0
+    style S fill:#fce4ec
+```
+
+### **Tool Classification System**
+
+When the LLM returns tool calls, Bifrost classifies each tool based on the client configuration:
+
+```mermaid
+flowchart LR
+    subgraph "Tool Call Classification"
+        TC["🔧 Tool Call<br/>from LLM Response"] --> CHECK{"Tool in<br/>tools_to_execute?"}
+        CHECK -->|No| SKIP["❌ Skip<br/>Not allowed"]
+        CHECK -->|Yes| AUTO{"Tool in<br/>tools_to_auto_execute?"}
+        AUTO -->|Yes| EXEC["⚡ Auto-Execute<br/>Run immediately"]
+        AUTO -->|No| MANUAL["🛡️ Manual<br/>Return to caller"]
+    end
+
+    subgraph "Configuration Example"
+        CONFIG["MCPClientConfig"]
+        CONFIG --> TE["tools_to_execute: [*]<br/>All tools available"]
+        CONFIG --> TAE["tools_to_auto_execute:<br/>[read_file, list_dir]"]
+    end
+
+    style EXEC fill:#c8e6c9
+    style MANUAL fill:#fff9c4
+    style SKIP fill:#ffcdd2
+```
+
+### **Mixed Tool Response Format**
+
+When a response contains both auto-executable and non-auto-executable tools, the agent creates a special response format:
+
+<AccordionGroup>
+  <Accordion title="Chat API Response Format" icon="message" defaultOpen>
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "choices": [{
+    "index": 0,
+    "finish_reason": "stop",
+    "message": {
+      "role": "assistant",
+      "content": "The Output from allowed tools calls is - {\"filesystem_read_file\":\"file contents here\",\"filesystem_list_directory\":\"[\\\"file1.txt\\\",\\\"file2.txt\\\"]\"}\n\nNow I shall call these tools next...",
+      "tool_calls": [
+        {
+          "id": "call_write_123",
+          "type": "function",
+          "function": {
+            "name": "filesystem_write_file",
+            "arguments": "{\"path\":\"output.txt\",\"content\":\"...\"}"
+          }
+        }
+      ]
+    }
+  }]
+}
+```
+
+<Note>
+The `content` field contains JSON-formatted results from auto-executed tools. The `tool_calls` array contains only non-auto-executable tools awaiting approval. Setting `finish_reason` to `"stop"` ensures the agent loop exits.
+</Note>
+
+  </Accordion>
+
+  <Accordion title="Responses API Format" icon="code">
+
+```json
+{
+  "id": "resp-abc123",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [{
+        "type": "text",
+        "text": "The Output from allowed tools calls is - {...}\n\nNow I shall call these tools next..."
+      }]
+    },
+    {
+      "type": "function_call",
+      "role": "assistant",
+      "call_id": "call_write_123",
+      "name": "filesystem_write_file",
+      "arguments": "{\"path\":\"output.txt\",\"content\":\"...\"}"
+    }
+  ]
+}
+```
+
+  </Accordion>
+</AccordionGroup>
+
+### **Agent Depth Control**
+
+The `max_agent_depth` setting prevents infinite loops and controls resource usage:
+
+```mermaid
+graph LR
+    subgraph "Depth Tracking"
+        D0["Depth 0<br/>Initial Request"] --> D1["Depth 1<br/>First tool execution"]
+        D1 --> D2["Depth 2<br/>Second iteration"]
+        D2 --> D3["Depth 3<br/>..."]
+        D3 --> DN["Depth N<br/>Max reached"]
+    end
+
+    DN --> EXIT["🛑 Force Exit<br/>Return current state"]
+
+    subgraph "Configuration"
+        CFG["MCPToolManagerConfig"]
+        CFG --> MAX["max_agent_depth: 10<br/>(default)"]
+        CFG --> TIMEOUT["tool_execution_timeout:<br/>30s per tool"]
+    end
+```
+
+<Warning>
+When max depth is reached, the response may contain pending tool calls that weren't executed. Your application should handle this gracefully.
+</Warning>
+
+---
+
+## Code Mode Architecture
+
+Code Mode enables AI models to write and execute Python code (Starlark) that orchestrates multiple MCP tools in a single request. This provides a powerful meta-layer for complex multi-tool workflows.
+
+### **Code Mode System Overview**
+
+```mermaid
+graph TB
+    subgraph "Code Mode Components"
+        VM["🖥️ Starlark Interpreter<br/>Python-like Runtime"]
+        VFS["📁 Virtual File System<br/>Tool Definitions as .pyi"]
+        EXEC["⚙️ Code Executor<br/>Sandboxed Execution"]
+    end
+
+    subgraph "Meta Tools"
+        LIST["listToolFiles()<br/>Discover available servers"]
+        READ["readToolFile(fileName)<br/>Get tool signatures"]
+        DOCS["getToolDocs(server, tool)<br/>Get detailed docs"]
+        CODE["executeToolCode(code)<br/>Run Python code"]
+    end
+
+    subgraph "MCP Integration"
+        TOOLS["🔧 Connected MCP Tools"]
+        RESULTS["📊 Tool Results"]
+    end
+
+    LLM["🤖 LLM"] --> LIST
+    LIST --> VFS
+    VFS --> LLM
+    LLM --> READ
+    READ --> VFS
+    VFS --> LLM
+    LLM --> DOCS
+    DOCS --> VFS
+    VFS --> LLM
+    LLM --> CODE
+    CODE --> VM
+    VM --> EXEC
+    EXEC --> TOOLS
+    TOOLS --> RESULTS
+    RESULTS --> LLM
+
+    style VM fill:#e8eaf6
+    style VFS fill:#e3f2fd
+    style CODE fill:#e8f5e9
+```
+
+### **Virtual File System (VFS)**
+
+Code Mode generates Python stub files (`.pyi`) for all connected MCP tools, providing compact function signatures:
+
+<Tabs>
+  <Tab title="Server-Level Binding">
+
+When `code_mode_binding_level: "server"` (default), tools are grouped by MCP client:
+
+```
+servers/
+├── filesystem.pyi      → All filesystem tools
+├── web_search.pyi      → All web search tools
+└── database.pyi        → All database tools
+```
+
+**Generated Stub Example:**
+```python
+# servers/filesystem.pyi
+# Usage: filesystem.tool_name(param=value)
+# For detailed docs: use getToolDocs(server="filesystem", tool="tool_name")
+
+def read_file(path: str) -> dict:  # Read contents of a file
+def write_file(path: str, content: str) -> dict:  # Write content to a file
+def list_directory(path: str) -> dict:  # List directory contents
+```
+
+**Usage in Code:**
+```python
+files = filesystem.list_directory(path=".")
+content = filesystem.read_file(path=files["entries"][0])
+result = content
+```
+
+  </Tab>
+  <Tab title="Tool-Level Binding">
+
+When `code_mode_binding_level: "tool"`, each tool gets its own file:
+
+```
+servers/
+├── filesystem/
+│   ├── read_file.pyi
+│   ├── write_file.pyi
+│   └── list_directory.pyi
+├── web_search/
+│   └── search.pyi
+└── database/
+    └── query.pyi
+```
+
+**Generated Stub Example:**
+```python
+# servers/filesystem/read_file.pyi
+# Usage: filesystem.read_file(param=value)
+
+def read_file(path: str) -> dict:  # Read contents of a file
+```
+
+**Usage in Code:**
+```python
+content = filesystem.read_file(path="config.json")
+result = content
+```
+
+  </Tab>
+</Tabs>
+
+### **Code Execution Flow**
+
+```mermaid
+sequenceDiagram
+    participant LLM as 🤖 LLM
+    participant CM as 📝 Code Mode Handler
+    participant VM as 🖥️ Starlark Interpreter
+    participant TM as 🔧 Tools Manager
+    participant MCP as 🌐 MCP Servers
+
+    LLM->>CM: executeToolCode({ code: "..." })
+    CM->>VM: Initialize sandbox
+    CM->>VM: Inject tool bindings
+    CM->>VM: Execute Python code
+
+    loop For each tool call in code
+        VM->>TM: server.tool(param=value)
+        TM->>MCP: Execute tool
+        MCP-->>TM: Tool result
+        TM-->>VM: Return result
+    end
+
+    VM-->>CM: Execution result
+    CM-->>LLM: { result, logs }
+```
+
+### **Starlark Sandbox**
+
+The code execution environment is carefully sandboxed using Starlark, a Python-like language designed for configuration and embedded scripting:
+
+<AccordionGroup>
+  <Accordion title="Available Features" icon="check" defaultOpen>
+
+  - ✅ **Python-like syntax** - Familiar Python syntax and semantics
+  - ✅ **Synchronous calls** - No async/await needed, direct function calls
+  - ✅ **List comprehensions** - `[x for x in items if condition]`
+  - ✅ **print()** - Output captured and returned in logs
+  - ✅ **Dict/List operations** - Standard Python data structures
+  - ✅ **Tool bindings** - All connected MCP tools as globals
+  </Accordion>
+
+  <Accordion title="Restricted Features" icon="ban">
+
+  - ❌ **Imports** - No `import` statements (tools are pre-bound)
+  - ❌ **Classes** - Use dicts and functions instead
+  - ❌ **File I/O** - No direct filesystem access (use MCP tools)
+  - ❌ **Network** - No direct network access (use MCP tools)
+  - ❌ **Randomness/Time** - Deterministic execution only
+
+  </Accordion>
+</AccordionGroup>
+
+### **Code Mode Security Model**
+
+```mermaid
+graph TB
+    subgraph "Security Layers"
+        L1["🔒 Code Validation<br/>Syntax checking before execution"]
+        L2["🛡️ Sandboxed Runtime<br/>No external module access"]
+        L3["⏱️ Execution Timeout<br/>Bounded runtime"]
+        L4["🔐 Tool ACL<br/>Only allowed tools accessible"]
+    end
+
+    subgraph "Execution Boundaries"
+        B1["No filesystem access<br/>(except via MCP tools)"]
+        B2["No network access<br/>(except via MCP tools)"]
+        B3["No process spawning"]
+        B4["Memory isolation enforced"]
+    end
+
+    L1 --> L2 --> L3 --> L4
+    L4 --> B1
+    L4 --> B2
+    L4 --> B3
+    L4 --> B4
+```
+
+### **Code Mode Configuration**
+
+<Tabs>
+  <Tab title="Gateway (config.json)">
+
+```json
+{
+  "mcp": {
+    "client_configs": [
+      {
+        "name": "filesystem",
+        "is_code_mode_client": true,
+        "connection_type": "stdio",
+        "stdio_config": {
+          "command": "npx",
+          "args": ["-y", "@anthropic/mcp-filesystem"]
+        },
+        "tools_to_execute": ["*"]
+      }
+    ],
+    "tool_manager_config": {
+      "code_mode_binding_level": "server",
+      "tool_execution_timeout": "30s"
+    }
+  }
+}
+```
+
+  </Tab>
+  <Tab title="Go SDK">
+
+```go
+mcpConfig := &schemas.MCPConfig{
+    ClientConfigs: []schemas.MCPClientConfig{
+        {
+            Name:             "filesystem",
+            IsCodeModeClient: true,
+            ConnectionType:   schemas.MCPConnectionTypeSTDIO,
+            StdioConfig: &schemas.MCPStdioConfig{
+                Command: "npx",
+                Args:    []string{"-y", "@anthropic/mcp-filesystem"},
+            },
+            ToolsToExecute: []string{"*"},
+        },
+    },
+    ToolManagerConfig: &schemas.MCPToolManagerConfig{
+        CodeModeBindingLevel: schemas.CodeModeBindingLevelServer,
+        ToolExecutionTimeout: 30 * time.Second,
+    },
+}
+```
+
+  </Tab>
+</Tabs>
+
+### **Code Mode vs Agent Mode**
+
+| Aspect | Agent Mode | Code Mode |
+|--------|------------|-----------|
+| **Execution Model** | LLM decides one tool at a time | LLM writes code orchestrating multiple tools |
+| **Iterations** | Multiple LLM round-trips | Single LLM call, code handles orchestration |
+| **Complexity** | Simple tool chains | Complex workflows with conditionals/loops |
+| **Latency** | Higher (multiple LLM calls) | Lower (single LLM call + code execution) |
+| **Control** | Per-tool approval possible | Code runs atomically |
+| **Best For** | Interactive agents | Batch operations, complex data processing |
+
+---
+
 ## MCP Integration Patterns
 
 ### **Common Integration Scenarios**
@@ -493,7 +922,7 @@ This flow ensures that while AI models can discover and request tool usage, all 
 - **Failover:** Use local fallbacks when remote services are unavailable
 - **Optimization:** Route tool calls to most appropriate execution environment
 
-> **📖 MCP Development:** [Tool Development Guide →](../../features/mcp)
+> **📖 MCP Development:** [Tool Development Guide →](../../mcp/overview)
 
 ---
 
@@ -537,19 +966,11 @@ graph TB
 - **Resource Limits** - CPU, memory, and time constraints
 - **Permission Model** - Principle of least privilege for tool access
 
-**Data Security:**
-
-- **Input Validation** - Strict parameter validation before tool execution
-- **Output Sanitization** - Remove sensitive data from tool responses
-- **Audit Logging** - Complete audit trail of tool usage
-
 **Operational Security:**
 
 - **Regular Updates** - Keep MCP servers and tools updated
 - **Monitoring** - Continuous security monitoring and alerting
 - **Incident Response** - Procedures for security incidents involving tools
-
-> **📖 MCP Security:** [Security Best Practices →](../../features/mcp)
 
 ---
 

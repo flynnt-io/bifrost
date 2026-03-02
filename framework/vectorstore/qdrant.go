@@ -12,10 +12,10 @@ import (
 
 // QdrantConfig represents the configuration for the Qdrant vector store.
 type QdrantConfig struct {
-	Host   string `json:"host"`              // Qdrant server host - REQUIRED
-	Port   int    `json:"port"`              // Qdrant server port - REQUIRED (typically 6334 for gRPC)
-	APIKey string `json:"api_key,omitempty"` // API key for authentication - Optional
-	UseTLS bool   `json:"use_tls,omitempty"` // Use TLS for connection - Optional
+	Host   schemas.EnvVar `json:"host"`              // Qdrant server host - REQUIRED
+	Port   schemas.EnvVar `json:"port"`              // Qdrant server port  (fallback to 6334 for gRPC)
+	APIKey schemas.EnvVar `json:"api_key,omitempty"` // API key for authentication - Optional
+	UseTLS schemas.EnvVar `json:"use_tls,omitempty"` // Use TLS for connection - Optional
 }
 
 // QdrantStore represents the Qdrant vector store.
@@ -343,20 +343,22 @@ func (s *QdrantStore) Close(ctx context.Context, namespace string) error {
 	return s.client.Close()
 }
 
+// RequiresVectors returns true because Qdrant is a dedicated vector database
+// that requires vectors for all points/entries.
+func (s *QdrantStore) RequiresVectors() bool {
+	return true
+}
+
 // newQdrantStore creates a new Qdrant vector store.
 func newQdrantStore(ctx context.Context, config *QdrantConfig, logger schemas.Logger) (*QdrantStore, error) {
-	if config.Host == "" {
+	if strings.TrimSpace(config.Host.GetValue()) == "" {
 		return nil, fmt.Errorf("qdrant host is required")
 	}
-	if config.Port == 0 {
-		return nil, fmt.Errorf("qdrant port is required")
-	}
-
 	client, err := qdrant.NewClient(&qdrant.Config{
-		Host:                   config.Host,
-		Port:                   config.Port,
-		APIKey:                 config.APIKey,
-		UseTLS:                 config.UseTLS,
+		Host:                   config.Host.GetValue(),
+		Port:                   config.Port.CoerceInt(6334),
+		APIKey:                 config.APIKey.GetValue(),
+		UseTLS:                 config.UseTLS.CoerceBool(false),
 		SkipCompatibilityCheck: true,
 	})
 	if err != nil {
@@ -437,7 +439,22 @@ func mapToPayload(m map[string]interface{}) map[string]*qdrant.Value {
 	if m == nil {
 		return make(map[string]*qdrant.Value)
 	}
-	return qdrant.NewValueMap(m)
+	// Convert []string to []interface{} since Qdrant's NewValueMap doesn't handle []string directly
+	converted := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		switch val := v.(type) {
+		case []string:
+			// Convert []string to []interface{}
+			interfaceSlice := make([]interface{}, len(val))
+			for i, s := range val {
+				interfaceSlice[i] = s
+			}
+			converted[k] = interfaceSlice
+		default:
+			converted[k] = v
+		}
+	}
+	return qdrant.NewValueMap(converted)
 }
 
 func filterProperties(props map[string]interface{}, selectFields []string) map[string]interface{} {

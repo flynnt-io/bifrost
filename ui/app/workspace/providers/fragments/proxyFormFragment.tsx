@@ -1,9 +1,10 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { getErrorMessage, setProviderFormDirtyState, useAppDispatch } from "@/lib/store";
 import { useUpdateProviderMutation } from "@/lib/store/apis/providersApi";
 import { ModelProvider } from "@/lib/types/config";
@@ -33,6 +34,7 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 				url: provider.proxy_config?.url || "",
 				username: provider.proxy_config?.username || "",
 				password: provider.proxy_config?.password || "",
+				ca_cert_pem: provider.proxy_config?.ca_cert_pem || "",
 			},
 		},
 	});
@@ -48,6 +50,7 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 				url: provider.proxy_config?.url || "",
 				username: provider.proxy_config?.username || "",
 				password: provider.proxy_config?.password || "",
+				ca_cert_pem: provider.proxy_config?.ca_cert_pem || "",
 			},
 		});
 	}, [form, provider.name, provider.proxy_config]);
@@ -62,11 +65,13 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 				url: data.proxy_config?.url || undefined,
 				username: data.proxy_config?.username || undefined,
 				password: data.proxy_config?.password || undefined,
+				ca_cert_pem: data.proxy_config?.ca_cert_pem || undefined,
 			},
 		})
 			.unwrap()
 			.then(() => {
 				toast.success("Provider configuration updated successfully");
+				form.reset(data);
 			})
 			.catch((err) => {
 				toast.error("Failed to update provider configuration", {
@@ -87,7 +92,7 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 							render={({ field }) => (
 								<FormItem>
 									<FormLabel>Proxy Type</FormLabel>
-									<Select onValueChange={field.onChange} value={field.value === "none" ? "" : field.value}>
+									<Select onValueChange={field.onChange} value={field.value === "none" ? "" : field.value} disabled={!hasUpdateProviderAccess}>
 										<FormControl>
 											<SelectTrigger className="w-48">
 												<SelectValue placeholder="Select type" />
@@ -118,7 +123,7 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 										<FormItem>
 											<FormLabel>Proxy URL</FormLabel>
 											<FormControl>
-												<Input placeholder="http://proxy.example.com" {...field} value={field.value || ""} />
+												<Input placeholder="http://proxy.example.com" {...field} value={field.value || ""} disabled={!hasUpdateProviderAccess} />
 											</FormControl>
 											<FormMessage />
 										</FormItem>
@@ -132,7 +137,7 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 											<FormItem>
 												<FormLabel>Username</FormLabel>
 												<FormControl>
-													<Input placeholder="Proxy username" {...field} value={field.value || ""} />
+													<Input placeholder="Proxy username" {...field} value={field.value || ""} disabled={!hasUpdateProviderAccess} />
 												</FormControl>
 												<FormMessage />
 											</FormItem>
@@ -145,13 +150,36 @@ export function ProxyFormFragment({ provider }: ProxyFormFragmentProps) {
 											<FormItem>
 												<FormLabel>Password</FormLabel>
 												<FormControl>
-													<Input type="password" placeholder="Proxy password" {...field} value={field.value || ""} />
+													<Input type="password" placeholder="Proxy password" {...field} value={field.value || ""} disabled={!hasUpdateProviderAccess} />
 												</FormControl>
 												<FormMessage />
 											</FormItem>
 										)}
 									/>
 								</div>
+								<FormField
+									control={form.control}
+									name="proxy_config.ca_cert_pem"
+									render={({ field }) => (
+										<FormItem>
+											<FormLabel>CA Certificate (PEM) (Optional)</FormLabel>
+											<FormControl>
+												<Textarea
+													placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+													className="font-mono text-xs"
+													rows={6}
+													{...field}
+													value={field.value || ""}
+													disabled={!hasUpdateProviderAccess}
+												/>
+											</FormControl>
+											<FormDescription>
+												PEM-encoded CA certificate to trust for TLS connections through SSL-intercepting proxies
+											</FormDescription>
+											<FormMessage />
+										</FormItem>
+									)}
+								/>
 							</div>
 						</div>
 					</div>

@@ -26,70 +26,25 @@ TAG_NAME="transports/v${VERSION}"
 
 echo "🚀 Releasing bifrost-http v$VERSION..."
 
-# Ensure tags are available (CI often does shallow clones)
-git fetch --tags --force >/dev/null 2>&1 || true
-LATEST_CORE_TAG=$(git tag -l "core/v*" | sort -V | tail -1)
-LATEST_FRAMEWORK_TAG=$(git tag -l "framework/v*" | sort -V | tail -1)
+# Get core and framework versions from version files
+CORE_VERSION="v$(tr -d '\n\r' < core/version)"
+FRAMEWORK_VERSION="v$(tr -d '\n\r' < framework/version)"
 
-if [ -z "$LATEST_CORE_TAG" ]; then
-  CORE_VERSION="v$(tr -d '\n\r' < core/version)"
-else
-  CORE_VERSION=${LATEST_CORE_TAG#core/}
-fi
-
-if [ -z "$LATEST_FRAMEWORK_TAG" ]; then
-  FRAMEWORK_VERSION="v$(tr -d '\n\r' < framework/version)"
-else
-  FRAMEWORK_VERSION=${LATEST_FRAMEWORK_TAG#framework/}
-fi
-
-echo "🔍 DEBUG: LATEST_CORE_TAG: $LATEST_CORE_TAG"
 echo "🔍 DEBUG: CORE_VERSION: $CORE_VERSION"
-echo "🔍 DEBUG: LATEST_FRAMEWORK_TAG: $LATEST_FRAMEWORK_TAG"
 echo "🔍 DEBUG: FRAMEWORK_VERSION: $FRAMEWORK_VERSION"
 
 
-# Get latest plugin versions
-echo "🔌 Getting latest plugin release versions..."
+# Get plugin versions from version files
+echo "🔌 Getting plugin versions from version files..."
 declare -A PLUGIN_VERSIONS
 
-# First, get versions for plugins that exist in the plugins/ directory
+# Get versions for plugins that exist in the plugins/ directory
 for plugin_dir in plugins/*/; do
   if [ -d "$plugin_dir" ]; then
     plugin_name=$(basename "$plugin_dir")
-
-    # Check if VERSION parameter contains prerelease suffix
-    if [[ "$VERSION" == *"-"* ]]; then
-      # VERSION has prerelease, so include all versions but prefer stable
-      ALL_TAGS=$(git tag -l "plugins/${plugin_name}/v*" | sort -V)
-      STABLE_TAGS=$(echo "$ALL_TAGS" | grep -v '\-' || true)
-      PRERELEASE_TAGS=$(echo "$ALL_TAGS" | grep '\-' || true)
-
-      if [ -n "$STABLE_TAGS" ]; then
-        # Get the highest stable version
-        LATEST_PLUGIN_TAG=$(echo "$STABLE_TAGS" | tail -1)
-        echo "latest plugin tag (stable preferred): $LATEST_PLUGIN_TAG"
-      else
-        # No stable versions, get highest prerelease
-        LATEST_PLUGIN_TAG=$(echo "$PRERELEASE_TAGS" | tail -1)
-        echo "latest plugin tag (prerelease only): $LATEST_PLUGIN_TAG"
-      fi
-    else
-      # VERSION has no prerelease, so only consider stable releases
-      LATEST_PLUGIN_TAG=$(git tag -l "plugins/${plugin_name}/v*" | grep -v '\-' | sort -V | tail -1 || true)
-      echo "latest plugin tag (stable only): $LATEST_PLUGIN_TAG"
-    fi
-
-    if [ -z "$LATEST_PLUGIN_TAG" ]; then
-      # No matching release found, use version from file
-      PLUGIN_VERSION="v$(tr -d '\n\r' < "${plugin_dir}version")"
-      echo "   📦 $plugin_name: $PLUGIN_VERSION (from version file - not yet released)"
-    else
-      PLUGIN_VERSION=${LATEST_PLUGIN_TAG#plugins/${plugin_name}/}
-      echo "   📦 $plugin_name: $PLUGIN_VERSION (latest release)"
-    fi
-
+    PLUGIN_VERSION="v$(tr -d '\n\r' < "${plugin_dir}version")"
     PLUGIN_VERSIONS["$plugin_name"]="$PLUGIN_VERSION"
+    echo "   📦 $plugin_name: $PLUGIN_VERSION (from version file)"
   fi
 done
 
@@ -117,8 +72,8 @@ for plugin_name in "${!PLUGIN_VERSIONS[@]}"; do
   echo "     - $plugin_name: ${PLUGIN_VERSIONS[$plugin_name]}"
 done
 
-# Update transport dependencies to use latest plugin releases
-echo "🔧 Using latest plugin release versions for transport..."
+# Update transport dependencies to use plugin versions from version files
+echo "🔧 Using plugin versions from version files for transport..."
 PLUGINS_USED=()
 
 # Track which plugins are actually used by the transport
@@ -159,161 +114,31 @@ cd ../../..
 # Validate transport build
 echo "🔨 Validating transport build..."
 cd transports
-
-# Run unit tests with coverage
-echo "🧪 Running unit tests with coverage..."
-go test -coverprofile=coverage.txt -coverpkg=./... ./...
-
-# Upload coverage to Codecov
-if [ -n "${CODECOV_TOKEN:-}" ]; then
-  echo "📊 Uploading coverage to Codecov..."
-  curl -Os https://uploader.codecov.io/latest/linux/codecov
-  chmod +x codecov
-  ./codecov -t "$CODECOV_TOKEN" -f coverage.txt -F transports
-  rm -f codecov coverage.txt
-else
-  echo "ℹ️ CODECOV_TOKEN not set, skipping coverage upload"
-  rm -f coverage.txt
-fi
-
-# Build the binary for integration testing
-echo "🔨 Building binary for integration testing..."
-mkdir -p ../tmp
-cd bifrost-http
-go build -o ../../tmp/bifrost-http .
-cd ..
-
-# Run integration tests with different configurations
-echo "🧪 Running integration tests with different configurations..."
-CONFIGS_TO_TEST=(
-  "default"
-  "emptystate"
-  "noconfigstorenologstore"
-  "witconfigstorelogstorepostgres"
-  "withconfigstore"
-  "withconfigstorelogsstorepostgres"
-  "withconfigstorelogsstoresqlite"
-  "withdynamicplugin"
-  "withobservability"
-  "withsemanticcache"
-)
-
-TEST_BINARY="../tmp/bifrost-http"
-CONFIGS_DIR="../.github/workflows/configs"
-# Running docker compose
-echo "🐳 Starting Docker services (PostgreSQL, Weaviate, Redis)..."
-docker compose -f "$CONFIGS_DIR/docker-compose.yml" up -d
-
-# Wait for services to be healthy
-echo "⏳ Waiting for Docker services to be ready..."
-sleep 10
-
-for config in "${CONFIGS_TO_TEST[@]}"; do
-  echo "  🔍 Testing with config: $config"
-  config_path="$CONFIGS_DIR/$config"
-
-  # Clean up databases before each config test for a clean slate
-  echo "    🧹 Resetting PostgreSQL database..."
-  # Note: DROP DATABASE cannot run inside a transaction, so we use separate -c flags
-  # First terminate any active connections, then drop and recreate the database
-  docker exec "$(docker compose -f "$CONFIGS_DIR/docker-compose.yml" ps -q postgres)" \
-    psql -U bifrost -d postgres \
-    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'bifrost' AND pid <> pg_backend_pid();" \
-    -c "DROP DATABASE IF EXISTS bifrost;" \
-    -c "CREATE DATABASE bifrost;"
-
-  echo "    🧹 Cleaning up SQLite database files for config: $config..."
-  find "$config_path" -type f \( -name "*.db" -o -name "*.db-shm" -o -name "*.db-wal" \) -delete 2>/dev/null || true
-  echo "    ✅ Database cleanup complete"
-  
-  if [ ! -d "$config_path" ]; then
-    echo "    ⚠️  Warning: Config directory not found: $config_path (skipping)"
-    continue
-  fi
-  
-  # Create a temporary log file for server output
-  SERVER_LOG=$(mktemp)
-  
-  # Start the server in background with a timeout, logging to file and console
-  timeout 30s $TEST_BINARY --app-dir "$config_path" --port 18080 --log-level debug 2>&1 | tee "$SERVER_LOG" &
-  SERVER_PID=$!
-  
-  # Wait for server to be ready by looking for the startup message
-  echo "    ⏳ Waiting for server to start..."
-  MAX_WAIT=30
-  ELAPSED=0
-  SERVER_READY=false
-  
-  while [ $ELAPSED -lt $MAX_WAIT ]; do
-    if grep -q "successfully started bifrost, serving UI on http://localhost:18080" "$SERVER_LOG" 2>/dev/null; then
-      SERVER_READY=true
-      echo "    ✅ Server started successfully with config: $config"
-      break
-    fi
-    
-    # Check if server process is still running
-    if ! kill -0 $SERVER_PID 2>/dev/null; then
-      echo "    ❌ Server process died before starting with config: $config"
-      rm -f "$SERVER_LOG"
-      exit 1
-    fi
-    
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
-  done
-  
-  if [ "$SERVER_READY" = false ]; then
-    echo "    ❌ Server failed to start within ${MAX_WAIT}s with config: $config"
-    kill $SERVER_PID 2>/dev/null || true
-    wait $SERVER_PID 2>/dev/null || true
-    rm -f "$SERVER_LOG"
-    exit 1
-  fi
-  
-  # Run get_curls.sh to test all GET endpoints
-  echo "    🧪 Running API endpoint tests..."
-  echo "    🔍 DEBUG: SCRIPT_DIR=$SCRIPT_DIR"
-  echo "    🔍 DEBUG: PWD=$(pwd)"
-  GET_CURLS_SCRIPT="$SCRIPT_DIR/get_curls.sh"
-  echo "    🔍 DEBUG: GET_CURLS_SCRIPT=$GET_CURLS_SCRIPT"
-  echo "    🔍 DEBUG: File exists check: $([ -f "$GET_CURLS_SCRIPT" ] && echo 'YES' || echo 'NO')"
-  
-  if [ -f "$GET_CURLS_SCRIPT" ]; then
-    BASE_URL="http://localhost:18080" "$GET_CURLS_SCRIPT"
-    CURL_EXIT_CODE=$?
-    
-    if [ $CURL_EXIT_CODE -eq 0 ]; then
-      echo "    ✅ API endpoint tests passed for config: $config"
-    else
-      echo "    ❌ API endpoint tests failed for config: $config (exit code: $CURL_EXIT_CODE)"
-      kill $SERVER_PID 2>/dev/null || true
-      wait $SERVER_PID 2>/dev/null || true
-      rm -f "$SERVER_LOG"
-      exit 1
-    fi
-  else
-    echo "    ⚠️  Warning: get_curls.sh not found at $GET_CURLS_SCRIPT (skipping endpoint tests)"
-  fi
-  
-  # Kill the server
-  kill $SERVER_PID 2>/dev/null || true
-  wait $SERVER_PID 2>/dev/null || true
-  
-  # Clean up log file
-  rm -f "$SERVER_LOG"
-  
-  # Clean up any lingering processes
-  sleep 1
-done
-
+go build ./...
 cd ..
 echo "✅ Transport build validation successful"
 
+# Note: Migration tests run as a separate CI job (test-migrations) before this release job
+
 # Commit and push changes if any
-# First, stage any changes made to transports/
+# First, pull latest changes to avoid conflicts
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+  # In detached HEAD state (common in CI), use GITHUB_REF_NAME or default to main
+  CURRENT_BRANCH="${GITHUB_REF_NAME:-main}"
+fi
+
+echo "Pulling latest changes from origin/$CURRENT_BRANCH..."
+if ! git pull origin "$CURRENT_BRANCH"; then
+  echo "❌ Error: git pull origin $CURRENT_BRANCH failed"
+  exit 1
+fi
+
+# Stage any changes made to transports/
 git add transports/
+
+# Check if there are staged changes after pulling
 if ! git diff --cached --quiet; then
-  git pull origin main
   git config user.name "github-actions[bot]"
   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
   echo "🔧 Committing and pushing changes..."

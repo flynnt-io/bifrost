@@ -6,7 +6,8 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-func (response *OpenAIListModelsResponse) ToBifrostListModelsResponse(providerKey schemas.ModelProvider, allowedModels []string) *schemas.BifrostListModelsResponse {
+// ToBifrostListModelsResponse converts an OpenAI list models response to a Bifrost list models response
+func (response *OpenAIListModelsResponse) ToBifrostListModelsResponse(providerKey schemas.ModelProvider, allowedModels []string, unfiltered bool) *schemas.BifrostListModelsResponse {
 	if response == nil {
 		return nil
 	}
@@ -15,8 +16,9 @@ func (response *OpenAIListModelsResponse) ToBifrostListModelsResponse(providerKe
 		Data: make([]schemas.Model, 0, len(response.Data)),
 	}
 
+	includedModels := make(map[string]bool)
 	for _, model := range response.Data {
-		if len(allowedModels) > 0 && !slices.Contains(allowedModels, model.ID) {
+		if !unfiltered && len(allowedModels) > 0 && !slices.Contains(allowedModels, model.ID) {
 			continue
 		}
 		bifrostResponse.Data = append(bifrostResponse.Data, schemas.Model{
@@ -25,22 +27,32 @@ func (response *OpenAIListModelsResponse) ToBifrostListModelsResponse(providerKe
 			OwnedBy:       schemas.Ptr(model.OwnedBy),
 			ContextLength: model.ContextWindow,
 		})
+		includedModels[model.ID] = true
+	}
 
+	// Backfill allowed models that were not in the response
+	if !unfiltered && len(allowedModels) > 0 {
+		for _, allowedModel := range allowedModels {
+			if !includedModels[allowedModel] {
+				bifrostResponse.Data = append(bifrostResponse.Data, schemas.Model{
+					ID:   string(providerKey) + "/" + allowedModel,
+					Name: schemas.Ptr(allowedModel),
+				})
+			}
+		}
 	}
 
 	return bifrostResponse
 }
 
+// ToOpenAIListModelsResponse converts a Bifrost list models response to an OpenAI list models response
 func ToOpenAIListModelsResponse(response *schemas.BifrostListModelsResponse) *OpenAIListModelsResponse {
-
 	if response == nil {
 		return nil
 	}
-
 	openaiResponse := &OpenAIListModelsResponse{
 		Data: make([]OpenAIModel, 0, len(response.Data)),
 	}
-
 	for _, model := range response.Data {
 		openaiModel := OpenAIModel{
 			ID:     model.ID,
@@ -56,6 +68,5 @@ func ToOpenAIListModelsResponse(response *schemas.BifrostListModelsResponse) *Op
 		openaiResponse.Data = append(openaiResponse.Data, openaiModel)
 
 	}
-
 	return openaiResponse
 }

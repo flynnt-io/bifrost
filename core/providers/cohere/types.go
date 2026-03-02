@@ -8,6 +8,14 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
+const MinimumReasoningMaxTokens = 1
+const DefaultCompletionMaxTokens = 4096 // Only used for relative reasoning max token calculation - not passed in body by default
+// Limits for tokenize input api call https://docs.cohere.com/reference/tokenize#request
+const (
+	cohereTokenizeMinTextLength = 1
+	cohereTokenizeMaxTextLength = 65536
+)
+
 // ==================== REQUEST TYPES ====================
 
 // CohereChatRequest represents a Cohere  chat completion request
@@ -28,11 +36,17 @@ type CohereChatRequest struct {
 	LogProbs         *bool                   `json:"log_probs,omitempty"`          // Optional: Log probabilities
 	StrictToolChoice *bool                   `json:"strict_tool_choice,omitempty"` // Optional: Strict tool choice
 	Thinking         *CohereThinking         `json:"thinking,omitempty"`           // Optional: Reasoning configuration
+	ResponseFormat   *CohereResponseFormat   `json:"response_format,omitempty"`    // Optional: Format for the response
+	ExtraParams      map[string]interface{}  `json:"-"`                            // Optional: Extra parameters
 }
 
 // IsStreamingRequested implements the StreamingRequest interface
 func (r *CohereChatRequest) IsStreamingRequested() bool {
 	return r.Stream != nil && *r.Stream
+}
+
+func (r *CohereChatRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
 }
 
 type CohereChatRequestTool struct {
@@ -180,6 +194,20 @@ const (
 	ThinkingTypeDisabled CohereThinkingType = "disabled"
 )
 
+// CohereResponseFormat represents the response format configuration for Cohere chat requests
+type CohereResponseFormat struct {
+	Type       CohereResponseFormatType `json:"type"`             // Required: Response format type
+	JSONSchema *interface{}             `json:"schema,omitempty"` // Optional: JSON schema for structured output (not used when type is "text")
+}
+
+// CohereResponseFormatType represents the type of response format
+type CohereResponseFormatType string
+
+const (
+	ResponseFormatTypeText       CohereResponseFormatType = "text"
+	ResponseFormatTypeJSONObject CohereResponseFormatType = "json_object"
+)
+
 // CohereToolChoice represents tool choice configuration
 type CohereToolChoice string
 
@@ -218,6 +246,17 @@ type CohereTool struct {
 	ParameterDefinitions map[string]CohereParameterDefinition `json:"parameter_definitions"` // Definitions of the tool's parameters
 }
 
+// CohereCountTokensRequest represents a Cohere tokenize request
+type CohereCountTokensRequest struct {
+	Model       string                 `json:"model"` // Required: Model whose tokenizer should be used
+	Text        string                 `json:"text"`  // Required: Text to tokenize (1-65536 chars)
+	ExtraParams map[string]interface{} `json:"-"`     // Optional: Extra parameters
+}
+
+func (r *CohereCountTokensRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
+}
+
 // CohereEmbeddingRequest represents a Cohere embedding request
 type CohereEmbeddingRequest struct {
 	Model           string                 `json:"model"`                      // Required: ID of embedding model
@@ -229,6 +268,11 @@ type CohereEmbeddingRequest struct {
 	OutputDimension *int                   `json:"output_dimension,omitempty"` // Optional: Embedding dimensions (256, 512, 1024, 1536)
 	EmbeddingTypes  []string               `json:"embedding_types,omitempty"`  // Optional: Types of embeddings to return
 	Truncate        *string                `json:"truncate,omitempty"`         // Optional: How to handle long inputs
+	ExtraParams     map[string]interface{} `json:"-"`                          // Optional: Extra parameters
+}
+
+func (r *CohereEmbeddingRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
 }
 
 // CohereEmbeddingInput represents a mixed text/image input
@@ -280,6 +324,23 @@ type CohereEmbeddingAPIVersion struct {
 }
 
 // ==================== RESPONSE TYPES ====================
+
+// CohereCountTokensResponse represents the response from the tokenize endpoint
+type CohereCountTokensResponse struct {
+	Tokens       []int               `json:"tokens"`
+	TokenStrings []string            `json:"token_strings,omitempty"`
+	Meta         *CohereTokenizeMeta `json:"meta,omitempty"`
+}
+
+// CohereTokenizeMeta captures metadata returned by the tokenize endpoint
+type CohereTokenizeMeta struct {
+	APIVersion *CohereTokenizeAPIVersion `json:"api_version,omitempty"`
+}
+
+// CohereTokenizeAPIVersion describes API version metadata
+type CohereTokenizeAPIVersion struct {
+	Version *string `json:"version,omitempty"`
+}
 
 // CohereChatResponse represents a Cohere  chat completion response
 type CohereChatResponse struct {
@@ -518,8 +579,9 @@ type CohereStreamMessage struct {
 
 // CohereStreamContent represents content in streaming events
 type CohereStreamContent struct {
-	Type CohereContentBlockType `json:"type,omitempty"` // For content-start
-	Text *string                `json:"text,omitempty"` // For content deltas
+	Type     CohereContentBlockType `json:"type,omitempty"`     // For content-start
+	Text     *string                `json:"text,omitempty"`     // For content deltas
+	Thinking *string                `json:"thinking,omitempty"` // For thinking deltas
 }
 
 // ==================== ERROR TYPES ====================

@@ -1,48 +1,76 @@
 "use client";
 
+import { LogDetailSheet } from "@/app/workspace/logs/sheets/logDetailsSheet";
 import { createColumns } from "@/app/workspace/logs/views/columns";
 import { EmptyState } from "@/app/workspace/logs/views/emptyState";
-import { LogDetailSheet } from "@/app/workspace/logs/views/logDetailsSheet";
 import { LogsDataTable } from "@/app/workspace/logs/views/logsTable";
+import { LogsVolumeChart } from "@/app/workspace/logs/views/logsVolumeChart";
 import FullPageLoader from "@/components/fullPageLoader";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { getErrorMessage, useDeleteLogsMutation, useLazyGetLogsQuery, useLazyGetLogsStatsQuery } from "@/lib/store";
-import type { ChatMessage, ChatMessageContent, ContentBlock, LogEntry, LogFilters, LogStats, Pagination } from "@/lib/types/logs";
+import {
+	getErrorMessage,
+	useDeleteLogsMutation,
+	useLazyGetLogsHistogramQuery,
+	useLazyGetLogsQuery,
+	useLazyGetLogsStatsQuery,
+} from "@/lib/store";
+import type {
+	ChatMessage,
+	ChatMessageContent,
+	ContentBlock,
+	LogEntry,
+	LogFilters,
+	LogsHistogramResponse,
+	LogStats,
+	Pagination,
+} from "@/lib/types/logs";
 import { dateUtils } from "@/lib/types/logs";
+import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { AlertCircle, BarChart, CheckCircle, Clock, DollarSign, Hash } from "lucide-react";
 import { parseAsArrayOf, parseAsBoolean, parseAsInteger, parseAsString, useQueryStates } from "nuqs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-// Calculate default timestamps once at module level to prevent constant recalculation
-const DEFAULT_END_TIME = Math.floor(Date.now() / 1000);
-const DEFAULT_START_TIME = (() => {
-	const date = new Date();
-	date.setHours(date.getHours() - 24);
-	return Math.floor(date.getTime() / 1000);
-})();
 
 export default function LogsPage() {
 	const [logs, setLogs] = useState<LogEntry[]>([]);
 	const [totalItems, setTotalItems] = useState(0); // changes with filters
 	const [stats, setStats] = useState<LogStats | null>(null);
+	const [histogram, setHistogram] = useState<LogsHistogramResponse | null>(null);
 	const [initialLoading, setInitialLoading] = useState(true); // on initial load
 	const [fetchingLogs, setFetchingLogs] = useState(false); // on pagination/filters change
 	const [fetchingStats, setFetchingStats] = useState(false); // on stats fetch
+	const [fetchingHistogram, setFetchingHistogram] = useState(false); // on histogram fetch
 	const [error, setError] = useState<string | null>(null);
 	const [showEmptyState, setShowEmptyState] = useState(false);
+
+	const hasDeleteAccess = useRbac(RbacResource.Logs, RbacOperation.Delete);
 
 	// RTK Query lazy hooks for manual triggering
 	const [triggerGetLogs] = useLazyGetLogsQuery();
 	const [triggerGetStats] = useLazyGetLogsStatsQuery();
+	const [triggerGetHistogram] = useLazyGetLogsHistogramQuery();
 	const [deleteLogs] = useDeleteLogsMutation();
 
 	const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
+	const [isChartOpen, setIsChartOpen] = useState(true);
 
 	// Debouncing for streaming updates (client-side)
 	const streamingUpdateTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+	// Track if user has manually modified the time range
+	const userModifiedTimeRange = useRef<boolean>(false);
+
+	// Capture initial defaults on mount to detect shared URLs with custom time ranges
+	const initialDefaults = useRef(dateUtils.getDefaultTimeRange());
+
+	// Memoize default time range to prevent recalculation on every render
+	// This is crucial to avoid triggering refetches when the sheet opens/closes
+	const defaultTimeRange = useMemo(() => dateUtils.getDefaultTimeRange(), []);
+
+	// Get fresh default time range for refresh logic
+	const getDefaultTimeRange = () => dateUtils.getDefaultTimeRange();
 
 	// URL state management with nuqs - all filters and pagination in URL
 	const [urlState, setUrlState] = useQueryStates(
@@ -53,20 +81,72 @@ export default function LogsPage() {
 			objects: parseAsArrayOf(parseAsString).withDefault([]),
 			selected_key_ids: parseAsArrayOf(parseAsString).withDefault([]),
 			virtual_key_ids: parseAsArrayOf(parseAsString).withDefault([]),
+			routing_rule_ids: parseAsArrayOf(parseAsString).withDefault([]),
+			routing_engine_used: parseAsArrayOf(parseAsString).withDefault([]),
 			content_search: parseAsString.withDefault(""),
-			start_time: parseAsInteger.withDefault(DEFAULT_START_TIME),
-			end_time: parseAsInteger.withDefault(DEFAULT_END_TIME),
-			limit: parseAsInteger.withDefault(50),
+			start_time: parseAsInteger.withDefault(defaultTimeRange.startTime),
+			end_time: parseAsInteger.withDefault(defaultTimeRange.endTime),
+			limit: parseAsInteger.withDefault(25), // Default fallback, actual value calculated based on table height
 			offset: parseAsInteger.withDefault(0),
 			sort_by: parseAsString.withDefault("timestamp"),
 			order: parseAsString.withDefault("desc"),
 			live_enabled: parseAsBoolean.withDefault(true),
+			missing_cost_only: parseAsBoolean.withDefault(false),
 		},
 		{
 			history: "push",
 			shallow: false,
 		},
 	);
+
+	// Refresh time range defaults on page focus/visibility
+	useEffect(() => {
+		const refreshDefaultsIfStale = () => {
+			// Skip refresh if user has manually modified the time range
+			if (userModifiedTimeRange.current) {
+				return;
+			}
+
+			// Check if current time range matches the initial defaults (within tolerance)
+			const startTimeDiff = Math.abs(urlState.start_time - initialDefaults.current.startTime);
+			const endTimeDiff = Math.abs(urlState.end_time - initialDefaults.current.endTime);
+			const tolerance = 5; // 5 seconds tolerance for slight timing differences
+
+			// Only refresh if current values match the initial defaults
+			// This preserves shared URLs with custom time ranges
+			if (startTimeDiff <= tolerance && endTimeDiff <= tolerance) {
+				const defaults = getDefaultTimeRange();
+				const currentEndDiff = Math.abs(urlState.end_time - defaults.endTime);
+				// If end time is more than 5 minutes old, refresh both
+				if (currentEndDiff > 300) {
+					setUrlState({
+						start_time: defaults.startTime,
+						end_time: defaults.endTime,
+					});
+					// Update baseline so subsequent focus events compare against refreshed defaults
+					initialDefaults.current.startTime = defaults.startTime;
+					initialDefaults.current.endTime = defaults.endTime;
+				}
+			}
+		};
+
+		const handleVisibilityChange = () => {
+			if (!document.hidden) {
+				refreshDefaultsIfStale();
+			}
+		};
+
+		const handleFocus = () => {
+			refreshDefaultsIfStale();
+		};
+
+		document.addEventListener("visibilitychange", handleVisibilityChange);
+		window.addEventListener("focus", handleFocus);
+		return () => {
+			document.removeEventListener("visibilitychange", handleVisibilityChange);
+			window.removeEventListener("focus", handleFocus);
+		};
+	}, [urlState.start_time, urlState.end_time, setUrlState]);
 
 	// Convert URL state to filters and pagination for API calls
 	const filters: LogFilters = useMemo(
@@ -77,9 +157,12 @@ export default function LogsPage() {
 			objects: urlState.objects,
 			selected_key_ids: urlState.selected_key_ids,
 			virtual_key_ids: urlState.virtual_key_ids,
+			routing_rule_ids: urlState.routing_rule_ids,
+			routing_engine_used: urlState.routing_engine_used,
 			content_search: urlState.content_search,
 			start_time: dateUtils.toISOString(urlState.start_time),
 			end_time: dateUtils.toISOString(urlState.end_time),
+			missing_cost_only: urlState.missing_cost_only,
 		}),
 		[urlState],
 	);
@@ -99,6 +182,11 @@ export default function LogsPage() {
 	// Helper to update filters in URL
 	const setFilters = useCallback(
 		(newFilters: LogFilters) => {
+			// Mark time range as user-modified only if start_time or end_time actually changed
+			if (newFilters.start_time !== filters.start_time || newFilters.end_time !== filters.end_time) {
+				userModifiedTimeRange.current = true;
+			}
+
 			setUrlState({
 				providers: newFilters.providers || [],
 				models: newFilters.models || [],
@@ -106,13 +194,16 @@ export default function LogsPage() {
 				objects: newFilters.objects || [],
 				selected_key_ids: newFilters.selected_key_ids || [],
 				virtual_key_ids: newFilters.virtual_key_ids || [],
+				routing_rule_ids: newFilters.routing_rule_ids || [],
+				routing_engine_used: newFilters.routing_engine_used || [],
 				content_search: newFilters.content_search || "",
 				start_time: newFilters.start_time ? dateUtils.toUnixTimestamp(new Date(newFilters.start_time)) : undefined,
 				end_time: newFilters.end_time ? dateUtils.toUnixTimestamp(new Date(newFilters.end_time)) : undefined,
+				missing_cost_only: newFilters.missing_cost_only ?? filters.missing_cost_only ?? false,
 				offset: 0,
 			});
 		},
-		[setUrlState],
+		[setUrlState, filters],
 	);
 
 	// Helper to update pagination in URL
@@ -128,20 +219,54 @@ export default function LogsPage() {
 		[setUrlState],
 	);
 
+	// Handler for time range changes from the volume chart
+	const handleTimeRangeChange = useCallback(
+		(startTime: number, endTime: number) => {
+			setUrlState({
+				start_time: startTime,
+				end_time: endTime,
+				offset: 0,
+			});
+		},
+		[setUrlState],
+	);
+
+	// Handler for resetting zoom to default 24h view
+	const handleResetZoom = useCallback(() => {
+		const now = Math.floor(Date.now() / 1000);
+		const twentyFourHoursAgo = now - 24 * 60 * 60;
+		setUrlState({
+			start_time: twentyFourHoursAgo,
+			end_time: now,
+			offset: 0,
+		});
+	}, [setUrlState]);
+
+	// Check if user has zoomed (time range is different from default 24h)
+	const isZoomed = useMemo(() => {
+		const currentRange = urlState.end_time - urlState.start_time;
+		const defaultRange = 24 * 60 * 60; // 24 hours in seconds
+		// Consider zoomed if range is less than 90% of default (to account for minor differences)
+		return currentRange < defaultRange * 0.9;
+	}, [urlState.start_time, urlState.end_time]);
+
 	const latest = useRef({ logs, filters, pagination, showEmptyState, liveEnabled });
 	useEffect(() => {
 		latest.current = { logs, filters, pagination, showEmptyState, liveEnabled };
 	}, [logs, filters, pagination, showEmptyState, liveEnabled]);
 
-	const handleDelete = useCallback(async (log: LogEntry) => {
-		try {
-			await deleteLogs({ ids: [log.id] }).unwrap();
-			setLogs((prevLogs) => prevLogs.filter((l) => l.id !== log.id));
-			setTotalItems((prev) => prev - 1);
-		} catch (error) {
-			setError(getErrorMessage(error));
-		}
-	}, [deleteLogs]);
+	const handleDelete = useCallback(
+		async (log: LogEntry) => {
+			try {
+				await deleteLogs({ ids: [log.id] }).unwrap();
+				setLogs((prevLogs) => prevLogs.filter((l) => l.id !== log.id));
+				setTotalItems((prev) => prev - 1);
+			} catch (error) {
+				setError(getErrorMessage(error));
+			}
+		},
+		[deleteLogs],
+	);
 
 	const handleLogMessage = useCallback((log: LogEntry, operation: "create" | "update") => {
 		const { logs, filters, pagination, showEmptyState, liveEnabled } = latest.current;
@@ -260,6 +385,50 @@ export default function LogsPage() {
 
 						return newStats;
 					});
+
+					// Update histogram for completed requests
+					setHistogram((prevHistogram) => {
+						if (!prevHistogram || typeof prevHistogram.bucket_size_seconds !== "number" || prevHistogram.bucket_size_seconds <= 0) {
+							return prevHistogram;
+						}
+
+						const logTime = new Date(log.timestamp).getTime();
+						const bucketSizeMs = prevHistogram.bucket_size_seconds * 1000;
+						const bucketTime = Math.floor(logTime / bucketSizeMs) * bucketSizeMs;
+
+						const updatedBuckets = [...prevHistogram.buckets];
+						const bucketIndex = updatedBuckets.findIndex((b) => {
+							const bTime = new Date(b.timestamp).getTime();
+							return Math.floor(bTime / bucketSizeMs) * bucketSizeMs === bucketTime;
+						});
+
+						if (bucketIndex >= 0) {
+							// Update existing bucket
+							updatedBuckets[bucketIndex] = {
+								...updatedBuckets[bucketIndex],
+								count: updatedBuckets[bucketIndex].count + 1,
+								success: updatedBuckets[bucketIndex].success + (log.status === "success" ? 1 : 0),
+								error: updatedBuckets[bucketIndex].error + (log.status === "error" ? 1 : 0),
+							};
+						} else {
+							// Create new bucket for this timestamp
+							const newBucket = {
+								timestamp: new Date(bucketTime).toISOString(),
+								count: 1,
+								success: log.status === "success" ? 1 : 0,
+								error: log.status === "error" ? 1 : 0,
+							};
+							// Insert in sorted order
+							const insertIndex = updatedBuckets.findIndex((b) => new Date(b.timestamp).getTime() > bucketTime);
+							if (insertIndex === -1) {
+								updatedBuckets.push(newBucket);
+							} else {
+								updatedBuckets.splice(insertIndex, 0, newBucket);
+							}
+						}
+
+						return { ...prevHistogram, buckets: updatedBuckets };
+					});
 				}
 			}
 		}
@@ -356,6 +525,25 @@ export default function LogsPage() {
 		}
 	}, [filters, triggerGetStats]);
 
+	const fetchHistogram = useCallback(async () => {
+		setFetchingHistogram(true);
+
+		try {
+			const result = await triggerGetHistogram({ filters });
+
+			if (result.error) {
+				// Don't show error for histogram failure, just log it
+				console.error("Failed to fetch histogram:", result.error);
+			} else if (result.data) {
+				setHistogram(result.data);
+			}
+		} catch (error) {
+			console.error("Failed to fetch histogram:", error);
+		} finally {
+			setFetchingHistogram(false);
+		}
+	}, [filters, triggerGetHistogram]);
+
 	// Helper to toggle live updates
 	const handleLiveToggle = useCallback(
 		(enabled: boolean) => {
@@ -376,10 +564,11 @@ export default function LogsPage() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filters, pagination, initialLoading]);
 
-	// Fetch stats when filters change (but not pagination)
+	// Fetch stats and histogram when filters change (but not pagination)
 	useEffect(() => {
 		if (!initialLoading) {
 			fetchStats();
+			fetchHistogram();
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filters, initialLoading]);
@@ -390,6 +579,7 @@ export default function LogsPage() {
 			// Load logs and stats in parallel, don't wait for stats to show the page
 			await fetchLogs();
 			fetchStats(); // Don't await - let it load in background
+			fetchHistogram(); // Don't await - let it load in background
 			setInitialLoading(false);
 		};
 		initialLoad();
@@ -413,6 +603,9 @@ export default function LogsPage() {
 
 	// Helper function to check if a log matches the current filters
 	const matchesFilters = (log: LogEntry, filters: LogFilters, applyTimeFilters = true): boolean => {
+		if (filters.missing_cost_only && typeof log.cost === "number" && log.cost > 0) {
+			return false;
+		}
 		if (filters.providers?.length && !filters.providers.includes(log.provider)) {
 			return false;
 		}
@@ -421,6 +614,27 @@ export default function LogsPage() {
 		}
 		if (filters.status?.length && !filters.status.includes(log.status)) {
 			return false;
+		}
+		if (filters.objects?.length && !filters.objects.includes(log.object)) {
+			return false;
+		}
+		if (filters.selected_key_ids?.length && !filters.selected_key_ids.includes(log.selected_key_id)) {
+			return false;
+		}
+		if (filters.virtual_key_ids?.length) {
+			if (!log.virtual_key_id || !filters.virtual_key_ids.includes(log.virtual_key_id)) {
+				return false;
+			}
+		}
+		if (filters.routing_rule_ids?.length) {
+			if (!log.routing_rule_id || !filters.routing_rule_ids.includes(log.routing_rule_id)) {
+				return false;
+			}
+		}
+		if (filters.routing_engine_used?.length) {
+			if (!log.routing_engines_used || !log.routing_engines_used.some((engine) => filters.routing_engine_used!.includes(engine))) {
+				return false;
+			}
 		}
 		if (filters.start_time && new Date(log.timestamp) < new Date(filters.start_time)) {
 			return false;
@@ -487,19 +701,19 @@ export default function LogsPage() {
 		[stats, fetchingStats],
 	);
 
-	const columns = useMemo(() => createColumns(handleDelete), [handleDelete]);
+	const columns = useMemo(() => createColumns(handleDelete, hasDeleteAccess), [handleDelete, hasDeleteAccess]);
 
 	return (
-		<div className="dark:bg-card bg-white">
+		<div className="dark:bg-card h-[calc(100dvh-3.3rem)] max-h-[calc(100dvh-1.5rem)] bg-white">
 			{initialLoading ? (
 				<FullPageLoader />
 			) : showEmptyState ? (
 				<EmptyState isSocketConnected={isSocketConnected} error={error} />
 			) : (
-				<div className="mx-auto max-w-7xl space-y-6">
-					<div className="space-y-6">
+				<div className="mx-auto flex h-full w-full flex-col">
+					<div className="flex flex-1 flex-col gap-2 overflow-hidden">
 						{/* Quick Stats */}
-						<div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+						<div className="grid shrink-0 grid-cols-1 gap-4 md:grid-cols-5">
 							{statCards.map((card) => (
 								<Card key={card.title} className="py-4 shadow-none">
 									<CardContent className="flex items-center justify-between px-4">
@@ -512,42 +726,59 @@ export default function LogsPage() {
 							))}
 						</div>
 
-
+						{/* Volume Chart */}
+						<div className="shrink-0">
+							<LogsVolumeChart
+								data={histogram}
+								loading={fetchingHistogram}
+								onTimeRangeChange={handleTimeRangeChange}
+								onResetZoom={handleResetZoom}
+								isZoomed={isZoomed}
+								startTime={urlState.start_time}
+								endTime={urlState.end_time}
+								isOpen={isChartOpen}
+								onOpenChange={setIsChartOpen}
+							/>
+						</div>
 
 						{/* Error Alert */}
 						{error && (
-							<Alert variant="destructive">
+							<Alert variant="destructive" className="shrink-0">
 								<AlertCircle className="h-4 w-4" />
 								<AlertDescription>{error}</AlertDescription>
 							</Alert>
 						)}
 
-						<LogsDataTable
-							columns={columns}
-							data={logs}
-							totalItems={totalItems}
-							loading={fetchingLogs}
-							filters={filters}
-							pagination={pagination}
-							onFiltersChange={setFilters}
-							onPaginationChange={setPagination}
-							onRowClick={(row, columnId) => {
-								if (columnId==="actions") return;
-								setSelectedLog(row);
-							}}
-							isSocketConnected={isSocketConnected}
-							liveEnabled={liveEnabled}
-							onLiveToggle={handleLiveToggle}
-						/>
+						<div className="min-h-0 flex-1">
+							<LogsDataTable
+								columns={columns}
+								data={logs}
+								totalItems={totalItems}
+								loading={fetchingLogs}
+								filters={filters}
+								pagination={pagination}
+								onFiltersChange={setFilters}
+								onPaginationChange={setPagination}
+								onRowClick={(row, columnId) => {
+									if (columnId === "actions") return;
+									setSelectedLog(row);
+								}}
+								isSocketConnected={isSocketConnected}
+								liveEnabled={liveEnabled}
+								onLiveToggle={handleLiveToggle}
+								fetchLogs={fetchLogs}
+								fetchStats={fetchStats}
+							/>
+						</div>
 					</div>
 
 					{/* Log Detail Sheet */}
 					<LogDetailSheet
-							log={selectedLog}
-							open={selectedLog !== null}
-							onOpenChange={(open) => !open && setSelectedLog(null)}
-							handleDelete={handleDelete}
-						/>
+						log={selectedLog}
+						open={selectedLog !== null}
+						onOpenChange={(open) => !open && setSelectedLog(null)}
+						handleDelete={handleDelete}
+					/>
 				</div>
 			)}
 		</div>

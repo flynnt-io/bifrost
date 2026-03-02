@@ -4,6 +4,7 @@ package configstore
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
@@ -18,6 +19,9 @@ type ConfigStore interface {
 	// Health check
 	Ping(ctx context.Context) error
 
+	// Encryption
+	EncryptPlaintextRows(ctx context.Context) error
+
 	// Client config CRUD
 	UpdateClientConfig(ctx context.Context, config *ClientConfig) error
 	GetClientConfig(ctx context.Context) (*ClientConfig, error)
@@ -28,16 +32,21 @@ type ConfigStore interface {
 
 	// Provider config CRUD
 	UpdateProvidersConfig(ctx context.Context, providers map[schemas.ModelProvider]ProviderConfig, tx ...*gorm.DB) error
-	AddProvider(ctx context.Context, provider schemas.ModelProvider, config ProviderConfig, envKeys map[string][]EnvKeyInfo, tx ...*gorm.DB) error
-	UpdateProvider(ctx context.Context, provider schemas.ModelProvider, config ProviderConfig, envKeys map[string][]EnvKeyInfo, tx ...*gorm.DB) error
+	AddProvider(ctx context.Context, provider schemas.ModelProvider, config ProviderConfig, tx ...*gorm.DB) error
+	UpdateProvider(ctx context.Context, provider schemas.ModelProvider, config ProviderConfig, tx ...*gorm.DB) error
 	DeleteProvider(ctx context.Context, provider schemas.ModelProvider, tx ...*gorm.DB) error
 	GetProvidersConfig(ctx context.Context) (map[schemas.ModelProvider]ProviderConfig, error)
+	GetProviderConfig(ctx context.Context, provider schemas.ModelProvider) (*ProviderConfig, error)
+	GetProviders(ctx context.Context) ([]tables.TableProvider, error)
+	GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error)
+	UpdateStatus(ctx context.Context, provider schemas.ModelProvider, keyID string, status, errorMsg string) error
 
 	// MCP config CRUD
 	GetMCPConfig(ctx context.Context) (*schemas.MCPConfig, error)
+	GetMCPClientByID(ctx context.Context, id string) (*tables.TableMCPClient, error)
 	GetMCPClientByName(ctx context.Context, name string) (*tables.TableMCPClient, error)
-	CreateMCPClientConfig(ctx context.Context, clientConfig schemas.MCPClientConfig, envKeys map[string][]EnvKeyInfo) error
-	UpdateMCPClientConfig(ctx context.Context, id string, clientConfig schemas.MCPClientConfig, envKeys map[string][]EnvKeyInfo) error
+	CreateMCPClientConfig(ctx context.Context, clientConfig *schemas.MCPClientConfig) error
+	UpdateMCPClientConfig(ctx context.Context, id string, clientConfig *tables.TableMCPClient) error
 	DeleteMCPClientConfig(ctx context.Context, id string) error
 
 	// Vector store config CRUD
@@ -47,10 +56,6 @@ type ConfigStore interface {
 	// Logs store config CRUD
 	UpdateLogsStoreConfig(ctx context.Context, config *logstore.Config) error
 	GetLogsStoreConfig(ctx context.Context) (*logstore.Config, error)
-
-	// ENV keys CRUD
-	UpdateEnvKeys(ctx context.Context, keys map[string][]EnvKeyInfo, tx ...*gorm.DB) error
-	GetEnvKeys(ctx context.Context) (map[string][]EnvKeyInfo, error)
 
 	// Config CRUD
 	GetConfig(ctx context.Context, key string) (*tables.TableGovernanceConfig, error)
@@ -100,10 +105,12 @@ type ConfigStore interface {
 	DeleteCustomer(ctx context.Context, id string) error
 
 	// Rate limit CRUD
-	GetRateLimit(ctx context.Context, id string) (*tables.TableRateLimit, error)
+	GetRateLimits(ctx context.Context) ([]tables.TableRateLimit, error)
+	GetRateLimit(ctx context.Context, id string, tx ...*gorm.DB) (*tables.TableRateLimit, error)
 	CreateRateLimit(ctx context.Context, rateLimit *tables.TableRateLimit, tx ...*gorm.DB) error
 	UpdateRateLimit(ctx context.Context, rateLimit *tables.TableRateLimit, tx ...*gorm.DB) error
 	UpdateRateLimits(ctx context.Context, rateLimits []*tables.TableRateLimit, tx ...*gorm.DB) error
+	DeleteRateLimit(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Budget CRUD
 	GetBudgets(ctx context.Context) ([]tables.TableBudget, error)
@@ -111,6 +118,27 @@ type ConfigStore interface {
 	CreateBudget(ctx context.Context, budget *tables.TableBudget, tx ...*gorm.DB) error
 	UpdateBudget(ctx context.Context, budget *tables.TableBudget, tx ...*gorm.DB) error
 	UpdateBudgets(ctx context.Context, budgets []*tables.TableBudget, tx ...*gorm.DB) error
+	DeleteBudget(ctx context.Context, id string, tx ...*gorm.DB) error
+	UpdateBudgetUsage(ctx context.Context, id string, currentUsage float64) error
+	UpdateRateLimitUsage(ctx context.Context, id string, tokenCurrentUsage int64, requestCurrentUsage int64) error
+
+	// Routing Rules CRUD
+	GetRoutingRules(ctx context.Context) ([]tables.TableRoutingRule, error)
+	GetRoutingRulesByScope(ctx context.Context, scope string, scopeID string) ([]tables.TableRoutingRule, error)
+	GetRoutingRule(ctx context.Context, id string) (*tables.TableRoutingRule, error)
+	GetRedactedRoutingRules(ctx context.Context, ids []string) ([]tables.TableRoutingRule, error) // leave ids empty to get all
+	CreateRoutingRule(ctx context.Context, rule *tables.TableRoutingRule, tx ...*gorm.DB) error
+	UpdateRoutingRule(ctx context.Context, rule *tables.TableRoutingRule, tx ...*gorm.DB) error
+	DeleteRoutingRule(ctx context.Context, id string, tx ...*gorm.DB) error
+
+	// Model config CRUD
+	GetModelConfigs(ctx context.Context) ([]tables.TableModelConfig, error)
+	GetModelConfig(ctx context.Context, modelName string, provider *string) (*tables.TableModelConfig, error)
+	GetModelConfigByID(ctx context.Context, id string) (*tables.TableModelConfig, error)
+	CreateModelConfig(ctx context.Context, modelConfig *tables.TableModelConfig, tx ...*gorm.DB) error
+	UpdateModelConfig(ctx context.Context, modelConfig *tables.TableModelConfig, tx ...*gorm.DB) error
+	UpdateModelConfigs(ctx context.Context, modelConfigs []*tables.TableModelConfig, tx ...*gorm.DB) error
+	DeleteModelConfig(ctx context.Context, id string) error
 
 	// Governance config CRUD
 	GetGovernanceConfig(ctx context.Context) (*GovernanceConfig, error)
@@ -123,14 +151,20 @@ type ConfigStore interface {
 	GetProxyConfig(ctx context.Context) (*tables.GlobalProxyConfig, error)
 	UpdateProxyConfig(ctx context.Context, config *tables.GlobalProxyConfig) error
 
+	// Restart required config CRUD
+	GetRestartRequiredConfig(ctx context.Context) (*tables.RestartRequiredConfig, error)
+	SetRestartRequiredConfig(ctx context.Context, config *tables.RestartRequiredConfig) error
+	ClearRestartRequiredConfig(ctx context.Context) error
+
 	// Session CRUD
 	GetSession(ctx context.Context, token string) (*tables.SessionsTable, error)
 	CreateSession(ctx context.Context, session *tables.SessionsTable) error
 	DeleteSession(ctx context.Context, token string) error
+	FlushSessions(ctx context.Context) error
 
 	// Model pricing CRUD
 	GetModelPrices(ctx context.Context) ([]tables.TableModelPricing, error)
-	CreateModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error
+	UpsertModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error
 	DeleteModelPrices(ctx context.Context, tx ...*gorm.DB) error
 
 	// Key management
@@ -140,6 +174,46 @@ type ConfigStore interface {
 
 	// Generic transaction manager
 	ExecuteTransaction(ctx context.Context, fn func(tx *gorm.DB) error) error
+
+	// TryAcquireLock attempts to insert a lock row. Returns true if the lock was acquired.
+	// If the lock already exists and is not expired, returns false.
+	TryAcquireLock(ctx context.Context, lock *tables.TableDistributedLock) (bool, error)
+
+	// GetLock retrieves a lock by its key. Returns nil if the lock doesn't exist.
+	GetLock(ctx context.Context, lockKey string) (*tables.TableDistributedLock, error)
+
+	// UpdateLockExpiry updates the expiration time for an existing lock.
+	// Only succeeds if the holder ID matches the current lock holder.
+	UpdateLockExpiry(ctx context.Context, lockKey, holderID string, expiresAt time.Time) error
+
+	// ReleaseLock deletes a lock if the holder ID matches.
+	// Returns true if the lock was released, false if it wasn't held by the given holder.
+	ReleaseLock(ctx context.Context, lockKey, holderID string) (bool, error)
+
+	// CleanupExpiredLockByKey atomically deletes a specific lock only if it has expired.
+	// Returns true if an expired lock was deleted, false if the lock doesn't exist or hasn't expired.
+	CleanupExpiredLockByKey(ctx context.Context, lockKey string) (bool, error)
+
+	// CleanupExpiredLocks removes all locks that have expired.
+	// Returns the number of locks cleaned up.
+	CleanupExpiredLocks(ctx context.Context) (int64, error)
+
+	// OAuth config CRUD
+	GetOauthConfigByID(ctx context.Context, id string) (*tables.TableOauthConfig, error)
+	GetOauthConfigByState(ctx context.Context, state string) (*tables.TableOauthConfig, error)
+	GetOauthConfigByTokenID(ctx context.Context, tokenID string) (*tables.TableOauthConfig, error)
+	CreateOauthConfig(ctx context.Context, config *tables.TableOauthConfig) error
+	UpdateOauthConfig(ctx context.Context, config *tables.TableOauthConfig) error
+
+	// OAuth token CRUD
+	GetOauthTokenByID(ctx context.Context, id string) (*tables.TableOauthToken, error)
+	GetExpiringOauthTokens(ctx context.Context, before time.Time) ([]*tables.TableOauthToken, error)
+	CreateOauthToken(ctx context.Context, token *tables.TableOauthToken) error
+	UpdateOauthToken(ctx context.Context, token *tables.TableOauthToken) error
+	DeleteOauthToken(ctx context.Context, id string) error
+
+	// Not found retry wrapper
+	RetryOnNotFound(ctx context.Context, fn func(ctx context.Context) (any, error), maxRetries int, retryDelay time.Duration) (any, error)
 
 	// DB returns the underlying database connection.
 	DB() *gorm.DB

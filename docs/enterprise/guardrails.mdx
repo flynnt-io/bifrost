@@ -1,6 +1,6 @@
 ---
 title: "Guardrails"
-description: "Enterprise-grade content safety and security validation with support for AWS Bedrock Guardrails, Azure Content Safety, and Patronus AI for real-time input and output protection."
+description: "Enterprise-grade content safety and security validation with support for AWS Bedrock Guardrails, Azure Content Safety, GraySwan Cygnal, and Patronus AI for real-time input and output protection."
 icon: "road-barrier"
 ---
 
@@ -8,17 +8,89 @@ icon: "road-barrier"
 
 **Guardrails** in Bifrost provide enterprise-grade content safety, security validation, and policy enforcement for LLM requests and responses. The system validates inputs and outputs in real-time against your specified policies, ensuring responsible AI deployment with comprehensive protection against harmful content, prompt injection, PII leakage, and policy violations.
 
+<Frame>
+  <img src="/media/guardrails/guardrails-overview.png" alt="Guardrails overview showing rules and profiles management" />
+</Frame>
+
+### Core Concepts
+
+Bifrost Guardrails are built around two core concepts that work together to provide flexible and powerful content protection:
+
+| Concept | Description |
+|---------|-------------|
+| **Rules** | Custom policies defined using CEL (Common Expression Language) that determine what content to validate and when. Rules can apply to inputs, outputs, or both, and can be linked to one or more profiles for evaluation. |
+| **Profiles** | Configurations for external guardrail providers (AWS Bedrock, Azure Content Safety, GraySwan, Patronus AI). Profiles are reusable and can be shared across multiple rules. |
+
+**How They Work Together:**
+- **Profiles** define *how* content is evaluated using external provider capabilities
+- **Rules** define *when* and *what* content gets evaluated using CEL expressions
+- A single rule can use multiple profiles for layered protection
+- Profiles can be reused across different rules for consistency
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Provider Support** | AWS Bedrock, Azure Content Safety, and Patronus AI integration |
+| **Multi-Provider Support** | AWS Bedrock, Azure Content Safety, GraySwan, and Patronus AI integration |
 | **Dual-Stage Validation** | Guard both inputs (prompts) and outputs (responses) |
 | **Real-Time Processing** | Synchronous and asynchronous validation modes |
-| **Custom Policies** | Define organization-specific guardrail rules |
+| **CEL-Based Rules** | Define custom policies using Common Expression Language |
+| **Reusable Profiles** | Configure providers once, use across multiple rules |
+| **Sampling Control** | Apply rules to a percentage of requests for performance tuning |
 | **Automatic Remediation** | Block, redact, or modify content based on policy |
 | **Comprehensive Logging** | Detailed audit trails for compliance |
+
+### Navigating Guardrails in the UI
+
+Access Guardrails from the Bifrost dashboard:
+
+| Page | Path | Description |
+|------|------|-------------|
+| **Configuration** | Guardrails > Configuration | Manage guardrail rules and their settings |
+| **Providers** | Guardrails > Providers | Configure and manage guardrail profiles |
+
+### Architecture
+
+The following diagram illustrates how Rules and Profiles work together to validate LLM requests:
+
+```mermaid
+flowchart TB
+    subgraph request_flow [Request Flow]
+        Request[LLM Request] --> InputValidation[Input Validation]
+        InputValidation --> LLMProvider[LLM Provider]
+        LLMProvider --> OutputValidation[Output Validation]
+        OutputValidation --> Response[Response]
+    end
+
+    subgraph rules [Guardrail Rules]
+        Rule1[Rule: Block PII]
+        Rule2[Rule: Content Filter]
+        Rule3[Rule: Prompt Injection]
+    end
+
+    subgraph profiles [Guardrail Profiles]
+        Profile1[AWS Bedrock Profile]
+        Profile2[Azure Content Safety Profile]
+        Profile3[Patronus AI Profile]
+        Profile4[GraySwan Profile]
+    end
+
+    InputValidation --> Rule1
+    InputValidation --> Rule3
+    OutputValidation --> Rule2
+
+    Rule1 --> Profile1
+    Rule2 --> Profile2
+    Rule2 --> Profile3
+    Rule3 --> Profile1
+```
+
+**Flow Description:**
+1. **Incoming Request** - LLM request arrives at Bifrost
+2. **Input Validation** - Applicable rules evaluate the input using linked profiles
+3. **LLM Processing** - If input passes, request is forwarded to the LLM provider
+4. **Output Validation** - Response is evaluated by output rules using linked profiles
+5. **Response** - Validated response is returned (or blocked/modified based on violations)
 
 ---
 
@@ -30,6 +102,8 @@ Bifrost integrates with leading guardrail providers to offer comprehensive prote
 
 **Amazon Bedrock Guardrails** provides enterprise-grade content filtering and safety features with deep AWS integration.
 
+![AWS Bedrock Guardrails configuration form](../media/guardrails/bedrock-guardrails-provider-details.png)
+
 **Capabilities:**
 - **Content Filters**: Hate speech, insults, sexual content, violence, misconduct
 - **Denied Topics**: Block specific topics or categories
@@ -37,6 +111,86 @@ Bifrost integrates with leading guardrail providers to offer comprehensive prote
 - **PII Protection**: Detect and redact 50+ PII entity types
 - **Contextual Grounding**: Verify responses against source documents
 - **Prompt Attack Detection**: Identify injection and jailbreak attempts
+- **Image Content Support**: Analyze images in addition to text (PNG, JPEG)
+
+**Configuration Fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `access_key` | string | No* | - | AWS Access Key ID |
+| `secret_key` | string | No* | - | AWS Secret Access Key |
+| `bedrock_api_key` | string | No* | - | Alternative Bedrock API key (Bearer token) |
+| `guardrail_arn` | string | Yes | - | ARN of the Bedrock guardrail |
+| `guardrail_version` | string | Yes | - | Version of the guardrail (e.g., "1", "DRAFT") |
+| `region` | string | Yes | - | AWS region |
+
+<Note>
+*Either `access_key` + `secret_key` OR `bedrock_api_key` must be provided for authentication.
+</Note>
+
+**Authentication Methods:**
+
+<Tabs group="bedrock-auth">
+<Tab title="Access Key + Secret Key">
+Uses AWS SDK with static credentials:
+```json
+{
+  "access_key": "AKIAXXXXXXXXXXXXXXXXXX",
+  "secret_key": "your-secret-access-key",
+  "guardrail_arn": "arn:aws:bedrock:us-east-1:123456789:guardrail/abc123",
+  "guardrail_version": "1",
+  "region": "us-east-1"
+}
+```
+</Tab>
+<Tab title="Bedrock API Key">
+Uses HTTP REST API with Bearer token:
+```json
+{
+  "bedrock_api_key": "your-bedrock-api-key",
+  "guardrail_arn": "arn:aws:bedrock:us-east-1:123456789:guardrail/abc123",
+  "guardrail_version": "1",
+  "region": "us-east-1"
+}
+```
+</Tab>
+</Tabs>
+
+**Supported AWS Regions:**
+
+| Region Code | Region Name |
+|-------------|-------------|
+| `us-east-1` | US East (N. Virginia) |
+| `us-east-2` | US East (Ohio) |
+| `us-west-1` | US West (N. California) |
+| `us-west-2` | US West (Oregon) |
+| `ap-south-1` | Asia Pacific (Mumbai) |
+| `ap-northeast-1` | Asia Pacific (Tokyo) |
+| `ap-northeast-2` | Asia Pacific (Seoul) |
+| `ap-southeast-1` | Asia Pacific (Singapore) |
+| `ap-southeast-2` | Asia Pacific (Sydney) |
+| `eu-central-1` | Europe (Frankfurt) |
+| `eu-west-1` | Europe (Ireland) |
+| `eu-west-2` | Europe (London) |
+| `eu-west-3` | Europe (Paris) |
+
+**Supported Content Types:**
+- Text content
+- Images (PNG, JPEG formats)
+
+**Usage Metrics Returned:**
+
+Bedrock guardrails return detailed usage metrics for cost tracking and monitoring:
+
+| Metric | Description |
+|--------|-------------|
+| `content_policy_units` | Units consumed by content policy evaluation |
+| `contextual_grounding_policy_units` | Units for grounding checks |
+| `sensitive_information_policy_units` | Units for PII detection |
+| `topic_policy_units` | Units for topic filtering |
+| `word_policy_units` | Units for word filtering |
+| `automated_reasoning_policy_units` | Units for reasoning checks |
+| `content_policy_image_units` | Units for image content analysis |
 
 **Supported PII Types:**
 - Personal identifiers (SSN, passport, driver's license)
@@ -49,21 +203,48 @@ Bifrost integrates with leading guardrail providers to offer comprehensive prote
 
 **Azure AI Content Safety** provides multi-modal content moderation powered by Microsoft's advanced AI models.
 
+![Azure Content Safety configuration form](../media/guardrails/azure-config-on-bifrost.png)
+
 **Capabilities:**
 - **Severity-Based Filtering**: 4-level severity classification (Safe, Low, Medium, High)
 - **Multi-Category Detection**: Hate, sexual, violence, self-harm content
 - **Prompt Shield**: Advanced jailbreak and injection detection
-- **Groundedness Detection**: Verify factual accuracy against sources
-- **Protected Material**: Detect copyrighted content
-- **Custom Categories**: Define organization-specific content policies
+- **Indirect Attack Detection**: Identify hidden malicious instructions
+- **Protected Material**: Detect copyrighted content (output only)
+- **Custom Blocklists**: Define organization-specific blocked terms
+
+**Configuration Fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `endpoint` | string | Yes | - | Azure Content Safety endpoint URL |
+| `api_key` | string | Yes | - | Azure subscription key |
+| `analyze_enabled` | boolean | No | true | Enable content analysis for Hate, Sexual, Violence, SelfHarm |
+| `analyze_severity_threshold` | enum | No | "medium" | Severity level to trigger: `low`, `medium`, or `high` |
+| `jailbreak_shield_enabled` | boolean | No | false | Enable jailbreak detection (input only) |
+| `indirect_attack_shield_enabled` | boolean | No | false | Enable indirect prompt attack detection (input only) |
+| `copyright_enabled` | boolean | No | false | Enable copyrighted content detection (output only) |
+| `text_blocklist_enabled` | boolean | No | false | Enable custom blocklist filtering |
+| `blocklist_names` | array | No | - | List of Azure blocklist names to apply |
+
+**Severity Threshold Levels:**
+
+| Threshold | Numeric Value | Behavior |
+|-----------|---------------|----------|
+| `low` | 2 | Most strict - blocks severity 2 and above |
+| `medium` | 4 | Balanced - blocks severity 4 and above |
+| `high` | 6 | Least strict - blocks only severity 6 |
 
 **Detection Categories:**
 - Hate and fairness
 - Sexual content
 - Violence
 - Self-harm
-- Profanity
-- Jailbreak attempts
+
+<Note>
+**Input-only features:** Jailbreak Shield and Indirect Attack Shield only apply to input validation.
+**Output-only features:** Copyright detection only applies to output validation.
+</Note>
 
 ### Patronus AI
 
@@ -83,159 +264,403 @@ Bifrost integrates with leading guardrail providers to offer comprehensive prote
 - Custom policy templates
 - Integration with existing safety workflows
 
+### GraySwan Cygnal
+
+**GraySwan Cygnal Monitor** provides AI safety monitoring with natural language rule definitions and advanced threat detection capabilities.
+
+![GraySwan configuration form](../media/guardrails/gray-swan-config-on-bifrost.png)
+
+**Capabilities:**
+- **Violation Scoring**: Continuous 0-1 scale violation detection with configurable thresholds
+- **Custom Natural Language Rules**: Define safety rules in plain English without code
+- **Policy Management**: Use pre-built policies from GraySwan platform or create custom ones
+- **Indirect Prompt Injection (IPI) Detection**: Identify hidden instructions in user inputs
+- **Mutation Detection**: Detect attempts to manipulate or alter content
+- **Reasoning Modes**: Choose from fast ("off"), balanced ("hybrid"), or thorough ("thinking") analysis
+
+**Configuration Fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `api_key` | string | Yes | - | GraySwan API key |
+| `violation_threshold` | number | No | 0.5 | Score threshold (0-1) for triggering intervention. Lower values are more strict. |
+| `reasoning_mode` | enum | No | "off" | Analysis depth: `off` (fastest), `hybrid` (balanced), or `thinking` (most thorough) |
+| `policy_id` | string | No | - | Single custom policy ID from GraySwan platform |
+| `policy_ids` | array | No | - | Multiple policy IDs for aggregated rule evaluation |
+| `rules` | object | No | - | Custom natural language rules as key-value pairs |
+
+**Custom Rules Example:**
+
+![GraySwan custom rules](../media/guardrails/gray-swan-custom-rule.png)
+
+Rules are defined as key-value pairs where the key is the rule name and the value is a natural language description:
+
+```json
+{
+  "rules": {
+    "no_profanity": "Do not allow profanity or vulgar language",
+    "no_pii": "Do not allow personally identifiable information",
+    "professional_tone": "Ensure all responses maintain a professional tone"
+  }
+}
+```
+
+**Detection Features:**
+- Real-time violation scoring
+- Multi-rule evaluation
+- IPI attack detection
+- Content mutation monitoring
+- Detailed violation descriptions with rule attribution
+
+
 ---
 
-## Configuration
+## Guardrail Rules
 
-### AWS Bedrock Guardrails Setup
+Guardrail Rules are custom policies that define when and how content validation occurs. Rules use CEL (Common Expression Language) expressions to evaluate requests and can be linked to one or more profiles for execution.
 
-<Tabs group="bedrock-config">
+<Frame>
+  <img src="/media/guardrails/query-creation.png" alt="Guardrail rules list showing configured rules with status and actions" />
+</Frame>
+
+### Rule Properties
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `id` | integer | Yes | Unique identifier for the rule |
+| `name` | string | Yes | Descriptive name for the rule |
+| `description` | string | No | Explanation of what the rule does |
+| `enabled` | boolean | Yes | Whether the rule is active |
+| `cel_expression` | string | Yes | CEL expression for rule evaluation |
+| `apply_to` | enum | Yes | When to apply: `input`, `output`, or `both` |
+| `sampling_rate` | integer | No | Percentage of requests to evaluate (0-100) |
+| `timeout` | integer | No | Execution timeout in milliseconds |
+| `provider_config_ids` | array | No | IDs of profiles to use for evaluation |
+
+### Creating Rules
+
+<Tabs group="rules-config">
 <Tab title="Web UI">
+1. **Navigate to Rules**
+   - Go to **Guardrails** > **Configuration**
+   - Click **Add Rule**
 
-1. **Navigate to Guardrails**
-   - Open Bifrost UI at `http://localhost:8080`
-   - Go to **Enterprise** → **Guardrails**
-   - Click **Add Guardrail Provider**
+<Frame>
+<img src="/media/guardrails/cel-rule-builder.png" alt="Guardrail rules list showing configured rules with status and actions" />
+</Frame>
 
-2. **Configure AWS Bedrock**
 
-**Required Fields:**
-- **Provider Name**: Descriptive name for this guardrail
-- **Provider Type**: Select "AWS Bedrock"
-- **AWS Region**: Your Bedrock region (e.g., `us-east-1`)
-- **Guardrail ID**: Your Bedrock guardrail identifier
-- **Guardrail Version**: Version number or `DRAFT`
+2. **Configure Rule Settings**
 
-**AWS Credentials:**
-- **Access Key ID**: AWS IAM access key
-- **Secret Access Key**: AWS IAM secret key
-- **Session Token**: (Optional) For temporary credentials
+**Basic Information:**
+- **Name**: Enter a descriptive name (e.g., "Block PII in Prompts")
+- **Description**: Explain the rule's purpose
+- **Enabled**: Toggle to activate the rule
 
-**Validation Settings:**
-- **Input Validation**: Enable for prompt validation
-- **Output Validation**: Enable for response validation
-- **Action on Violation**: Block, Log, or Redact
-- **Timeout**: Max validation time (default: 5s)
+**Evaluation Settings:**
+- **Apply To**: Select when to apply the rule
+  - `input` - Validate incoming prompts only
+  - `output` - Validate LLM responses only
+  - `both` - Validate both inputs and outputs
+- **CEL Expression**: Define the validation logic
+- **Sampling Rate**: Set percentage of requests to evaluate (default: 100%)
+- **Timeout**: Set maximum execution time in milliseconds
 
-3. **Test Configuration**
-   - Click **Test Guardrail**
-   - Send sample prompt to verify detection
-   - Review detection results
+3. **Link Profiles**
+   - Select one or more profiles to use for evaluation
+   - Rules will execute all linked profiles in sequence
+
+4. **Save and Test**
+   - Click **Save Rule**
+   - Use the **Test** button to validate with sample content
 
 </Tab>
 <Tab title="API">
 
-**Configure AWS Bedrock Guardrails:**
+**Create a Guardrail Rule:**
 ```bash
-curl -X POST http://localhost:8080/api/enterprise/guardrails \
+curl -X POST http://localhost:8080/api/enterprise/guardrails/rules \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "AWS Bedrock Production Guardrail",
-    "provider": "aws_bedrock",
+    "id": 1,
+    "name": "Block PII in Prompts",
+    "description": "Prevent PII from being sent to LLM providers",
+    "enabled": true,
+    "cel_expression": "request.messages.exists(m, m.role == \"user\")",
+    "apply_to": "input",
+    "sampling_rate": 100,
+    "timeout": 5000,
+    "provider_config_ids": [1, 2]
+  }'
+```
+
+**List All Rules:**
+```bash
+curl -X GET http://localhost:8080/api/enterprise/guardrails/rules \
+  -H "Content-Type: application/json"
+
+# Response
+{
+  "rules": [
+    {
+      "id": 1,
+      "name": "Block PII in Prompts",
+      "description": "Prevent PII from being sent to LLM providers",
+      "enabled": true,
+      "cel_expression": "request.messages.exists(m, m.role == \"user\")",
+      "apply_to": "input",
+      "sampling_rate": 100,
+      "timeout": 5000,
+      "provider_config_ids": [1, 2]
+    }
+  ]
+}
+```
+
+**Update a Rule:**
+```bash
+curl -X PUT http://localhost:8080/api/enterprise/guardrails/rules/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": false,
+    "sampling_rate": 50
+  }'
+```
+
+**Delete a Rule:**
+```bash
+curl -X DELETE http://localhost:8080/api/enterprise/guardrails/rules/1
+```
+
+</Tab>
+<Tab title="config.json">
+
+```json
+{
+  "enterprise": {
+    "guardrails": {
+      "guardrail_rules": [
+        {
+          "id": 1,
+          "name": "Block PII in Prompts",
+          "description": "Prevent PII from being sent to LLM providers",
+          "enabled": true,
+          "cel_expression": "request.messages.exists(m, m.role == \"user\")",
+          "apply_to": "input",
+          "sampling_rate": 100,
+          "timeout": 5000,
+          "provider_config_ids": [1, 2]
+        },
+        {
+          "id": 2,
+          "name": "Content Filter for Responses",
+          "description": "Filter harmful content from LLM responses",
+          "enabled": true,
+          "cel_expression": "true",
+          "apply_to": "output",
+          "sampling_rate": 100,
+          "timeout": 3000,
+          "provider_config_ids": [2]
+        },
+        {
+          "id": 3,
+          "name": "Prompt Injection Detection",
+          "description": "Detect and block prompt injection attempts",
+          "enabled": true,
+          "cel_expression": "request.messages.size() > 0",
+          "apply_to": "input",
+          "sampling_rate": 100,
+          "timeout": 2000,
+          "provider_config_ids": [1]
+        }
+      ]
+    }
+  }
+}
+```
+
+</Tab>
+<Tab title="Helm">
+
+```yaml
+enterprise:
+  guardrails:
+    rules:
+      - id: 1
+        name: "Block PII in Prompts"
+        description: "Prevent PII from being sent to LLM providers"
+        enabled: true
+        cel_expression: "request.messages.exists(m, m.role == 'user')"
+        apply_to: "input"
+        sampling_rate: 100
+        timeout: 5000
+        provider_config_ids: [1, 2]
+      - id: 2
+        name: "Content Filter for Responses"
+        description: "Filter harmful content from LLM responses"
+        enabled: true
+        cel_expression: "true"
+        apply_to: "output"
+        sampling_rate: 100
+        timeout: 3000
+        provider_config_ids: [2]
+```
+
+</Tab>
+</Tabs>
+
+### CEL Expression Examples
+
+CEL (Common Expression Language) provides a powerful way to define rule conditions. Here are common patterns:
+
+**Always Apply Rule:**
+```cel
+true
+```
+
+**Apply to User Messages Only:**
+```cel
+request.messages.exists(m, m.role == "user")
+```
+
+**Apply to Messages Containing Keywords:**
+```cel
+request.messages.exists(m, m.content.contains("confidential"))
+```
+
+**Apply Based on Model:**
+```cel
+request.model.startsWith("gpt-4")
+```
+
+**Apply to Long Prompts:**
+```cel
+request.messages.filter(m, m.role == "user").map(m, m.content.size()).sum() > 1000
+```
+
+**Combine Multiple Conditions:**
+```cel
+request.model.startsWith("gpt-4") && request.messages.exists(m, m.role == "user" && m.content.size() > 500)
+```
+
+### Linking Rules to Profiles
+
+Rules can be linked to multiple profiles for comprehensive validation:
+
+<Frame>
+  <img src="/media/guardrails/query-creation.png" alt="Rule configuration showing linked profiles" />
+</Frame>
+
+**Best Practices:**
+- Link PII detection rules to profiles with PII capabilities (Bedrock, Patronus)
+- Link content filtering rules to profiles with content safety features (Azure, Bedrock, GraySwan)
+- Use GraySwan for custom natural language rules when you need flexible, readable policies
+- Use multiple profiles for defense-in-depth (e.g., Bedrock + Patronus for PII, Azure + GraySwan for content)
+- Set appropriate timeouts when using multiple profiles
+
+---
+
+## Managing Profiles
+
+Profiles are reusable configurations for external guardrail providers. Each profile contains provider-specific settings including credentials, endpoints, and detection thresholds.
+
+<Frame>
+  <img src="/media/guardrails/provider-aws-create.png" alt="Guardrail profiles list showing configured providers" />
+</Frame>
+
+### Profile Properties
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `id` | integer | Yes | Unique identifier for the profile |
+| `provider_name` | string | Yes | Provider type: `bedrock`, `azure`, `grayswan`, `patronus_ai` |
+| `policy_name` | string | Yes | Descriptive name for the policy |
+| `enabled` | boolean | Yes | Whether the profile is active |
+| `config` | object | No | Provider-specific configuration |
+
+### Creating Profiles
+
+<Tabs group="profiles-config">
+<Tab title="Web UI">
+
+1. **Navigate to Providers**
+   - Go to **Guardrails** > **Providers**
+   - Click **Add Profile**
+
+<Frame>
+  <img src="/media/guardrails/guardrails-rule-list-2.png" alt="Create guardrail profile form" />
+</Frame>
+
+2. **Select Provider Type**
+   - Choose from: AWS Bedrock, Azure Content Safety, GraySwan, or Patronus AI
+
+3. **Configure Provider Settings**
+   - Enter credentials and endpoint information
+   - Configure detection thresholds and actions
+   - See provider-specific setup sections above for detailed configuration
+
+4. **Save Profile**
+   - Click **Save Profile**
+   - The profile is now available for linking to rules
+
+</Tab>
+<Tab title="API">
+
+**Create a Profile:**
+```bash
+curl -X POST http://localhost:8080/api/enterprise/guardrails/providers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": 1,
+    "provider_name": "bedrock",
+    "policy_name": "PII Detection Profile",
     "enabled": true,
     "config": {
-      "aws_region": "us-east-1",
-      "guardrail_id": "gdrail-abc123def456",
+      "access_key": "${AWS_ACCESS_KEY_ID}",
+      "secret_key": "${AWS_SECRET_ACCESS_KEY}",
+      "guardrail_arn": "arn:aws:bedrock:us-east-1:123456789:guardrail/abc123",
       "guardrail_version": "1",
-      "credentials": {
-        "access_key_id": "AKIA...",
-        "secret_access_key": "secret...",
-        "session_token": ""
-      }
-    },
-    "validation": {
-      "validate_input": true,
-      "validate_output": true,
-      "action_on_violation": "block",
-      "timeout_ms": 5000
-    },
-    "content_filters": {
-      "hate": {
-        "enabled": true,
-        "threshold": "MEDIUM"
-      },
-      "insults": {
-        "enabled": true,
-        "threshold": "MEDIUM"
-      },
-      "sexual": {
-        "enabled": true,
-        "threshold": "HIGH"
-      },
-      "violence": {
-        "enabled": true,
-        "threshold": "MEDIUM"
-      },
-      "misconduct": {
-        "enabled": true,
-        "threshold": "LOW"
-      }
-    },
-    "pii_detection": {
-      "enabled": true,
-      "action": "redact",
-      "entities": [
-        "SSN",
-        "EMAIL",
-        "PHONE",
-        "CREDIT_CARD",
-        "BANK_ACCOUNT",
-        "PASSPORT",
-        "DRIVER_LICENSE",
-        "IP_ADDRESS"
-      ]
-    },
-    "denied_topics": [
-      {
-        "name": "Financial Advice",
-        "definition": "Investment recommendations or financial guidance",
-        "action": "block"
-      },
-      {
-        "name": "Medical Diagnosis",
-        "definition": "Specific medical diagnoses or treatment recommendations",
-        "action": "block"
-      }
-    ],
-    "word_filters": {
-      "profanity": {
-        "enabled": true,
-        "action": "redact"
-      },
-      "custom_words": [
-        "confidential",
-        "internal-only",
-        "do-not-share"
-      ]
+      "region": "us-east-1"
     }
   }'
 ```
 
-**Test Guardrail:**
+**List All Profiles:**
 ```bash
-curl -X POST http://localhost:8080/api/enterprise/guardrails/{guardrail_id}/test \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input_text": "My SSN is 123-45-6789 and I need help with something",
-    "validation_type": "input"
-  }'
+curl -X GET http://localhost:8080/api/enterprise/guardrails/providers \
+  -H "Content-Type: application/json"
 
 # Response
 {
-  "guardrail_id": "gdrail-abc123def456",
-  "action_taken": "redact",
-  "violations": [
+  "providers": [
     {
-      "type": "PII",
-      "category": "SSN",
-      "severity": "HIGH",
-      "text_excerpt": "My SSN is ***-**-****",
-      "confidence": 0.99
+      "id": 1,
+      "provider_name": "bedrock",
+      "policy_name": "PII Detection Profile",
+      "enabled": true
+    },
+    {
+      "id": 2,
+      "provider_name": "azure",
+      "policy_name": "Content Safety Profile",
+      "enabled": true
     }
-  ],
-  "modified_text": "My SSN is ***-**-**** and I need help with something",
-  "processing_time_ms": 245
+  ]
 }
+```
+
+**Update a Profile:**
+```bash
+curl -X PUT http://localhost:8080/api/enterprise/guardrails/providers/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": false
+  }'
+```
+
+**Delete a Profile:**
+```bash
+curl -X DELETE http://localhost:8080/api/enterprise/guardrails/providers/1
 ```
 
 </Tab>
@@ -244,458 +669,152 @@ curl -X POST http://localhost:8080/api/enterprise/guardrails/{guardrail_id}/test
 ```json
 {
   "enterprise": {
-    "guardrails": [
-      {
-        "id": "bedrock-prod-guardrail",
-        "name": "AWS Bedrock Production Guardrail",
-        "provider": "aws_bedrock",
-        "enabled": true,
-        "config": {
-          "aws_region": "us-east-1",
-          "guardrail_id": "gdrail-abc123def456",
-          "guardrail_version": "1",
-          "credentials": {
-            "access_key_id": "${AWS_ACCESS_KEY_ID}",
-            "secret_access_key": "${AWS_SECRET_ACCESS_KEY}",
-            "session_token": "${AWS_SESSION_TOKEN}"
-          }
-        },
-        "validation": {
-          "validate_input": true,
-          "validate_output": true,
-          "action_on_violation": "block",
-          "timeout_ms": 5000
-        },
-        "content_filters": {
-          "hate": {
-            "enabled": true,
-            "threshold": "MEDIUM"
-          },
-          "insults": {
-            "enabled": true,
-            "threshold": "MEDIUM"
-          },
-          "sexual": {
-            "enabled": true,
-            "threshold": "HIGH"
-          },
-          "violence": {
-            "enabled": true,
-            "threshold": "MEDIUM"
-          }
-        },
-        "pii_detection": {
+    "guardrails": {
+      "guardrail_providers": [
+        {
+          "id": 1,
+          "provider_name": "bedrock",
+          "policy_name": "PII Detection Profile",
           "enabled": true,
-          "action": "redact",
-          "entities": [
-            "SSN",
-            "EMAIL",
-            "PHONE",
-            "CREDIT_CARD"
-          ]
-        }
-      }
-    ]
-  }
-}
-```
-
-</Tab>
-</Tabs>
-
-### Azure Content Safety Setup
-
-<Tabs group="azure-config">
-<Tab title="Web UI">
-
-1. **Navigate to Guardrails**
-   - Go to **Enterprise** → **Guardrails**
-   - Click **Add Guardrail Provider**
-
-2. **Configure Azure Content Safety**
-
-**Required Fields:**
-- **Provider Name**: Descriptive name
-- **Provider Type**: Select "Azure Content Safety"
-- **Endpoint**: Your Azure Content Safety endpoint
-- **API Key**: Azure subscription key
-
-**Content Filters:**
-- **Hate**: Enable with severity threshold
-- **Sexual**: Enable with severity threshold
-- **Violence**: Enable with severity threshold
-- **Self-Harm**: Enable with severity threshold
-
-**Advanced Features:**
-- **Prompt Shield**: Enable jailbreak detection
-- **Groundedness Detection**: Enable for factual verification
-- **Custom Categories**: Define organization policies
-
-</Tab>
-<Tab title="API">
-
-**Configure Azure Content Safety:**
-```bash
-curl -X POST http://localhost:8080/api/enterprise/guardrails \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Azure Content Safety Guardrail",
-    "provider": "azure_content_safety",
-    "enabled": true,
-    "config": {
-      "endpoint": "https://your-resource.cognitiveservices.azure.com/",
-      "api_key": "your-azure-api-key",
-      "api_version": "2024-02-15-preview"
-    },
-    "validation": {
-      "validate_input": true,
-      "validate_output": true,
-      "action_on_violation": "block",
-      "timeout_ms": 3000
-    },
-    "content_categories": {
-      "hate": {
-        "enabled": true,
-        "severity_threshold": 2,
-        "action": "block"
-      },
-      "sexual": {
-        "enabled": true,
-        "severity_threshold": 4,
-        "action": "block"
-      },
-      "violence": {
-        "enabled": true,
-        "severity_threshold": 2,
-        "action": "block"
-      },
-      "self_harm": {
-        "enabled": true,
-        "severity_threshold": 2,
-        "action": "block"
-      }
-    },
-    "prompt_shield": {
-      "enabled": true,
-      "detect_jailbreak": true,
-      "detect_indirect_attack": true,
-      "action": "block"
-    },
-    "groundedness_detection": {
-      "enabled": false,
-      "source_type": "reasoning",
-      "action": "log"
-    },
-    "custom_categories": [
-      {
-        "name": "Corporate Policy Violation",
-        "definition": "Content violating company communication policies",
-        "sample_content": [
-          "Example of prohibited content 1",
-          "Example of prohibited content 2"
-        ],
-        "severity_threshold": 2,
-        "action": "block"
-      }
-    ]
-  }'
-```
-
-**Analyze Content:**
-```bash
-curl -X POST http://localhost:8080/api/guardrails/{guardrail_id}/analyze \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Content to analyze for safety violations",
-    "validation_type": "input"
-  }'
-
-# Response
-{
-  "guardrail_id": "azure-content-safety-001",
-  "action_taken": "allow",
-  "categories_analysis": [
-    {
-      "category": "Hate",
-      "severity": 0
-    },
-    {
-      "category": "Sexual",
-      "severity": 0
-    },
-    {
-      "category": "Violence",
-      "severity": 0
-    },
-    {
-      "category": "SelfHarm",
-      "severity": 0
-    }
-  ],
-  "prompt_shield_result": {
-    "jailbreak_detected": false,
-    "indirect_attack_detected": false
-  },
-  "processing_time_ms": 187
-}
-```
-
-</Tab>
-<Tab title="config.json">
-
-```json
-{
-  "enterprise": {
-    "guardrails": [
-      {
-        "id": "azure-content-safety-001",
-        "name": "Azure Content Safety Guardrail",
-        "provider": "azure_content_safety",
-        "enabled": true,
-        "config": {
-          "endpoint": "https://your-resource.cognitiveservices.azure.com/",
-          "api_key": "${AZURE_CONTENT_SAFETY_API_KEY}",
-          "api_version": "2024-02-15-preview"
-        },
-        "validation": {
-          "validate_input": true,
-          "validate_output": true,
-          "action_on_violation": "block",
-          "timeout_ms": 3000
-        },
-        "content_categories": {
-          "hate": {
-            "enabled": true,
-            "severity_threshold": 2,
-            "action": "block"
-          },
-          "sexual": {
-            "enabled": true,
-            "severity_threshold": 4,
-            "action": "block"
-          },
-          "violence": {
-            "enabled": true,
-            "severity_threshold": 2,
-            "action": "block"
-          },
-          "self_harm": {
-            "enabled": true,
-            "severity_threshold": 2,
-            "action": "block"
+          "config": {
+            "access_key": "${AWS_ACCESS_KEY_ID}",
+            "secret_key": "${AWS_SECRET_ACCESS_KEY}",
+            "guardrail_arn": "arn:aws:bedrock:us-east-1:123456789:guardrail/abc123",
+            "guardrail_version": "1",
+            "region": "us-east-1"
           }
         },
-        "prompt_shield": {
+        {
+          "id": 2,
+          "provider_name": "azure",
+          "policy_name": "Content Safety Profile",
           "enabled": true,
-          "detect_jailbreak": true,
-          "detect_indirect_attack": true
-        }
-      }
-    ]
-  }
-}
-```
-
-</Tab>
-</Tabs>
-
-### Patronus AI Setup
-
-<Tabs group="patronus-config">
-<Tab title="Web UI">
-
-1. **Navigate to Guardrails**
-   - Go to **Enterprise** → **Guardrails**
-   - Click **Add Guardrail Provider**
-
-2. **Configure Patronus AI**
-
-**Required Fields:**
-- **Provider Name**: Descriptive name
-- **Provider Type**: Select "Patronus AI"
-- **API Key**: Your Patronus API key
-- **Environment**: Production or Development
-
-**Evaluators:**
-- **Hallucination Detection**: Enable factual accuracy checks
-- **PII Detection**: Enable personal data identification
-- **Toxicity**: Enable harmful content detection
-- **Prompt Injection**: Enable attack detection
-
-**Custom Policies:**
-- Upload organization-specific evaluators
-- Define custom safety criteria
-
-</Tab>
-<Tab title="API">
-
-**Configure Patronus AI:**
-```bash
-curl -X POST http://localhost:8080/api/enterprise/guardrails \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Patronus AI Guardrail",
-    "provider": "patronus_ai",
-    "enabled": true,
-    "config": {
-      "api_key": "your-patronus-api-key",
-      "api_endpoint": "https://api.patronus.ai/v1",
-      "environment": "production"
-    },
-    "validation": {
-      "validate_input": true,
-      "validate_output": true,
-      "action_on_violation": "log",
-      "timeout_ms": 4000
-    },
-    "evaluators": {
-      "hallucination_detection": {
-        "enabled": true,
-        "action": "log",
-        "confidence_threshold": 0.8
-      },
-      "pii_detection": {
-        "enabled": true,
-        "action": "redact",
-        "entity_types": [
-          "PERSON",
-          "EMAIL_ADDRESS",
-          "PHONE_NUMBER",
-          "CREDIT_CARD",
-          "SSN",
-          "LOCATION"
-        ]
-      },
-      "toxicity": {
-        "enabled": true,
-        "action": "block",
-        "threshold": 0.7,
-        "categories": [
-          "toxicity",
-          "severe_toxicity",
-          "identity_attack",
-          "insult",
-          "profanity",
-          "threat"
-        ]
-      },
-      "prompt_injection": {
-        "enabled": true,
-        "action": "block",
-        "confidence_threshold": 0.85
-      }
-    },
-    "custom_evaluators": [
-      {
-        "name": "brand_safety",
-        "evaluator_id": "eval-brand-001",
-        "action": "block",
-        "threshold": 0.75
-      }
-    ]
-  }'
-```
-
-**Run Evaluation:**
-```bash
-curl -X POST http://localhost:8080/api/enterprise/guardrails/{guardrail_id}/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input_text": "Tell me about quantum computing",
-    "output_text": "Quantum computing uses quantum mechanics principles...",
-    "context": "Technical documentation query"
-  }'
-
-# Response
-{
-  "guardrail_id": "patronus-ai-001",
-  "action_taken": "allow",
-  "evaluations": [
-    {
-      "evaluator": "hallucination_detection",
-      "score": 0.95,
-      "passed": true,
-      "explanation": "Response is factually accurate"
-    },
-    {
-      "evaluator": "pii_detection",
-      "score": 0.0,
-      "passed": true,
-      "entities_found": []
-    },
-    {
-      "evaluator": "toxicity",
-      "score": 0.02,
-      "passed": true,
-      "categories_detected": []
-    },
-    {
-      "evaluator": "prompt_injection",
-      "score": 0.01,
-      "passed": true
-    }
-  ],
-  "processing_time_ms": 312
-}
-```
-
-</Tab>
-<Tab title="config.json">
-
-```json
-{
-  "enterprise": {
-    "guardrails": [
-      {
-        "id": "patronus-ai-001",
-        "name": "Patronus AI Guardrail",
-        "provider": "patronus_ai",
-        "enabled": true,
-        "config": {
-          "api_key": "${PATRONUS_API_KEY}",
-          "api_endpoint": "https://api.patronus.ai/v1",
-          "environment": "production"
+          "config": {
+            "endpoint": "https://your-resource.cognitiveservices.azure.com/",
+            "api_key": "${AZURE_CONTENT_SAFETY_API_KEY}",
+            "analyze_enabled": true,
+            "analyze_severity_threshold": "medium",
+            "jailbreak_shield_enabled": true,
+            "indirect_attack_shield_enabled": true
+          }
         },
-        "validation": {
-          "validate_input": true,
-          "validate_output": true,
-          "action_on_violation": "log",
-          "timeout_ms": 4000
+        {
+          "id": 3,
+          "provider_name": "grayswan",
+          "policy_name": "Custom Safety Rules",
+          "enabled": true,
+          "config": {
+            "api_key": "${GRAYSWAN_API_KEY}",
+            "violation_threshold": 0.5,
+            "reasoning_mode": "hybrid",
+            "rules": {
+              "no_pii": "Do not allow personally identifiable information",
+              "professional_tone": "Ensure responses maintain a professional tone"
+            }
+          }
         },
-        "evaluators": {
-          "hallucination_detection": {
-            "enabled": true,
-            "action": "log",
-            "confidence_threshold": 0.8
-          },
-          "pii_detection": {
-            "enabled": true,
-            "action": "redact",
-            "entity_types": [
-              "PERSON",
-              "EMAIL_ADDRESS",
-              "PHONE_NUMBER"
-            ]
-          },
-          "toxicity": {
-            "enabled": true,
-            "action": "block",
-            "threshold": 0.7
-          },
-          "prompt_injection": {
-            "enabled": true,
-            "action": "block",
-            "confidence_threshold": 0.85
+        {
+          "id": 4,
+          "provider_name": "patronus_ai",
+          "policy_name": "Hallucination Detection",
+          "enabled": true,
+          "config": {
+            "api_key": "${PATRONUS_API_KEY}",
+            "api_endpoint": "https://api.patronus.ai/v1"
           }
         }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
 
 </Tab>
+<Tab title="Helm">
+
+```yaml
+enterprise:
+  guardrails:
+    providers:
+      - id: 1
+        provider_name: "bedrock"
+        policy_name: "PII Detection Profile"
+        enabled: true
+        config:
+          guardrail_arn: "arn:aws:bedrock:us-east-1:123456789:guardrail/abc123"
+          guardrail_version: "1"
+          region: "us-east-1"
+          # AWS Authentication (choose one method):
+          # Option 1: Explicit credentials
+          access_key: "${AWS_ACCESS_KEY_ID}"
+          secret_key: "${AWS_SECRET_ACCESS_KEY}"
+          # Option 2: IAM Role - omit access_key and secret_key
+          # (Bifrost will use IAM credentials from the environment)
+      - id: 2
+        provider_name: "azure"
+        policy_name: "Content Safety Profile"
+        enabled: true
+        config:
+          endpoint: "https://your-resource.cognitiveservices.azure.com/"
+          api_key: "${AZURE_CONTENT_SAFETY_API_KEY}"
+          analyze_enabled: true
+          analyze_severity_threshold: "medium"
+          jailbreak_shield_enabled: true
+      - id: 3
+        provider_name: "grayswan"
+        policy_name: "Custom Safety Rules"
+        enabled: true
+        config:
+          api_key: "${GRAYSWAN_API_KEY}"
+          violation_threshold: 0.5
+          reasoning_mode: "hybrid"
+          rules:
+            no_pii: "Do not allow personally identifiable information"
+            professional_tone: "Ensure responses maintain a professional tone"
+      - id: 4
+        provider_name: "patronus_ai"
+        policy_name: "Hallucination Detection"
+        enabled: true
+        config:
+          api_endpoint: "https://api.patronus.ai/v1"
+```
+
+</Tab>
 </Tabs>
+
+### Provider Capabilities
+
+Each provider offers different capabilities. Choose profiles based on your validation needs:
+
+| Capability | AWS Bedrock | Azure Content Safety | GraySwan | Patronus AI |
+|------------|-------------|---------------------|----------|-------------|
+| PII Detection | Yes | No | No | Yes |
+| Content Filtering | Yes | Yes | Yes | Yes |
+| Prompt Injection | Yes | Yes | Yes | Yes |
+| Hallucination Detection | No | No | No | Yes |
+| Toxicity Screening | Yes | Yes | Yes | Yes |
+| Custom Policies | Yes | Yes | Yes | Yes |
+| Custom Natural Language Rules | No | No | Yes | No |
+| Image Support | Yes | No | No | No |
+| IPI Detection | No | Yes | Yes | No |
+| Mutation Detection | No | No | Yes | No |
+
+### Best Practices
+
+**Profile Organization:**
+- Create separate profiles for different use cases (PII, content filtering, etc.)
+- Use descriptive policy names that indicate the profile's purpose
+- Keep credentials secure using environment variables
+
+**Performance Considerations:**
+- Enable only the profiles you need to minimize latency
+- Use sampling rates on rules for high-traffic endpoints
+- Set appropriate timeouts to prevent slow requests
+
+**Security:**
+- Store API keys and credentials in environment variables or secrets managers
+- Regularly rotate credentials
+- Use least-privilege IAM roles for AWS Bedrock
 
 ---
 
