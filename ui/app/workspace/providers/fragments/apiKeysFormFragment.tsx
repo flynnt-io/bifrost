@@ -3,6 +3,8 @@ import { FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessa
 import { HeadersTable, type CellRenderParams } from "@/components/ui/headersTable";
 import { Input } from "@/components/ui/input";
 import { ModelMultiselect } from "@/components/ui/modelMultiselect";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { TagInput } from "@/components/ui/tagInput";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -725,6 +727,30 @@ export function ApiKeyFormFragment({ control, providerName, form }: Props) {
 										className="max-w-full font-mono text-sm wrap-anywhere"
 									/>
 								</FormControl>
+								<FormMessage />
+							</FormItem>
+						)}
+					/>
+					<FormField
+						control={control}
+						name={`key.apertus_key_config.rerank_format`}
+						render={({ field }) => (
+							<FormItem>
+								<FormLabel>Rerank Format (Optional)</FormLabel>
+								<FormDescription>
+									Select the rerank API format used by the backend. Cohere uses /v2/rerank, vLLM uses /v1/rerank.
+								</FormDescription>
+								<Select onValueChange={field.onChange} value={field.value ?? "cohere"}>
+									<FormControl>
+										<SelectTrigger>
+											<SelectValue />
+										</SelectTrigger>
+									</FormControl>
+									<SelectContent>
+										<SelectItem value="cohere">Cohere (/v2/rerank)</SelectItem>
+										<SelectItem value="vllm">vLLM (/v1/rerank)</SelectItem>
+									</SelectContent>
+								</Select>
 								<FormMessage />
 							</FormItem>
 						)}

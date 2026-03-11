@@ -82,6 +82,18 @@ export const DefaultBedrockKeyConfig: BedrockKeyConfig = {
 	batch_s3_config: undefined as unknown as BatchS3Config,
 } as const satisfies Required<BedrockKeyConfig>;
 
+// ApertusKeyConfig matching Go's schemas.ApertusKeyConfig
+export interface ApertusKeyConfig {
+	endpoint?: string;
+	model_name_mappings?: Record<string, string> | string;
+	rerank_format?: string;
+}
+
+export const DefaultApertusKeyConfig: ApertusKeyConfig = {
+	endpoint: "",
+	model_name_mappings: {},
+	rerank_format: "cohere",
+} as const satisfies Required<ApertusKeyConfig>;
 // VLLMKeyConfig matching Go's schemas.VLLMKeyConfig
 export interface VLLMKeyConfig {
 	url: EnvVar;

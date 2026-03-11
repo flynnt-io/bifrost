@@ -4,11 +4,14 @@ package apertus
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/maximhq/bifrost/core/providers/cohere"
 	"github.com/maximhq/bifrost/core/providers/openai"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
+	"github.com/maximhq/bifrost/core/providers/vllm"
 	schemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
 )
@@ -454,21 +457,136 @@ func (provider *ApertusProvider) Embedding(ctx *schemas.BifrostContext, key sche
 	return response, err
 }
 
+// getRerankDefaultPath returns the default rerank endpoint path based on the key's rerank format.
+// Returns "/v2/rerank" for cohere format (default) or "/v1/rerank" for vllm format.
+func getRerankDefaultPath(key schemas.Key) string {
+	if key.ApertusKeyConfig != nil && key.ApertusKeyConfig.RerankFormat == "vllm" {
+		return "/v1/rerank"
+	}
+	return "/v2/rerank"
+}
+
 // Rerank performs a rerank request to the Apertus API.
+// It supports both Cohere (/v2/rerank) and vLLM (/v1/rerank) wire formats,
+// selected via the key's RerankFormat configuration.
 func (provider *ApertusProvider) Rerank(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostRerankRequest) (*schemas.BifrostRerankResponse, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.RerankRequest); err != nil {
 		return nil, err
 	}
-	delegate := provider.createDelegateForKey(key)
-	response, err := delegate.Rerank(ctx, key, request)
+
+	// Store original model name before mapping
+	originalModel := request.Model
+	mappedModel := provider.getModelName(key, request.Model)
+	request.Model = mappedModel
+
+	// Determine format and select converter
+	isVLLM := key.ApertusKeyConfig != nil && key.ApertusKeyConfig.RerankFormat == "vllm"
+
+	var converter func() (providerUtils.RequestBodyWithExtraParams, error)
+	if isVLLM {
+		converter = func() (providerUtils.RequestBodyWithExtraParams, error) {
+			return vllm.ToVLLMRerankRequest(request), nil
+		}
+	} else {
+		converter = func() (providerUtils.RequestBodyWithExtraParams, error) {
+			return cohere.ToCohereRerankRequest(request), nil
+		}
+	}
+
+	jsonData, bifrostErr := providerUtils.CheckContextAndGetRequestBody(
+		ctx,
+		request,
+		converter,
+		provider.GetProviderKey(),
+	)
+	if bifrostErr != nil {
+		return nil, bifrostErr
+	}
+
+	// Build URL and make HTTP request
+	url := provider.buildRequestURL(ctx, key, getRerankDefaultPath(key), schemas.RerankRequest)
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
+	req.SetRequestURI(url)
+	req.Header.SetMethod(http.MethodPost)
+	req.Header.SetContentType("application/json")
+	if key.Value.GetValue() != "" {
+		req.Header.Set("Authorization", "Bearer "+key.Value.GetValue())
+	}
+	req.SetBody(jsonData)
+
+	latency, bifrostErr := providerUtils.MakeRequestWithContext(ctx, provider.client, req, resp)
+	if bifrostErr != nil {
+		return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse)
+	}
+
+	// Handle error responses
+	if resp.StatusCode() != fasthttp.StatusOK {
+		apiErr := openai.ParseOpenAIError(resp, schemas.RerankRequest, provider.GetProviderKey(), request.Model)
+		return nil, providerUtils.EnrichError(ctx, apiErr, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse)
+	}
+
+	// Decode response body
+	body, err := providerUtils.CheckAndDecodeBody(resp)
 	if err != nil {
-		err.ExtraFields.Provider = provider.GetProviderKey()
-		return nil, err
+		return nil, providerUtils.NewBifrostOperationError(schemas.ErrProviderResponseDecode, err, provider.GetProviderKey())
 	}
-	if response != nil {
-		response.ExtraFields.Provider = provider.GetProviderKey()
+	bodyCopy := append([]byte(nil), body...)
+
+	sendBackRawReq := providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest)
+	sendBackRawResp := providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse)
+
+	returnDocuments := request.Params != nil && request.Params.ReturnDocuments != nil && *request.Params.ReturnDocuments
+
+	// Parse response using format-specific converter
+	var bifrostResponse *schemas.BifrostRerankResponse
+	var rawRequest, rawResponse interface{}
+
+	if isVLLM {
+		responsePayload := make(map[string]interface{})
+		rawRequest, rawResponse, bifrostErr = providerUtils.HandleProviderResponse(bodyCopy, &responsePayload, jsonData, sendBackRawReq, sendBackRawResp)
+		if bifrostErr != nil {
+			return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonData, bodyCopy, provider.sendBackRawRequest, provider.sendBackRawResponse)
+		}
+
+		var convErr error
+		bifrostResponse, convErr = vllm.ToBifrostRerankResponse(responsePayload, request.Documents, returnDocuments)
+		if convErr != nil {
+			return nil, providerUtils.EnrichError(ctx,
+				providerUtils.NewBifrostOperationError("error converting rerank response", convErr, provider.GetProviderKey()),
+				jsonData, bodyCopy, provider.sendBackRawRequest, provider.sendBackRawResponse)
+		}
+	} else {
+		cohereResponse := &cohere.CohereRerankResponse{}
+		rawRequest, rawResponse, bifrostErr = providerUtils.HandleProviderResponse(bodyCopy, cohereResponse, jsonData, sendBackRawReq, sendBackRawResp)
+		if bifrostErr != nil {
+			return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonData, bodyCopy, provider.sendBackRawRequest, provider.sendBackRawResponse)
+		}
+
+		bifrostResponse = cohereResponse.ToBifrostRerankResponse(request.Documents, returnDocuments)
 	}
-	return response, nil
+
+	// Set response fields
+	bifrostResponse.Model = originalModel
+	bifrostResponse.ExtraFields.Provider = provider.GetProviderKey()
+	bifrostResponse.ExtraFields.ModelRequested = originalModel
+	bifrostResponse.ExtraFields.ModelDeployment = mappedModel
+	bifrostResponse.ExtraFields.RequestType = schemas.RerankRequest
+	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
+
+	if sendBackRawReq {
+		bifrostResponse.ExtraFields.RawRequest = rawRequest
+	}
+	if sendBackRawResp {
+		bifrostResponse.ExtraFields.RawResponse = rawResponse
+	}
+
+	return bifrostResponse, nil
 }
 
 // Speech handles non-streaming speech synthesis requests.

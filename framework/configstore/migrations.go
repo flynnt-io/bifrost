@@ -498,6 +498,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddApertusModelNameMappingsJSONColumn(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddApertusRerankFormatColumn(ctx, db); err != nil {
+		return err
+	}
 	if err := migrationAddVirtualKeyConfigHashColumn(ctx, db); err != nil {
 		return err
 	}
@@ -9067,6 +9070,35 @@ func migrationAddAdditionalAttributesToPricing(ctx context.Context, db *gorm.DB)
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error running add_additional_attributes_to_pricing migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddApertusRerankFormatColumn adds the apertus_rerank_format column to the key table
+func migrationAddApertusRerankFormatColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_apertus_rerank_format_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if !mg.HasColumn(&tables.TableKey{}, "apertus_rerank_format") {
+				if err := mg.AddColumn(&tables.TableKey{}, "apertus_rerank_format"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if err := mg.DropColumn(&tables.TableKey{}, "apertus_rerank_format"); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running add_apertus_rerank_format_column migration: %s", err.Error())
 	}
 	return nil
 }

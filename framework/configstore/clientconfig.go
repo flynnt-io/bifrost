@@ -566,6 +566,14 @@ func (p *ProviderConfig) Redacted() *ProviderConfig {
 			sglConfig.URL = *key.SGLKeyConfig.URL.Redacted()
 			redactedConfig.Keys[i].SGLKeyConfig = sglConfig
 		}
+
+		if key.ApertusKeyConfig != nil {
+			redactedConfig.Keys[i].ApertusKeyConfig = &schemas.ApertusKeyConfig{
+				Endpoint:          key.ApertusKeyConfig.Endpoint,
+				ModelNameMappings: key.ApertusKeyConfig.ModelNameMappings,
+				RerankFormat:      key.ApertusKeyConfig.RerankFormat,
+			}
+		}
 	}
 	return &redactedConfig
 }

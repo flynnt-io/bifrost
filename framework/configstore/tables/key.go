@@ -80,6 +80,7 @@ type TableKey struct {
 	// Apertus config fields (embedded)
 	ApertusEndpoint              *string `gorm:"type:text" json:"apertus_endpoint,omitempty"`
 	ApertusModelNameMappingsJSON *string `gorm:"type:text" json:"-"` // JSON serialized map[string]string
+	ApertusRerankFormat          *string `gorm:"type:text" json:"-"` // Rerank wire format: "cohere" or "vllm"
 
 	// Virtual fields for runtime use (not stored in DB)
 	Models             schemas.WhiteList           `gorm:"-" json:"models"` // ["*"] allows all models; empty denies all (deny-by-default)
@@ -427,9 +428,15 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		} else {
 			k.ApertusModelNameMappingsJSON = nil
 		}
+		if k.ApertusKeyConfig.RerankFormat != "" {
+			k.ApertusRerankFormat = &k.ApertusKeyConfig.RerankFormat
+		} else {
+			k.ApertusRerankFormat = nil
+		}
 	} else {
 		k.ApertusEndpoint = nil
 		k.ApertusModelNameMappingsJSON = nil
+		k.ApertusRerankFormat = nil
 	}
 
 	return nil
@@ -654,7 +661,7 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 	}
 
 	// Reconstruct Apertus config if fields are present
-	if k.ApertusEndpoint != nil || (k.ApertusModelNameMappingsJSON != nil && *k.ApertusModelNameMappingsJSON != "") {
+	if k.ApertusEndpoint != nil || (k.ApertusModelNameMappingsJSON != nil && *k.ApertusModelNameMappingsJSON != "") || k.ApertusRerankFormat != nil {
 		apertusConfig := &schemas.ApertusKeyConfig{
 			Endpoint: "",
 		}
@@ -669,6 +676,10 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 				return err
 			}
 			apertusConfig.ModelNameMappings = mappings
+		}
+
+		if k.ApertusRerankFormat != nil {
+			apertusConfig.RerankFormat = *k.ApertusRerankFormat
 		}
 
 		k.ApertusKeyConfig = apertusConfig

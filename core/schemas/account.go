@@ -278,6 +278,7 @@ type SGLKeyConfig struct {
 type ApertusKeyConfig struct {
 	Endpoint          string            `json:"endpoint,omitempty"`            // Custom endpoint URL for this key
 	ModelNameMappings map[string]string `json:"model_name_mappings,omitempty"` // Mapping of user-facing model names to backend model names
+	RerankFormat      string            `json:"rerank_format,omitempty"`       // Rerank wire format: "cohere" (default, /v2/rerank) or "vllm" (/v1/rerank)
 }
 
 // Account defines the interface for managing provider accounts and their configurations.
