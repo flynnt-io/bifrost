@@ -3,10 +3,13 @@ package streaming
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/modelcatalog"
 )
 
 // deepCopyResponsesStreamResponse creates a deep copy of BifrostResponsesStreamResponse
@@ -285,6 +288,11 @@ func deepCopyResponsesMessage(original schemas.ResponsesMessage) schemas.Respons
 			if original.ResponsesToolMessage.Action.ResponsesWebSearchToolCallAction != nil {
 				copyAction := *original.ResponsesToolMessage.Action.ResponsesWebSearchToolCallAction
 				copy.ResponsesToolMessage.Action.ResponsesWebSearchToolCallAction = &copyAction
+			}
+
+			if original.ResponsesToolMessage.Action.ResponsesWebFetchToolCallAction != nil {
+				copyAction := *original.ResponsesToolMessage.Action.ResponsesWebFetchToolCallAction
+				copy.ResponsesToolMessage.Action.ResponsesWebFetchToolCallAction = &copyAction
 			}
 
 			if original.ResponsesToolMessage.Action.ResponsesLocalShellToolCallAction != nil {
@@ -849,20 +857,24 @@ func (a *Accumulator) processAccumulatedResponsesStreamingChunks(requestID strin
 		data.FinishReason = lastChunk.FinishReason
 	}
 
-	// Accumulate raw response
+	// Accumulate raw response using strings.Builder to avoid O(n^2) string concatenation
 	if len(accumulator.ResponsesStreamChunks) > 0 {
 		// Sort chunks by chunk index
 		sort.Slice(accumulator.ResponsesStreamChunks, func(i, j int) bool {
 			return accumulator.ResponsesStreamChunks[i].ChunkIndex < accumulator.ResponsesStreamChunks[j].ChunkIndex
 		})
+		var rawBuilder strings.Builder
 		for _, chunk := range accumulator.ResponsesStreamChunks {
 			if chunk.RawResponse != nil {
-				if data.RawResponse == nil {
-					data.RawResponse = bifrost.Ptr(*chunk.RawResponse)
-				} else {
-					*data.RawResponse += "\n\n" + *chunk.RawResponse
+				if rawBuilder.Len() > 0 {
+					rawBuilder.WriteString("\n\n")
 				}
+				rawBuilder.WriteString(*chunk.RawResponse)
 			}
+		}
+		if rawBuilder.Len() > 0 {
+			s := rawBuilder.String()
+			data.RawResponse = &s
 		}
 	}
 
@@ -879,7 +891,7 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 		return nil, fmt.Errorf("accumulator-id not found in context or is empty")
 	}
 
-	_, provider, model := bifrost.GetResponseFields(result, bifrostErr)
+	_, provider, requestedModel, resolvedModel := bifrost.GetResponseFields(result, bifrostErr)
 
 	isFinalChunk := bifrost.IsFinalChunk(ctx)
 	chunk := a.getResponsesStreamChunk()
@@ -888,6 +900,22 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 
 	if bifrostErr != nil {
 		chunk.FinishReason = bifrost.Ptr("error")
+		if bifrostErr.ExtraFields.RawResponse != nil {
+			if rawBytes, marshalErr := sonic.Marshal(bifrostErr.ExtraFields.RawResponse); marshalErr == nil {
+				chunk.RawResponse = bifrost.Ptr(string(rawBytes))
+			}
+		}
+		// Assign a stable trailing index; reuse on duplicate plugin calls so dedup fires correctly.
+		accumulator := a.getOrCreateStreamAccumulator(requestID)
+		accumulator.mu.Lock()
+		if accumulator.TerminalErrorChunkIndex >= 0 {
+			chunk.ChunkIndex = accumulator.TerminalErrorChunkIndex
+		} else {
+			accumulator.MaxResponsesChunkIndex++
+			chunk.ChunkIndex = accumulator.MaxResponsesChunkIndex
+			accumulator.TerminalErrorChunkIndex = chunk.ChunkIndex
+		}
+		accumulator.mu.Unlock()
 	} else if result != nil && result.ResponsesStreamResponse != nil {
 		if result.ResponsesStreamResponse.ExtraFields.RawResponse != nil {
 			chunk.RawResponse = bifrost.Ptr(fmt.Sprintf("%v", result.ResponsesStreamResponse.ExtraFields.RawResponse))
@@ -897,17 +925,12 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 		// Extract token usage from stream response if available
 		if result.ResponsesStreamResponse.Response != nil &&
 			result.ResponsesStreamResponse.Response.Usage != nil {
-			chunk.TokenUsage = &schemas.BifrostLLMUsage{
-				PromptTokens:     result.ResponsesStreamResponse.Response.Usage.InputTokens,
-				CompletionTokens: result.ResponsesStreamResponse.Response.Usage.OutputTokens,
-				TotalTokens:      result.ResponsesStreamResponse.Response.Usage.TotalTokens,
-				Cost:             result.ResponsesStreamResponse.Response.Usage.Cost,
-			}
+			chunk.TokenUsage = result.ResponsesStreamResponse.Response.Usage.ToBifrostLLMUsage()
 		}
 		chunk.ChunkIndex = result.ResponsesStreamResponse.ExtraFields.ChunkIndex
 		if isFinalChunk {
 			if a.pricingManager != nil {
-				cost := a.pricingManager.CalculateCostWithCacheDebug(result)
+				cost := a.pricingManager.CalculateCost(result, modelcatalog.PricingLookupScopesFromContext(ctx, string(result.GetExtraFields().Provider)))
 				chunk.Cost = bifrost.Ptr(cost)
 			}
 			chunk.SemanticCacheDebug = result.GetExtraFields().CacheDebug
@@ -943,20 +966,22 @@ func (a *Accumulator) processResponsesStreamingResponse(ctx *schemas.BifrostCont
 		}
 
 		return &ProcessedStreamResponse{
-			RequestID:  requestID,
-			StreamType: StreamTypeResponses,
-			Provider:   provider,
-			Model:      model,
-			Data:       data,
-			RawRequest: &rawRequest,
+			RequestID:      requestID,
+			StreamType:     StreamTypeResponses,
+			Provider:       provider,
+			RequestedModel: requestedModel,
+			ResolvedModel:  resolvedModel,
+			Data:           data,
+			RawRequest:     &rawRequest,
 		}, nil
 	}
 
 	return &ProcessedStreamResponse{
-		RequestID:  requestID,
-		StreamType: StreamTypeResponses,
-		Provider:   provider,
-		Model:      model,
-		Data:       nil,
+		RequestID:      requestID,
+		StreamType:     StreamTypeResponses,
+		Provider:       provider,
+		RequestedModel: requestedModel,
+		ResolvedModel:  resolvedModel,
+		Data:           nil,
 	}, nil
 }

@@ -1,1 +1,0 @@
-- fix: route parallel tool call argument deltas by id/index to prevent argument merging during streaming

@@ -62,6 +62,8 @@ export function AddCustomProviderSheetContent({ show = true, onClose, onSave }: 
 				image_edit_stream: true,
 				image_variation: true,
 				rerank: true,
+				ocr: true,
+				ocr_stream: true,
 				video_generation: true,
 				video_retrieve: true,
 				video_download: true,
@@ -70,6 +72,8 @@ export function AddCustomProviderSheetContent({ show = true, onClose, onSave }: 
 				video_remix: true,
 				count_tokens: true,
 				list_models: true,
+				websocket_responses: true,
+				realtime: false,
 			},
 			request_path_overrides: undefined,
 			is_key_less: false,
@@ -98,7 +102,6 @@ export function AddCustomProviderSheetContent({ show = true, onClose, onSave }: 
 				retry_backoff_initial: 500,
 				retry_backoff_max: 5000,
 			},
-			keys: [],
 		};
 
 		addProvider(payload)
@@ -201,7 +204,13 @@ export function AddCustomProviderSheetContent({ show = true, onClose, onSave }: 
 												</label>
 												<p className="text-muted-foreground text-sm">Whether the custom provider requires a key</p>
 											</div>
-											<Switch id="drop-excess-requests" size="md" checked={field.value} onCheckedChange={field.onChange} data-testid="custom-provider-keyless-switch" />
+											<Switch
+												id="drop-excess-requests"
+												size="md"
+												checked={field.value}
+												onCheckedChange={field.onChange}
+												data-testid="custom-provider-keyless-switch"
+											/>
 										</div>
 									</FormItem>
 								)}
@@ -227,7 +236,7 @@ export function AddCustomProviderSheetContent({ show = true, onClose, onSave }: 
 export default function AddCustomProviderSheet(props: Props) {
 	return (
 		<Sheet open={props.show} onOpenChange={(open) => !open && props.onClose()}>
-			<SheetContent className="custom-scrollbar dark:bg-card flex flex-col bg-white p-8 sm:max-w-3xl" data-testid="custom-provider-sheet">
+			<SheetContent className="custom-scrollbar flex flex-col p-8 sm:max-w-3xl" data-testid="custom-provider-sheet">
 				<AddCustomProviderSheetContent {...props} />
 			</SheetContent>
 		</Sheet>

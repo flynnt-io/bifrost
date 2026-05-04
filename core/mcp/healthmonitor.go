@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/maximhq/bifrost/core/schemas"
 )
@@ -32,6 +33,7 @@ type ClientHealthMonitor struct {
 	isMonitoring           bool
 	consecutiveFailures    int
 	isPingAvailable        bool // Whether the MCP server supports ping for health checks
+	isReconnecting         bool // Whether a reconnection attempt is currently in progress
 }
 
 // NewClientHealthMonitor creates a new health monitor for an MCP client
@@ -127,13 +129,26 @@ func (chm *ClientHealthMonitor) monitorLoop() {
 	}
 }
 
-// performHealthCheck performs a health check on the client
-// If the client is disconnected and has an existing connection, it will attempt
-// to reconnect using the client's configuration with retry logic
+// performHealthCheck performs a health check on the client.
+// On max consecutive failures it marks the client as disconnected and spawns
+// a background reconnection attempt (with full retry backoff via ReconnectClient).
 func (chm *ClientHealthMonitor) performHealthCheck() {
-	// Get the client connection
+	// Skip while a reconnection attempt is already in flight
+	chm.mu.Lock()
+	if chm.isReconnecting {
+		chm.mu.Unlock()
+		return
+	}
+	chm.mu.Unlock()
+
+	// Get the client connection — capture Conn while holding the lock so we
+	// don't race with removeClientUnsafe zeroing it under the write lock.
 	chm.manager.mu.RLock()
 	clientState, exists := chm.manager.clientMap[chm.clientID]
+	var conn *client.Client
+	if exists && clientState != nil {
+		conn = clientState.Conn
+	}
 	chm.manager.mu.RUnlock()
 
 	if !exists {
@@ -141,45 +156,67 @@ func (chm *ClientHealthMonitor) performHealthCheck() {
 		return
 	}
 
-	if clientState.Conn == nil {
-		// Client not connected, mark as disconnected
-		chm.updateClientState(schemas.MCPConnectionStateDisconnected)
-		chm.incrementFailures()
-		return
-	}
-
-	// Perform health check with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), chm.timeout)
-	defer cancel()
-
 	var err error
-	if chm.isPingAvailable {
-		// Use lightweight ping for health check
-		err = clientState.Conn.Ping(ctx)
+	if conn == nil {
+		// No active connection — treat as a health check failure
+		err = fmt.Errorf("no active connection")
 	} else {
-		// Fall back to listTools for servers that don't support ping
-		listRequest := mcp.ListToolsRequest{
-			PaginatedRequest: mcp.PaginatedRequest{
-				Request: mcp.Request{
-					Method: string(mcp.MethodToolsList),
+		// Perform health check with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), chm.timeout)
+		defer cancel()
+
+		if chm.isPingAvailable {
+			err = conn.Ping(ctx)
+		} else {
+			listRequest := mcp.ListToolsRequest{
+				PaginatedRequest: mcp.PaginatedRequest{
+					Request: mcp.Request{
+						Method: string(mcp.MethodToolsList),
+					},
 				},
-			},
+			}
+			_, err = conn.ListTools(ctx, listRequest)
 		}
-		_, err = clientState.Conn.ListTools(ctx, listRequest)
 	}
 
 	if err != nil {
 		chm.incrementFailures()
 
-		// After max consecutive failures, mark as disconnected
 		if chm.getConsecutiveFailures() >= chm.maxConsecutiveFailures {
 			chm.updateClientState(schemas.MCPConnectionStateDisconnected)
+			chm.mu.Lock()
+			if !chm.isReconnecting {
+				chm.isReconnecting = true
+				go chm.attemptReconnect()
+			}
+			chm.mu.Unlock()
 		}
 	} else {
-		// Health check passed
 		chm.resetFailures()
 		chm.updateClientState(schemas.MCPConnectionStateConnected)
 	}
+}
+
+// attemptReconnect runs in a background goroutine and calls ReconnectClient,
+// which internally applies full exponential backoff retry logic.
+// On success the failure counter is reset; on failure the isReconnecting flag
+// is cleared so the next health check cycle can try again.
+func (chm *ClientHealthMonitor) attemptReconnect() {
+	defer func() {
+		chm.mu.Lock()
+		chm.isReconnecting = false
+		chm.mu.Unlock()
+	}()
+
+	chm.logger.Debug("%s Attempting to reconnect MCP client %s...", MCPLogPrefix, chm.clientID)
+
+	if err := chm.manager.ReconnectClient(chm.clientID); err != nil {
+		chm.logger.Warn("%s Failed to reconnect MCP client %s: %v", MCPLogPrefix, chm.clientID, err)
+		return
+	}
+
+	chm.logger.Info("%s Successfully reconnected MCP client %s", MCPLogPrefix, chm.clientID)
+	chm.resetFailures()
 }
 
 // updateClientState updates the client's connection state

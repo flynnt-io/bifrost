@@ -1,15 +1,14 @@
-"use client";
-
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useCopyToClipboard } from "@/hooks/useCopyToClipboard";
 import { prometheusFormSchema, type PrometheusFormSchema } from "@/lib/types/schemas";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, Copy, Eye, EyeOff, Info, Plus, Trash, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm, type Resolver } from "react-hook-form";
@@ -44,7 +43,7 @@ export function PrometheusFormFragment({
 	const hasPrometheusAccess = useRbac(RbacResource.Observability, RbacOperation.Update);
 	const [showPassword, setShowPassword] = useState(false);
 	const [isSaving, setIsSaving] = useState(false);
-	const [copied, setCopied] = useState(false);
+	const { copy, copied } = useCopyToClipboard();
 	const [showBasicAuth, setShowBasicAuth] = useState(!!(initialConfig?.basic_auth?.username || initialConfig?.basic_auth?.password));
 
 	const form = useForm<PrometheusFormSchema, any, PrometheusFormSchema>({
@@ -86,9 +85,7 @@ export function PrometheusFormFragment({
 
 	const handleCopyEndpoint = () => {
 		if (metricsEndpoint) {
-			navigator.clipboard.writeText(metricsEndpoint);
-			setCopied(true);
-			setTimeout(() => setCopied(false), 2000);
+			copy(metricsEndpoint);
 		}
 	};
 
@@ -369,13 +366,13 @@ export function PrometheusFormFragment({
 								<TooltipTrigger asChild>
 									<Button
 										type="submit"
-										disabled={!hasPrometheusAccess || !form.formState.isDirty || !form.formState.isValid}
+										disabled={!hasPrometheusAccess || !form.formState.isDirty}
 										isLoading={isSaving}
 									>
 										Save Prometheus Configuration
 									</Button>
 								</TooltipTrigger>
-								{(!form.formState.isDirty || !form.formState.isValid) && (
+								{(!form.formState.isDirty) && (
 									<TooltipContent>
 										<p>
 											{!form.formState.isDirty && !form.formState.isValid

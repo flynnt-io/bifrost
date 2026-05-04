@@ -1,7 +1,9 @@
 package bedrock
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -1099,6 +1101,10 @@ func FinalizeBedrockStream(state *BedrockResponsesStreamState, sequenceNumber in
 	// Note: Tool calls are already closed in the first loop above.
 	// This section is intentionally left empty to avoid duplicate events.
 
+	if usage.InputTokensDetails != nil {
+		usage.InputTokens = usage.InputTokens + usage.InputTokensDetails.CachedReadTokens + usage.InputTokensDetails.CachedWriteTokens
+	}
+
 	// Emit response.completed
 	response := &schemas.BifrostResponsesResponse{
 		ID:        state.MessageID,
@@ -1296,11 +1302,11 @@ type BedrockInvokeStreamChunkEvent struct {
 func (event *BedrockStreamEvent) ToEncodedEvents() []BedrockEncodedEvent {
 	var events []BedrockEncodedEvent
 
-	if event.InvokeModelRawChunk != nil {
+	for _, rawChunk := range event.InvokeModelRawChunks {
 		events = append(events, BedrockEncodedEvent{
 			EventType: "chunk",
 			Payload: BedrockInvokeStreamChunkEvent{
-				Bytes: event.InvokeModelRawChunk,
+				Bytes: rawChunk,
 			},
 		})
 	}
@@ -1414,12 +1420,18 @@ func (request *BedrockConverseRequest) ToBifrostResponsesRequest(ctx *schemas.Bi
 				}
 
 				// Handle different types for InputSchema.JSON
-				if params, ok := tool.ToolSpec.InputSchema.JSON.(*schemas.ToolFunctionParameters); ok {
-					bifrostTool.ResponsesToolFunction.Parameters = params
-				} else if paramsMap, ok := tool.ToolSpec.InputSchema.JSON.(map[string]interface{}); ok {
-					// Convert map to ToolFunctionParameters
-					params := convertMapToToolFunctionParameters(paramsMap)
-					bifrostTool.ResponsesToolFunction.Parameters = params
+				if len(tool.ToolSpec.InputSchema.JSON) > 0 {
+					var params schemas.ToolFunctionParameters
+					if err := sonic.Unmarshal(tool.ToolSpec.InputSchema.JSON, &params); err == nil {
+						bifrostTool.ResponsesToolFunction.Parameters = &params
+					} else {
+						// Fallback: unmarshal as map and convert
+						var paramsMap map[string]interface{}
+						if err := sonic.Unmarshal(tool.ToolSpec.InputSchema.JSON, &paramsMap); err == nil {
+							params := convertMapToToolFunctionParameters(paramsMap)
+							bifrostTool.ResponsesToolFunction.Parameters = params
+						}
+					}
 				}
 
 				bifrostReq.Params.Tools = append(bifrostReq.Params.Tools, bifrostTool)
@@ -1430,6 +1442,29 @@ func (request *BedrockConverseRequest) ToBifrostResponsesRequest(ctx *schemas.Bi
 						Type: schemas.CacheControlTypeEphemeral,
 					}
 				}
+			}
+		}
+	}
+
+	// Convert tool choice
+	if request.ToolConfig != nil && request.ToolConfig.ToolChoice != nil {
+		toolChoice := request.ToolConfig.ToolChoice
+		if toolChoice.Auto != nil {
+			autoStr := string(schemas.ResponsesToolChoiceTypeAuto)
+			bifrostReq.Params.ToolChoice = &schemas.ResponsesToolChoice{
+				ResponsesToolChoiceStr: &autoStr,
+			}
+		} else if toolChoice.Any != nil {
+			anyStr := string(schemas.ResponsesToolChoiceTypeAny)
+			bifrostReq.Params.ToolChoice = &schemas.ResponsesToolChoice{
+				ResponsesToolChoiceStr: &anyStr,
+			}
+		} else if toolChoice.Tool != nil {
+			bifrostReq.Params.ToolChoice = &schemas.ResponsesToolChoice{
+				ResponsesToolChoiceStruct: &schemas.ResponsesToolChoiceStruct{
+					Type: schemas.ResponsesToolChoiceTypeFunction,
+					Name: &toolChoice.Tool.Name,
+				},
 			}
 		}
 	}
@@ -1465,25 +1500,35 @@ func (request *BedrockConverseRequest) ToBifrostResponsesRequest(ctx *schemas.Bi
 						if summaryValue, ok := schemas.SafeExtractStringPointer(request.ExtraParams["reasoning_summary"]); ok {
 							summary = summaryValue
 						}
-						// Check for native output_config.effort first
+						var (
+							effortStr string
+							found     bool
+						)
+						// Check for native output_config.effort first.
+						// output_config may be preserved as OrderedMap by the merge path.
 						if outputConfig, ok := request.AdditionalModelRequestFields.Get("output_config"); ok {
-							if outputConfigMap, ok := outputConfig.(map[string]interface{}); ok {
-								if effortStr, ok := schemas.SafeExtractString(outputConfigMap["effort"]); ok {
-									var maxTokens *int
-									if budgetTokens, ok := schemas.SafeExtractInt(reasoningConfigMap["budget_tokens"]); ok {
-										maxTokens = schemas.Ptr(budgetTokens)
-									}
-									bifrostReq.Params.Reasoning = &schemas.ResponsesParametersReasoning{
-										Effort:    schemas.Ptr(effortStr),
-										MaxTokens: maxTokens,
-										Summary:   summary,
-									}
+							if outputConfigOrderedMap, ok := schemas.SafeExtractOrderedMap(outputConfig); ok && outputConfigOrderedMap != nil {
+								if effortValue, exists := outputConfigOrderedMap.Get("effort"); exists {
+									effortStr, found = schemas.SafeExtractString(effortValue)
 								}
+							} else if outputConfigMap, ok := outputConfig.(map[string]interface{}); ok {
+								effortStr, found = schemas.SafeExtractString(outputConfigMap["effort"])
+							}
+						}
+						if found {
+							var maxTokens *int
+							if budgetTokens, ok := schemas.SafeExtractInt(reasoningConfigMap["budget_tokens"]); ok {
+								maxTokens = schemas.Ptr(budgetTokens)
+							}
+							bifrostReq.Params.Reasoning = &schemas.ResponsesParametersReasoning{
+								Effort:    schemas.Ptr(effortStr),
+								MaxTokens: maxTokens,
+								Summary:   summary,
 							}
 						} else if maxTokens, ok := schemas.SafeExtractInt(reasoningConfigMap["budget_tokens"]); ok {
 							// Fallback: convert budget_tokens to effort
 							minBudgetTokens := 0
-							defaultMaxTokens := DefaultCompletionMaxTokens
+							defaultMaxTokens := providerUtils.GetMaxOutputTokensOrDefault(bifrostReq.Model, DefaultCompletionMaxTokens)
 							if request.InferenceConfig != nil && request.InferenceConfig.MaxTokens != nil {
 								defaultMaxTokens = *request.InferenceConfig.MaxTokens
 							}
@@ -1606,6 +1651,13 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 		return nil, fmt.Errorf("bifrost request is nil")
 	}
 
+	// Validate tools are supported by Bedrock
+	if bifrostReq.Params != nil && bifrostReq.Params.Tools != nil {
+		if toolErr := anthropic.ValidateToolsForProvider(bifrostReq.Params.Tools, schemas.Bedrock); toolErr != nil {
+			return nil, toolErr
+		}
+	}
+
 	bedrockReq := &BedrockConverseRequest{
 		ModelID: bifrostReq.Model,
 	}
@@ -1630,6 +1682,8 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 			}
 		}
 	}
+
+	var responsesStructuredOutputTool *BedrockTool
 
 	// Map basic parameters to inference config
 	if bifrostReq.Params != nil {
@@ -1665,11 +1719,12 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 					})
 				} else if schemas.IsNovaModel(bifrostReq.Model) {
 					minBudgetTokens := MinimumReasoningMaxTokens
-					defaultMaxTokens := DefaultCompletionMaxTokens
+					modelDefaultMaxTokens := providerUtils.GetMaxOutputTokensOrDefault(bifrostReq.Model, DefaultCompletionMaxTokens)
+					defaultMaxTokens := modelDefaultMaxTokens
 					if inferenceConfig.MaxTokens != nil {
 						defaultMaxTokens = *inferenceConfig.MaxTokens
 					} else {
-						inferenceConfig.MaxTokens = schemas.Ptr(DefaultCompletionMaxTokens)
+						inferenceConfig.MaxTokens = schemas.Ptr(modelDefaultMaxTokens)
 					}
 					maxReasoningEffort := providerUtils.GetReasoningEffortFromBudgetTokens(tokenBudget, minBudgetTokens, defaultMaxTokens)
 					typeStr := "enabled"
@@ -1721,22 +1776,21 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 
 						bedrockReq.AdditionalModelRequestFields.Set("reasoningConfig", config)
 					} else if schemas.IsAnthropicModel(bifrostReq.Model) {
-					if anthropic.SupportsAdaptiveThinking(bifrostReq.Model) {
-						// Opus 4.6+: adaptive thinking + output_config.effort
-						effort := anthropic.MapBifrostEffortToAnthropic(*bifrostReq.Params.Reasoning.Effort)
-						bedrockReq.AdditionalModelRequestFields.Set("thinking", map[string]any{
-							"type": "adaptive",
-						})
-						bedrockReq.AdditionalModelRequestFields.Set("output_config", map[string]any{
-							"effort": effort,
-						})
-					} else {
+						if anthropic.SupportsAdaptiveThinking(bifrostReq.Model) {
+							// Opus 4.6+: adaptive thinking + output_config.effort
+							effort := anthropic.MapBifrostEffortToAnthropic(*bifrostReq.Params.Reasoning.Effort)
+							bedrockReq.AdditionalModelRequestFields.Set("thinking", map[string]any{
+								"type": "adaptive",
+							})
+							setOutputConfigField(bedrockReq.AdditionalModelRequestFields, "effort", effort)
+						} else {
 							// Opus 4.5 and older Anthropic models: budget_tokens thinking
-							defaultMaxTokens := DefaultCompletionMaxTokens
+							modelDefaultMaxTokens := providerUtils.GetMaxOutputTokensOrDefault(bifrostReq.Model, DefaultCompletionMaxTokens)
+							defaultMaxTokens := modelDefaultMaxTokens
 							if inferenceConfig.MaxTokens != nil {
 								defaultMaxTokens = *inferenceConfig.MaxTokens
 							} else {
-								inferenceConfig.MaxTokens = schemas.Ptr(DefaultCompletionMaxTokens)
+								inferenceConfig.MaxTokens = schemas.Ptr(modelDefaultMaxTokens)
 							}
 							budgetTokens, err := providerUtils.GetBudgetTokensFromReasoningEffort(*bifrostReq.Params.Reasoning.Effort, anthropic.MinimumReasoningMaxTokens, defaultMaxTokens)
 							if err != nil {
@@ -1750,11 +1804,12 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 					} else {
 						// Non-Anthropic, non-Nova models: budget_tokens only
 						minBudgetTokens := MinimumReasoningMaxTokens
-						defaultMaxTokens := DefaultCompletionMaxTokens
+						modelDefaultMaxTokens := providerUtils.GetMaxOutputTokensOrDefault(bifrostReq.Model, DefaultCompletionMaxTokens)
+						defaultMaxTokens := modelDefaultMaxTokens
 						if inferenceConfig.MaxTokens != nil {
 							defaultMaxTokens = *inferenceConfig.MaxTokens
 						} else {
-							inferenceConfig.MaxTokens = schemas.Ptr(DefaultCompletionMaxTokens)
+							inferenceConfig.MaxTokens = schemas.Ptr(modelDefaultMaxTokens)
 						}
 						budgetTokens, err := providerUtils.GetBudgetTokensFromReasoningEffort(*bifrostReq.Params.Reasoning.Effort, minBudgetTokens, defaultMaxTokens)
 						if err != nil {
@@ -1784,19 +1839,14 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 		}
 		if bifrostReq.Params.Text != nil {
 			if bifrostReq.Params.Text.Format != nil {
-				responseFormatTool := convertTextFormatToTool(ctx, bifrostReq.Params.Text)
-				// append to bedrockTools
+				// Bedrock structured output goes through the synthetic `bf_so_*`
+				// tool path for all models, including Anthropic. We capture the
+				// tool here and defer injection until after normal tool/tool_choice
+				// conversion so the forced structured-output tool choice is not
+				// overwritten.
+				responseFormatTool, _ := convertTextFormatToTool(ctx, bifrostReq.Model, bifrostReq.Params.Text)
 				if responseFormatTool != nil {
-					if bedrockReq.ToolConfig == nil {
-						bedrockReq.ToolConfig = &BedrockToolConfig{}
-					}
-					bedrockReq.ToolConfig.Tools = append(bedrockReq.ToolConfig.Tools, *responseFormatTool)
-					// Force the model to use this specific tool (same as ChatCompletion)
-					bedrockReq.ToolConfig.ToolChoice = &BedrockToolChoice{
-						Tool: &BedrockToolChoiceTool{
-							Name: responseFormatTool.ToolSpec.Name,
-						},
-					}
+					responsesStructuredOutputTool = responseFormatTool
 				}
 			}
 		}
@@ -1810,7 +1860,10 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 			if requestFields, exists := bifrostReq.Params.ExtraParams["additionalModelRequestFieldPaths"]; exists {
 				if orderedFields, ok := schemas.SafeExtractOrderedMap(requestFields); ok {
 					delete(bedrockReq.ExtraParams, "additionalModelRequestFieldPaths")
-					bedrockReq.AdditionalModelRequestFields = orderedFields
+					bedrockReq.AdditionalModelRequestFields = mergeAdditionalModelRequestFields(
+						bedrockReq.AdditionalModelRequestFields,
+						orderedFields,
+					)
 				}
 			}
 
@@ -1871,12 +1924,16 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 					description = *tool.Description
 				}
 
+				schemaObjectBytes, err := providerUtils.MarshalSorted(schemaObject)
+				if err != nil {
+					return nil, fmt.Errorf("failed to serialize tool schema %q: %w", name, err)
+				}
 				bedrockTool := BedrockTool{
 					ToolSpec: &BedrockToolSpec{
 						Name:        name,
 						Description: &description,
 						InputSchema: BedrockToolInputSchema{
-							JSON: schemaObject,
+							JSON: json.RawMessage(schemaObjectBytes),
 						},
 					},
 				}
@@ -1907,6 +1964,20 @@ func ToBedrockResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.
 				bedrockReq.ToolConfig = &BedrockToolConfig{}
 			}
 			bedrockReq.ToolConfig.ToolChoice = bedrockToolChoice
+		}
+	}
+
+	// If text.format was converted to a synthetic tool, inject it after the normal
+	// tool/tool_choice pass so it is not overwritten by the above conversion.
+	if responsesStructuredOutputTool != nil {
+		if bedrockReq.ToolConfig == nil {
+			bedrockReq.ToolConfig = &BedrockToolConfig{}
+		}
+		bedrockReq.ToolConfig.Tools = append([]BedrockTool{*responsesStructuredOutputTool}, bedrockReq.ToolConfig.Tools...)
+		bedrockReq.ToolConfig.ToolChoice = &BedrockToolChoice{
+			Tool: &BedrockToolChoiceTool{
+				Name: responsesStructuredOutputTool.ToolSpec.Name,
+			},
 		}
 	}
 
@@ -1942,14 +2013,31 @@ func (response *BedrockConverseResponse) ToBifrostResponsesResponse(ctx *schemas
 		}
 		// Handle cached tokens if present
 		if response.Usage.CacheReadInputTokens > 0 {
-			bifrostResp.Usage.InputTokensDetails = &schemas.ResponsesResponseInputTokens{
-				CachedTokens: response.Usage.CacheReadInputTokens,
+			if bifrostResp.Usage.InputTokensDetails == nil {
+				bifrostResp.Usage.InputTokensDetails = &schemas.ResponsesResponseInputTokens{}
 			}
+			bifrostResp.Usage.InputTokensDetails.CachedReadTokens = response.Usage.CacheReadInputTokens
+			bifrostResp.Usage.InputTokens = bifrostResp.Usage.InputTokens + response.Usage.CacheReadInputTokens
 		}
 		if response.Usage.CacheWriteInputTokens > 0 {
-			bifrostResp.Usage.OutputTokensDetails = &schemas.ResponsesResponseOutputTokens{
-				CachedTokens: response.Usage.CacheWriteInputTokens,
+			if bifrostResp.Usage.InputTokensDetails == nil {
+				bifrostResp.Usage.InputTokensDetails = &schemas.ResponsesResponseInputTokens{}
 			}
+			bifrostResp.Usage.InputTokensDetails.CachedWriteTokens = response.Usage.CacheWriteInputTokens
+			if response.Usage.CacheDetails != nil {
+				if bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails == nil {
+					bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails = &schemas.ChatCachedWriteTokenDetails{}
+				}
+				for _, cacheDetail := range *response.Usage.CacheDetails {
+					if cacheDetail.TTL == BedrockCacheWriteTTL5m {
+						bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails.CachedWriteTokens5m = cacheDetail.InputTokens
+					}
+					if cacheDetail.TTL == BedrockCacheWriteTTL1h {
+						bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails.CachedWriteTokens1h = cacheDetail.InputTokens
+					}
+				}
+			}
+			bifrostResp.Usage.InputTokens = bifrostResp.Usage.InputTokens + response.Usage.CacheWriteInputTokens
 		}
 	}
 
@@ -2018,10 +2106,30 @@ func ToBedrockConverseResponse(bifrostResp *schemas.BifrostResponsesResponse) (*
 		bedrockResp.Usage.TotalTokens = bifrostResp.Usage.TotalTokens
 
 		if bifrostResp.Usage.InputTokensDetails != nil {
-			bedrockResp.Usage.CacheReadInputTokens = bifrostResp.Usage.InputTokensDetails.CachedTokens
-		}
-		if bifrostResp.Usage.OutputTokensDetails != nil {
-			bedrockResp.Usage.CacheWriteInputTokens = bifrostResp.Usage.OutputTokensDetails.CachedTokens
+			if bifrostResp.Usage.InputTokensDetails.CachedReadTokens > 0 {
+				bedrockResp.Usage.CacheReadInputTokens = bifrostResp.Usage.InputTokensDetails.CachedReadTokens
+				bedrockResp.Usage.InputTokens = bedrockResp.Usage.InputTokens - bifrostResp.Usage.InputTokensDetails.CachedReadTokens
+			}
+			if bifrostResp.Usage.InputTokensDetails.CachedWriteTokens > 0 {
+				bedrockResp.Usage.CacheWriteInputTokens = bifrostResp.Usage.InputTokensDetails.CachedWriteTokens
+				if bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails != nil {
+					var cacheDetails []BedrockCacheWriteDetails
+					if bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails.CachedWriteTokens5m > 0 {
+						cacheDetails = append(cacheDetails, BedrockCacheWriteDetails{
+							InputTokens: bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails.CachedWriteTokens5m,
+							TTL:         BedrockCacheWriteTTL5m,
+						})
+					}
+					if bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails.CachedWriteTokens1h > 0 {
+						cacheDetails = append(cacheDetails, BedrockCacheWriteDetails{
+							InputTokens: bifrostResp.Usage.InputTokensDetails.CachedWriteTokenDetails.CachedWriteTokens1h,
+							TTL:         BedrockCacheWriteTTL1h,
+						})
+					}
+					bedrockResp.Usage.CacheDetails = &cacheDetails
+				}
+				bedrockResp.Usage.InputTokens = bedrockResp.Usage.InputTokens - bifrostResp.Usage.InputTokensDetails.CachedWriteTokens
+			}
 		}
 	}
 
@@ -2096,12 +2204,13 @@ func extractToolsFromResponsesConversationHistory(messages []schemas.ResponsesMe
 				description = *tool.Description
 			}
 
+			schemaObjectBytes2, _ := providerUtils.MarshalSorted(schemaObject)
 			bedrockTool := BedrockTool{
 				ToolSpec: &BedrockToolSpec{
 					Name:        *tool.Name,
 					Description: &description,
 					InputSchema: BedrockToolInputSchema{
-						JSON: schemaObject,
+						JSON: json.RawMessage(schemaObjectBytes2),
 					},
 				},
 			}
@@ -2116,6 +2225,10 @@ func convertResponsesToolChoice(toolChoice schemas.ResponsesToolChoice) *Bedrock
 	// Check if it's a string choice
 	if toolChoice.ResponsesToolChoiceStr != nil {
 		switch schemas.ResponsesToolChoiceType(*toolChoice.ResponsesToolChoiceStr) {
+		case schemas.ResponsesToolChoiceTypeAuto:
+			return &BedrockToolChoice{
+				Auto: &BedrockToolChoiceAuto{},
+			}
 		case schemas.ResponsesToolChoiceTypeAny, schemas.ResponsesToolChoiceTypeRequired:
 			return &BedrockToolChoice{
 				Any: &BedrockToolChoiceAny{},
@@ -2140,7 +2253,11 @@ func convertResponsesToolChoice(toolChoice schemas.ResponsesToolChoice) *Bedrock
 			}
 			// If Name is nil or empty, return nil as we can't construct a valid tool choice
 			return nil
-		case schemas.ResponsesToolChoiceTypeAuto, schemas.ResponsesToolChoiceTypeAny, schemas.ResponsesToolChoiceTypeRequired:
+		case schemas.ResponsesToolChoiceTypeAuto:
+			return &BedrockToolChoice{
+				Auto: &BedrockToolChoiceAuto{},
+			}
+		case schemas.ResponsesToolChoiceTypeAny, schemas.ResponsesToolChoiceTypeRequired:
 			return &BedrockToolChoice{
 				Any: &BedrockToolChoiceAny{},
 			}
@@ -2172,14 +2289,16 @@ type ToolCall struct {
 	State             ToolCallState
 	AssistantMsgIndex int // Index in final bedrockMessages where this call was emitted
 	Result            *ToolResult
+	CacheControl      *schemas.CacheControl
 }
 
 // ToolResult represents the result of a tool call
 type ToolResult struct {
-	CallID  string
-	Content []BedrockContentBlock
-	Status  string
-	Emitted bool
+	CallID       string
+	Content      []BedrockContentBlock
+	Status       string
+	Emitted      bool
+	CacheControl *schemas.CacheControl
 }
 
 // ToolCallBatch tracks a group of tool calls that should be emitted together
@@ -2213,7 +2332,7 @@ func NewToolCallStateManager() *ToolCallStateManager {
 }
 
 // RegisterToolCall registers a new tool call in the system
-func (m *ToolCallStateManager) RegisterToolCall(callID, toolName, arguments string) {
+func (m *ToolCallStateManager) RegisterToolCall(callID, toolName, arguments string, cacheControl *schemas.CacheControl) {
 	if m.toolCalls[callID] != nil {
 		// Tool call already registered, skip
 		return
@@ -2225,6 +2344,7 @@ func (m *ToolCallStateManager) RegisterToolCall(callID, toolName, arguments stri
 		Arguments:         arguments,
 		State:             ToolCallStateInitialized,
 		AssistantMsgIndex: -1,
+		CacheControl:      cacheControl,
 	}
 
 	m.toolCalls[callID] = toolCall
@@ -2232,7 +2352,7 @@ func (m *ToolCallStateManager) RegisterToolCall(callID, toolName, arguments stri
 }
 
 // RegisterToolResult registers a tool result
-func (m *ToolCallStateManager) RegisterToolResult(callID string, content []BedrockContentBlock, status string) {
+func (m *ToolCallStateManager) RegisterToolResult(callID string, content []BedrockContentBlock, status string, cacheControl *schemas.CacheControl) {
 	// Attemp to deduplicate the result similar to tool call. Need to check in 2 places, since after moving
 	// on from pendingResults into a completed toolCall, the same ID might come again.
 	if _, ok := m.pendingResults[callID]; ok {
@@ -2245,10 +2365,11 @@ func (m *ToolCallStateManager) RegisterToolResult(callID string, content []Bedro
 	}
 
 	result := &ToolResult{
-		CallID:  callID,
-		Content: content,
-		Status:  status,
-		Emitted: false,
+		CallID:       callID,
+		Content:      content,
+		Status:       status,
+		Emitted:      false,
+		CacheControl: cacheControl,
 	}
 
 	m.pendingResults[callID] = result
@@ -2368,6 +2489,11 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 						Status:    schemas.Ptr(result.Status),
 					},
 				})
+				if result.CacheControl != nil {
+					resultBlocks = append(resultBlocks, BedrockContentBlock{
+						CachePoint: &BedrockCachePoint{Type: BedrockCachePointTypeDefault},
+					})
+				}
 				resultIDs = append(resultIDs, callID)
 			}
 
@@ -2403,13 +2529,21 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 							Name:      toolCall.ToolName,
 						},
 					}
-					// Parse arguments
-					var input interface{}
-					if err := sonic.Unmarshal([]byte(toolCall.Arguments), &input); err != nil {
-						input = map[string]interface{}{}
+					// Preserve original key ordering of tool arguments for prompt caching.
+					var input json.RawMessage
+					var buf bytes.Buffer
+					if err := json.Compact(&buf, []byte(toolCall.Arguments)); err == nil {
+						input = buf.Bytes()
+					} else {
+						input = json.RawMessage("{}")
 					}
 					toolUseBlock.ToolUse.Input = input
 					contentBlocks = append(contentBlocks, *toolUseBlock)
+					if toolCall.CacheControl != nil {
+						contentBlocks = append(contentBlocks, BedrockContentBlock{
+							CachePoint: &BedrockCachePoint{Type: BedrockCachePointTypeDefault},
+						})
+					}
 				}
 			}
 
@@ -2454,7 +2588,7 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 					arguments = *msg.ResponsesToolMessage.Arguments
 				}
 
-				stateManager.RegisterToolCall(*msg.ResponsesToolMessage.CallID, toolName, arguments)
+				stateManager.RegisterToolCall(*msg.ResponsesToolMessage.CallID, toolName, arguments, msg.CacheControl)
 			}
 
 		case schemas.ResponsesMessageTypeFunctionCallOutput:
@@ -2482,12 +2616,24 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 						for _, block := range msg.ResponsesToolMessage.Output.ResponsesFunctionToolCallOutputBlocks {
 							if block.Text != nil {
 								resultContent = append(resultContent, tryParseJSONIntoContentBlock(*block.Text))
+							} else if block.Type == schemas.ResponsesInputMessageContentBlockTypeImage &&
+								block.ResponsesInputMessageContentBlockImage != nil &&
+								block.ResponsesInputMessageContentBlockImage.ImageURL != nil {
+								imageSource, err := convertImageToBedrockSource(*block.ResponsesInputMessageContentBlockImage.ImageURL)
+								if err != nil {
+									// Bedrock only supports base64 data URIs for images. If conversion
+									// fails (e.g. remote URL), the image is dropped from the tool result
+									// which silently degrades the model's ability to see tool output.
+									_ = fmt.Errorf("bedrock: converting tool result image: %w", err)
+								} else {
+									resultContent = append(resultContent, BedrockContentBlock{Image: imageSource})
+								}
 							}
 						}
 					}
 				}
 
-				stateManager.RegisterToolResult(*msg.ResponsesToolMessage.CallID, resultContent, status)
+				stateManager.RegisterToolResult(*msg.ResponsesToolMessage.CallID, resultContent, status, msg.CacheControl)
 			}
 
 			// Check if next message is not a function call output - if so, flush tool calls and results
@@ -2525,12 +2671,21 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 									Name:      toolCall.ToolName,
 								},
 							}
-							var input interface{}
-							if err := sonic.Unmarshal([]byte(toolCall.Arguments), &input); err != nil {
-								input = map[string]interface{}{}
+							// Preserve original key ordering of tool arguments for prompt caching.
+							var input json.RawMessage
+							var buf bytes.Buffer
+							if err := json.Compact(&buf, []byte(toolCall.Arguments)); err == nil {
+								input = buf.Bytes()
+							} else {
+								input = json.RawMessage("{}")
 							}
 							toolUseBlock.ToolUse.Input = input
 							contentBlocks = append(contentBlocks, *toolUseBlock)
+							if toolCall.CacheControl != nil {
+								contentBlocks = append(contentBlocks, BedrockContentBlock{
+									CachePoint: &BedrockCachePoint{Type: BedrockCachePointTypeDefault},
+								})
+							}
 						}
 					}
 
@@ -2556,6 +2711,11 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 								Status:    schemas.Ptr(result.Status),
 							},
 						})
+						if result.CacheControl != nil {
+							resultBlocks = append(resultBlocks, BedrockContentBlock{
+								CachePoint: &BedrockCachePoint{Type: BedrockCachePointTypeDefault},
+							})
+						}
 						resultIDs = append(resultIDs, callID)
 					}
 
@@ -2592,10 +2752,13 @@ func ConvertBifrostMessagesToBedrockMessages(bifrostMessages []schemas.Responses
 								Name:      toolCall.ToolName,
 							},
 						}
-						// Parse arguments
-						var input interface{}
-						if err := sonic.Unmarshal([]byte(toolCall.Arguments), &input); err != nil {
-							input = map[string]interface{}{}
+						// Preserve original key ordering of tool arguments for prompt caching.
+						var input json.RawMessage
+						var buf bytes.Buffer
+						if err := json.Compact(&buf, []byte(toolCall.Arguments)); err == nil {
+							input = buf.Bytes()
+						} else {
+							input = json.RawMessage("{}")
 						}
 						toolUseBlock.ToolUse.Input = input
 						toolUseBlocks = append(toolUseBlocks, *toolUseBlock)
@@ -2906,7 +3069,7 @@ func convertSingleBedrockMessageToBifrostMessages(ctx *schemas.BifrostContext, m
 				// Marshal the tool input to JSON string
 				var contentStr string
 				if block.ToolUse.Input != nil {
-					contentStr = schemas.JsonifyInput(block.ToolUse.Input)
+					contentStr = string(block.ToolUse.Input)
 				} else {
 					contentStr = "{}"
 				}
@@ -2918,13 +3081,17 @@ func convertSingleBedrockMessageToBifrostMessages(ctx *schemas.BifrostContext, m
 				outputMessages = append(outputMessages, bifrostMsg)
 			} else {
 				// Normal tool call message
+				arguments := "{}"
+				if block.ToolUse.Input != nil {
+					arguments = string(block.ToolUse.Input)
+				}
 				toolMsg := schemas.ResponsesMessage{
 					Type:   schemas.Ptr(schemas.ResponsesMessageTypeFunctionCall),
 					Status: schemas.Ptr("completed"),
 					ResponsesToolMessage: &schemas.ResponsesToolMessage{
 						CallID:    &toolUseID,
 						Name:      &toolUseName,
-						Arguments: schemas.Ptr(schemas.JsonifyInput(block.ToolUse.Input)),
+						Arguments: schemas.Ptr(arguments),
 					},
 				}
 				if isOutputMessage {
@@ -2999,7 +3166,7 @@ func convertSingleBedrockMessageToBifrostMessages(ctx *schemas.BifrostContext, m
 				// JSON first (no unmarshal; just one marshal to string when present)
 				for _, c := range block.ToolResult.Content {
 					if c.JSON != nil {
-						resultContent = schemas.JsonifyInput(c.JSON)
+						resultContent = string(c.JSON)
 						break
 					}
 				}
@@ -3041,11 +3208,17 @@ func convertSingleBedrockMessageToBifrostMessages(ctx *schemas.BifrostContext, m
 			}
 			outputMessages = append(outputMessages, resultMsg)
 		} else if block.CachePoint != nil {
-			// add cache control to last content block of last message
+			// Add cache control to last message
 			if len(outputMessages) > 0 {
 				lastMessage := &outputMessages[len(outputMessages)-1]
+				// First try: set on last content block (for text/image messages)
 				if lastMessage.Content != nil && len(lastMessage.Content.ContentBlocks) > 0 {
 					lastMessage.Content.ContentBlocks[len(lastMessage.Content.ContentBlocks)-1].CacheControl = &schemas.CacheControl{
+						Type: schemas.CacheControlTypeEphemeral,
+					}
+				} else {
+					// Fallback: set on message itself (for function_call/function_call_output)
+					lastMessage.CacheControl = &schemas.CacheControl{
 						Type: schemas.CacheControlTypeEphemeral,
 					}
 				}

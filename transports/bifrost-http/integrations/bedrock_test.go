@@ -6,7 +6,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/providers/bedrock"
 	"github.com/maximhq/bifrost/core/schemas"
-	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/kvstore"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
@@ -16,20 +16,21 @@ import (
 
 // mockHandlerStore implements lib.HandlerStore for testing
 type mockHandlerStore struct {
-	allowDirectKeys    bool
-	headerFilterConfig *configstoreTables.GlobalHeaderFilterConfig
-	availableProviders []schemas.ModelProvider
+	allowDirectKeys            bool
+	headerMatcher              *lib.HeaderMatcher
+	availableProviders         []schemas.ModelProvider
+	mcpHeaderCombinedAllowlist schemas.WhiteList
 }
 
 func (m *mockHandlerStore) ShouldAllowDirectKeys() bool {
 	return m.allowDirectKeys
 }
 
-func (m *mockHandlerStore) GetHeaderFilterConfig() *configstoreTables.GlobalHeaderFilterConfig {
-	return m.headerFilterConfig
+func (m *mockHandlerStore) GetHeaderMatcher() *lib.HeaderMatcher {
+	return m.headerMatcher
 }
 
-func (m *mockHandlerStore) GetAvailableProviders() []schemas.ModelProvider {
+func (m *mockHandlerStore) GetProvidersForModel(model string) []schemas.ModelProvider {
 	return m.availableProviders
 }
 
@@ -43,6 +44,30 @@ func (m *mockHandlerStore) GetAsyncJobExecutor() *logstore.AsyncJobExecutor {
 
 func (m *mockHandlerStore) GetAsyncJobResultTTL() int {
 	return 3600
+}
+
+func (m *mockHandlerStore) GetKVStore() *kvstore.Store {
+	return nil
+}
+
+func (m *mockHandlerStore) GetMCPHeaderCombinedAllowlist() schemas.WhiteList {
+	return m.mcpHeaderCombinedAllowlist
+}
+
+func (m *mockHandlerStore) ShouldAllowPerRequestStorageOverride() bool {
+	return false
+}
+
+func (m *mockHandlerStore) ShouldAllowPerRequestRawOverride() bool {
+	return false
+}
+
+func (m *mockHandlerStore) GetMCPExternalServerURL() string {
+	return ""
+}
+
+func (m *mockHandlerStore) GetMCPExternalClientURL() string {
+	return ""
 }
 
 // Ensure mockHandlerStore implements lib.HandlerStore
@@ -105,7 +130,7 @@ func Test_createBedrockRouteConfigs(t *testing.T) {
 	handlerStore := &mockHandlerStore{allowDirectKeys: true}
 	routes := CreateBedrockRouteConfigs("/bedrock", handlerStore)
 
-	assert.Len(t, routes, 5, "should have 5 bedrock routes")
+	assert.Len(t, routes, 6, "should have 6 bedrock routes")
 
 	expectedRoutes := []struct {
 		path   string
@@ -116,6 +141,7 @@ func Test_createBedrockRouteConfigs(t *testing.T) {
 		{"/bedrock/model/{modelId}/invoke-with-response-stream", "POST"},
 		{"/bedrock/model/{modelId}/invoke", "POST"},
 		{"/bedrock/rerank", "POST"},
+		{"/bedrock/model/{modelId}/count-tokens", "POST"},
 	}
 
 	for i, expected := range expectedRoutes {

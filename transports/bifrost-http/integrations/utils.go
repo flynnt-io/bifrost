@@ -3,7 +3,6 @@ package integrations
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"net/url"
 	"reflect"
 	"strconv"
@@ -11,7 +10,10 @@ import (
 
 	"github.com/bytedance/sonic"
 	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/maximhq/bifrost/core/providers/gemini"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/kvstore"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
 
@@ -26,6 +28,13 @@ var availableIntegrations = []string{
 	"bedrock",
 	"pydantic",
 	"cohere",
+}
+
+// newBifrostErrorWithCode is like newBifrostError but sets an explicit HTTP status code.
+func newBifrostErrorWithCode(err error, message string, statusCode int) *schemas.BifrostError {
+	e := newBifrostError(err, message)
+	e.StatusCode = &statusCode
+	return e
 }
 
 // newBifrostError wraps a standard error into a BifrostError with IsBifrostError set to false.
@@ -140,34 +149,57 @@ func extractExactPath(ctx *fasthttp.RequestCtx) string {
 	return string(out)
 }
 
-// sendStreamError sends an error in streaming format using the stream error converter if available
+// sendStreamError sends an error response for a streaming request that failed before streaming started.
+// It propagates the provider's HTTP status code and returns a JSON error body (not SSE format),
+// since no streaming has begun and clients should receive a standard error response.
 func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, config RouteConfig, bifrostErr *schemas.BifrostError) {
-	var errorResponse interface{}
-
-	// Use stream error converter if available, otherwise fallback to regular error converter
-	if config.StreamConfig != nil && config.StreamConfig.ErrorConverter != nil {
-		errorResponse = config.StreamConfig.ErrorConverter(bifrostCtx, bifrostErr)
-	} else {
-		errorResponse = config.ErrorConverter(bifrostCtx, bifrostErr)
+	// Forward provider response headers from context so streaming error responses include them
+	if bifrostCtx != nil {
+		if headers, ok := bifrostCtx.Value(schemas.BifrostContextKeyProviderResponseHeaders).(map[string]string); ok {
+			for key, value := range headers {
+				ctx.Response.Header.Set(key, value)
+			}
+		}
 	}
 
-	errorJSON, err := sonic.Marshal(map[string]interface{}{
-		"error": errorResponse,
-	})
-	if err != nil {
-		log.Printf("Failed to marshal error for SSE: %v", err)
+	// Set the HTTP status code from the provider error
+	if bifrostErr.StatusCode != nil {
+		ctx.SetStatusCode(*bifrostErr.StatusCode)
+	} else {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+	}
+	ctx.SetContentType("application/json")
+
+	// Always use the route-level ErrorConverter (not StreamConfig.ErrorConverter) because
+	// sendStreamError returns JSON, not SSE. StreamConfig.ErrorConverter is designed for
+	// in-stream SSE errors (e.g., Anthropic's returns a raw SSE string that would be
+	// double-escaped by JSON marshaling).
+	errorResponse := config.ErrorConverter(bifrostCtx, bifrostErr)
+
+	errorJSON, err := sonic.Marshal(errorResponse)
+	if err != nil {
+		g.logger.Error("failed to marshal error response", "err", err, "path", extractExactPath(ctx))
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.SetContentType("text/plain; charset=utf-8")
+		ctx.SetBodyString(fmt.Sprintf("failed to encode error response: %v", err))
 		return
 	}
 
-	if _, err := fmt.Fprintf(ctx, "data: %s\n\n", errorJSON); err != nil {
-		log.Printf("Failed to write SSE error: %v", err)
-	}
+	ctx.SetBody(errorJSON)
 }
 
 // sendError sends an error response with the appropriate status code and JSON body.
 // It handles different error types (string, error interface, or arbitrary objects).
 func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, errorConverter ErrorConverter, bifrostErr *schemas.BifrostError) {
+	// Forward provider response headers from context so error responses include them
+	if bifrostCtx != nil {
+		if headers, ok := bifrostCtx.Value(schemas.BifrostContextKeyProviderResponseHeaders).(map[string]string); ok {
+			for key, value := range headers {
+				ctx.Response.Header.Set(key, value)
+			}
+		}
+	}
+
 	if bifrostErr.StatusCode != nil {
 		ctx.SetStatusCode(*bifrostErr.StatusCode)
 	} else {
@@ -182,6 +214,7 @@ func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.
 		// Log the marshal failure and return a plain text error
 		g.logger.Error("failed to marshal error response", "err", err, "path", extractExactPath(ctx))
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.SetContentType("text/plain; charset=utf-8")
 		ctx.SetBodyString(fmt.Sprintf("failed to encode error response: %v", err))
 		return
 	}
@@ -207,6 +240,45 @@ func (g *GenericRouter) sendSuccess(ctx *fasthttp.RequestCtx, bifrostCtx *schema
 	}
 
 	ctx.SetBody(responseBody)
+}
+
+// tryStreamLargeResponse checks if large response mode was activated by the provider,
+// sets the transport marker, and streams the response directly to the client.
+// Returns true if the response was handled (caller should return).
+func (g *GenericRouter) tryStreamLargeResponse(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext) bool {
+	isLargeResponse, ok := bifrostCtx.Value(schemas.BifrostContextKeyLargeResponseMode).(bool)
+	if !ok || !isLargeResponse {
+		return false
+	}
+	// Forward provider response headers before streaming — providers store them in
+	// context via BifrostContextKeyProviderResponseHeaders, but some early-return
+	// branches in the router skip the common footer that normally forwards them.
+	if headers, ok := bifrostCtx.Value(schemas.BifrostContextKeyProviderResponseHeaders).(map[string]string); ok {
+		for key, value := range headers {
+			ctx.Response.Header.Set(key, value)
+		}
+	}
+	if g.streamLargeResponse(ctx, bifrostCtx) {
+		ctx.SetUserValue(lib.FastHTTPUserValueLargeResponseMode, true)
+	}
+	return true
+}
+
+// streamLargeResponse streams the large response body directly from the upstream provider to the client.
+// This bypasses the normal serialize → set body path, piping the response bytes unchanged.
+func (g *GenericRouter) streamLargeResponse(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext) bool {
+	// Enterprise hook: wrap the reader with Phase B scanning (e.g., usage extraction
+	// from the full response stream) before streaming to client.
+	if g.largeResponseHook != nil {
+		g.largeResponseHook(ctx, bifrostCtx)
+	}
+
+	if !lib.StreamLargeResponseBody(ctx, bifrostCtx) {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.SetBodyString("large response reader not available")
+		return false
+	}
+	return true
 }
 
 // extractAndParseFallbacks extracts fallbacks from the integration request and adds them to the BifrostRequest
@@ -370,6 +442,31 @@ func isAnthropicAPIKeyAuth(ctx *fasthttp.RequestCtx) bool {
 	return true
 }
 
+// resolveLargePayloadMetadata returns metadata from the sync context key,
+// falling back to a non-blocking read from the deferred channel.
+// If deferred metadata is resolved, it is cached in the sync key for later readers.
+func resolveLargePayloadMetadata(bifrostCtx *schemas.BifrostContext) *schemas.LargePayloadMetadata {
+	if bifrostCtx == nil {
+		return nil
+	}
+	if metadata, ok := bifrostCtx.Value(schemas.BifrostContextKeyLargePayloadMetadata).(*schemas.LargePayloadMetadata); ok && metadata != nil {
+		return metadata
+	}
+	ch, ok := bifrostCtx.Value(schemas.BifrostContextKeyDeferredLargePayloadMetadata).(<-chan *schemas.LargePayloadMetadata)
+	if !ok || ch == nil {
+		return nil
+	}
+	select {
+	case metadata := <-ch:
+		if metadata != nil {
+			bifrostCtx.SetValue(schemas.BifrostContextKeyLargePayloadMetadata, metadata)
+		}
+		return metadata
+	default:
+		return nil
+	}
+}
+
 // ParseProviderScopedVideoID parses a provider-scoped video ID in the form "id:provider".
 // The ID portion is automatically URL-decoded to restore the original ID.
 func ParseProviderScopedVideoID(videoID string) (schemas.ModelProvider, string, error) {
@@ -387,4 +484,19 @@ func ParseProviderScopedVideoID(videoID string) (schemas.ModelProvider, string, 
 	}
 
 	return provider, rawID, nil
+}
+
+func getProviderFromHeader(ctx *fasthttp.RequestCtx, defaultProvider schemas.ModelProvider) schemas.ModelProvider {
+	providerHeader := string(ctx.Request.Header.Peek("x-model-provider"))
+	if providerHeader == "" {
+		return defaultProvider
+	}
+	return schemas.ModelProvider(providerHeader)
+}
+
+func RegisterKVDecoders(store *kvstore.Store) {
+	store.RegisterDecoder("genai_upload_session:", func(data []byte) (any, error) {
+		var v gemini.GeminiResumableUploadSession
+		return &v, sonic.Unmarshal(data, &v)
+	})
 }

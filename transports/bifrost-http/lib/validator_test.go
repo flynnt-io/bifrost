@@ -605,7 +605,7 @@ func TestValidateConfigSchema_VirtualKeyProviderConfig_MissingProvider(t *testin
 // =============================================================================
 
 func TestValidateConfigSchema_VirtualKeyMCPConfig_Valid(t *testing.T) {
-	// Valid virtual key MCP config with required field: mcp_client_id
+	// Valid virtual key MCP config identifying the MCP client by mcp_client_id (DB form)
 	validConfig := `{
 		"governance": {
 			"virtual_keys": [
@@ -629,9 +629,11 @@ func TestValidateConfigSchema_VirtualKeyMCPConfig_Valid(t *testing.T) {
 	}
 }
 
-func TestValidateConfigSchema_VirtualKeyMCPConfig_MissingMCPClientId(t *testing.T) {
-	// Missing required field: mcp_client_id
-	invalidConfig := `{
+func TestValidateConfigSchema_VirtualKeyMCPConfig_ValidWithClientName(t *testing.T) {
+	// Valid virtual key MCP config identifying the MCP client by mcp_client_name
+	// (config-file form — resolved to mcp_client_id at startup). Either identifier
+	// alone is sufficient; neither is required at the JSON Schema level.
+	validConfig := `{
 		"governance": {
 			"virtual_keys": [
 				{
@@ -640,6 +642,7 @@ func TestValidateConfigSchema_VirtualKeyMCPConfig_MissingMCPClientId(t *testing.
 					"value": "vk_test_123456",
 					"mcp_configs": [
 						{
+							"mcp_client_name": "my-mcp-client",
 							"tools_to_execute": ["tool1"]
 						}
 					]
@@ -648,9 +651,9 @@ func TestValidateConfigSchema_VirtualKeyMCPConfig_MissingMCPClientId(t *testing.
 		}
 	}`
 
-	err := ValidateConfigSchema([]byte(invalidConfig), loadLocalSchema(t))
-	if err == nil {
-		t.Error("expected config missing 'mcp_client_id' in virtual key MCP config to fail validation")
+	err := ValidateConfigSchema([]byte(validConfig), loadLocalSchema(t))
+	if err != nil {
+		t.Errorf("expected virtual key MCP config with mcp_client_name to pass validation, got error: %v", err)
 	}
 }
 
@@ -680,17 +683,15 @@ func TestValidateConfigSchema_MCPClientConfig_Valid_Stdio(t *testing.T) {
 	}
 }
 
-func TestValidateConfigSchema_MCPClientConfig_Valid_Websocket(t *testing.T) {
-	// Valid MCP client config with websocket connection type
+func TestValidateConfigSchema_MCPClientConfig_Valid_Sse(t *testing.T) {
+	// Valid MCP client config with sse connection type
 	validConfig := `{
 		"mcp": {
 			"client_configs": [
 				{
 					"name": "my-mcp-client",
-					"connection_type": "websocket",
-					"websocket_config": {
-						"url": "ws://localhost:8080"
-					}
+					"connection_type": "sse",
+					"connection_string": "http://localhost:8080"
 				}
 			]
 		}
@@ -698,7 +699,7 @@ func TestValidateConfigSchema_MCPClientConfig_Valid_Websocket(t *testing.T) {
 
 	err := ValidateConfigSchema([]byte(validConfig), loadLocalSchema(t))
 	if err != nil {
-		t.Errorf("expected valid MCP client config (websocket) to pass validation, got error: %v", err)
+		t.Errorf("expected valid MCP client config (sse) to pass validation, got error: %v", err)
 	}
 }
 
@@ -710,9 +711,7 @@ func TestValidateConfigSchema_MCPClientConfig_Valid_Http(t *testing.T) {
 				{
 					"name": "my-mcp-client",
 					"connection_type": "http",
-					"http_config": {
-						"url": "http://localhost:8080"
-					}
+					"connection_string": "http://localhost:8080"
 				}
 			]
 		}
@@ -1025,15 +1024,15 @@ func TestValidateConfigSchema_Plugin_MissingName(t *testing.T) {
 // =============================================================================
 
 func TestValidateConfigSchema_SemanticCachePlugin_Valid(t *testing.T) {
-	// Valid semantic cache plugin with all required fields: provider, keys, dimension
+	// Valid semantic cache plugin with provider, embedding model, and dimension. Keys are injected at runtime.
 	validConfig := `{
 		"plugins": [
 			{
 				"enabled": true,
-				"name": "semanticcache",
+				"name": "semantic_cache",
 				"config": {
 					"provider": "openai",
-					"keys": ["sk-test-key"],
+					"embedding_model": "text-embedding-3-small",
 					"dimension": 1536
 				}
 			}
@@ -1047,14 +1046,13 @@ func TestValidateConfigSchema_SemanticCachePlugin_Valid(t *testing.T) {
 }
 
 func TestValidateConfigSchema_SemanticCachePlugin_MissingProvider(t *testing.T) {
-	// Missing required field: provider
+	// Missing required field: provider for semantic mode (dimension > 1)
 	invalidConfig := `{
 		"plugins": [
 			{
 				"enabled": true,
-				"name": "semanticcache",
+				"name": "semantic_cache",
 				"config": {
-					"keys": ["sk-test-key"],
 					"dimension": 1536
 				}
 			}
@@ -1067,13 +1065,34 @@ func TestValidateConfigSchema_SemanticCachePlugin_MissingProvider(t *testing.T) 
 	}
 }
 
-func TestValidateConfigSchema_SemanticCachePlugin_MissingKeys(t *testing.T) {
-	// Missing required field: keys
+func TestValidateConfigSchema_SemanticCachePlugin_ProviderWithoutKeys(t *testing.T) {
+	// Keys are not required at schema level for provider-backed config.
+	validConfig := `{
+		"plugins": [
+			{
+				"enabled": true,
+				"name": "semantic_cache",
+				"config": {
+					"provider": "openai",
+					"embedding_model": "text-embedding-3-small",
+					"dimension": 1536
+				}
+			}
+		]
+	}`
+
+	err := ValidateConfigSchema([]byte(validConfig), loadLocalSchema(t))
+	if err != nil {
+		t.Errorf("expected provider-backed semantic cache config without plugin keys to pass validation, got error: %v", err)
+	}
+}
+
+func TestValidateConfigSchema_SemanticCachePlugin_ProviderWithoutEmbeddingModel(t *testing.T) {
 	invalidConfig := `{
 		"plugins": [
 			{
 				"enabled": true,
-				"name": "semanticcache",
+				"name": "semantic_cache",
 				"config": {
 					"provider": "openai",
 					"dimension": 1536
@@ -1084,7 +1103,67 @@ func TestValidateConfigSchema_SemanticCachePlugin_MissingKeys(t *testing.T) {
 
 	err := ValidateConfigSchema([]byte(invalidConfig), loadLocalSchema(t))
 	if err == nil {
-		t.Error("expected config missing 'keys' in semantic cache plugin to fail validation")
+		t.Error("expected provider-backed semantic cache config without embedding_model to fail validation")
+	}
+}
+
+func TestValidateConfigSchema_SemanticCachePlugin_DirectModeValid(t *testing.T) {
+	validConfig := `{
+		"plugins": [
+			{
+				"enabled": true,
+				"name": "semantic_cache",
+				"config": {
+					"dimension": 1
+				}
+			}
+		]
+	}`
+
+	err := ValidateConfigSchema([]byte(validConfig), loadLocalSchema(t))
+	if err != nil {
+		t.Errorf("expected direct-only semantic cache config to pass validation, got error: %v", err)
+	}
+}
+
+func TestValidateConfigSchema_SemanticCachePlugin_DirectModeWithEmbeddingModelInvalid(t *testing.T) {
+	invalidConfig := `{
+		"plugins": [
+			{
+				"enabled": true,
+				"name": "semantic_cache",
+				"config": {
+					"dimension": 1,
+					"embedding_model": "text-embedding-3-small"
+				}
+			}
+		]
+	}`
+
+	err := ValidateConfigSchema([]byte(invalidConfig), loadLocalSchema(t))
+	if err == nil {
+		t.Error("expected direct-only semantic cache config with embedding_model to fail validation")
+	}
+}
+
+func TestValidateConfigSchema_SemanticCachePlugin_DimensionOneWithProviderInvalid(t *testing.T) {
+	invalidConfig := `{
+		"plugins": [
+			{
+				"enabled": true,
+				"name": "semantic_cache",
+				"config": {
+					"provider": "openai",
+					"embedding_model": "text-embedding-3-small",
+					"dimension": 1
+				}
+			}
+		]
+	}`
+
+	err := ValidateConfigSchema([]byte(invalidConfig), loadLocalSchema(t))
+	if err == nil {
+		t.Error("expected dimension: 1 with provider in semantic cache plugin to fail validation")
 	}
 }
 
@@ -1094,10 +1173,10 @@ func TestValidateConfigSchema_SemanticCachePlugin_MissingDimension(t *testing.T)
 		"plugins": [
 			{
 				"enabled": true,
-				"name": "semanticcache",
+				"name": "semantic_cache",
 				"config": {
 					"provider": "openai",
-					"keys": ["sk-test-key"]
+					"embedding_model": "text-embedding-3-small"
 				}
 			}
 		]
@@ -1122,7 +1201,7 @@ func TestValidateConfigSchema_OtelPlugin_Valid(t *testing.T) {
 				"name": "otel",
 				"config": {
 					"collector_url": "http://localhost:4318",
-					"trace_type": "otel",
+					"trace_type": "genai_extension",
 					"protocol": "http"
 				}
 			}
@@ -1143,7 +1222,7 @@ func TestValidateConfigSchema_OtelPlugin_MissingCollectorUrl(t *testing.T) {
 				"enabled": true,
 				"name": "otel",
 				"config": {
-					"trace_type": "otel",
+					"trace_type": "genai_extension",
 					"protocol": "http"
 				}
 			}
@@ -1186,7 +1265,7 @@ func TestValidateConfigSchema_OtelPlugin_MissingProtocol(t *testing.T) {
 				"name": "otel",
 				"config": {
 					"collector_url": "http://localhost:4318",
-					"trace_type": "otel"
+					"trace_type": "genai_extension"
 				}
 			}
 		]

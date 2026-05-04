@@ -1,16 +1,19 @@
 package openai
 
 import (
+	"fmt"
+	"strings"
+
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
 )
 
 // ErrorConverter is a function that converts provider-specific error responses to BifrostError.
-type ErrorConverter func(resp *fasthttp.Response, requestType schemas.RequestType, providerName schemas.ModelProvider, model string) *schemas.BifrostError
+type ErrorConverter func(resp *fasthttp.Response) *schemas.BifrostError
 
 // ParseOpenAIError parses OpenAI error responses.
-func ParseOpenAIError(resp *fasthttp.Response, requestType schemas.RequestType, providerName schemas.ModelProvider, model string) *schemas.BifrostError {
+func ParseOpenAIError(resp *fasthttp.Response) *schemas.BifrostError {
 	var errorResp schemas.BifrostError
 
 	bifrostErr := providerUtils.HandleProviderAPIError(resp, &errorResp)
@@ -25,19 +28,27 @@ func ParseOpenAIError(resp *fasthttp.Response, requestType schemas.RequestType, 
 		}
 		bifrostErr.Error.Type = errorResp.Error.Type
 		bifrostErr.Error.Code = errorResp.Error.Code
-		bifrostErr.Error.Message = errorResp.Error.Message
+		if errorResp.Error.Message != "" {
+			bifrostErr.Error.Message = errorResp.Error.Message
+		}
 		bifrostErr.Error.Param = errorResp.Error.Param
 		if errorResp.Error.EventID != nil {
 			bifrostErr.Error.EventID = errorResp.Error.EventID
 		}
 	}
 
-	// Set ExtraFields unconditionally so provider/model/request metadata is always attached
-	if bifrostErr != nil {
-		bifrostErr.ExtraFields.Provider = providerName
-		bifrostErr.ExtraFields.ModelRequested = model
-		bifrostErr.ExtraFields.RequestType = requestType
+	if bifrostErr.Error == nil {
+		bifrostErr.Error = &schemas.ErrorField{}
 	}
+	if strings.TrimSpace(bifrostErr.Error.Message) == "" {
+		if bifrostErr.StatusCode != nil {
+			bifrostErr.Error.Message = fmt.Sprintf("provider API error (status %d)", *bifrostErr.StatusCode)
+		} else {
+			bifrostErr.Error.Message = "provider API error"
+		}
+	}
+
+	// Set ExtraFields unconditionally so provider/model/request metadata is always attached
 
 	return bifrostErr
 }

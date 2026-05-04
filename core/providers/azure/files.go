@@ -13,17 +13,18 @@ import (
 )
 
 // setAzureAuth sets the Azure authentication header on the request for OpenAI models.
-// It handles three authentication methods in order of priority:
+// It handles authentication in order of priority:
 // 1. Service Principal (client ID/secret/tenant ID) - uses Bearer token
 // 2. Context token - uses Bearer token
 // 3. API key - uses api-key header
+// 4. DefaultAzureCredential auto-detection (managed identity, workload identity, env vars, CLI)
 func (provider *AzureProvider) setAzureAuth(ctx context.Context, req *fasthttp.Request, key schemas.Key) *schemas.BifrostError {
 	// Service Principal authentication
 	if key.AzureKeyConfig != nil && key.AzureKeyConfig.ClientID != nil &&
 		key.AzureKeyConfig.ClientSecret != nil && key.AzureKeyConfig.TenantID != nil && key.AzureKeyConfig.ClientID.GetValue() != "" && key.AzureKeyConfig.ClientSecret.GetValue() != "" && key.AzureKeyConfig.TenantID.GetValue() != "" {
 		cred, err := provider.getOrCreateAuth(key.AzureKeyConfig.TenantID.GetValue(), key.AzureKeyConfig.ClientID.GetValue(), key.AzureKeyConfig.ClientSecret.GetValue())
 		if err != nil {
-			return providerUtils.NewBifrostOperationError("failed to get or create Azure authentication", err, schemas.Azure)
+			return providerUtils.NewBifrostOperationError("failed to get or create Azure authentication", err)
 		}
 
 		scopes := getAzureScopes(key.AzureKeyConfig.Scopes)
@@ -32,11 +33,11 @@ func (provider *AzureProvider) setAzureAuth(ctx context.Context, req *fasthttp.R
 			Scopes: scopes,
 		})
 		if err != nil {
-			return providerUtils.NewBifrostOperationError("failed to get Azure access token", err, schemas.Azure)
+			return providerUtils.NewBifrostOperationError("failed to get Azure access token", err)
 		}
 
 		if token.Token == "" {
-			return providerUtils.NewBifrostOperationError("Azure access token is empty", fmt.Errorf("token is empty"), schemas.Azure)
+			return providerUtils.NewBifrostOperationError("azure access token is empty", fmt.Errorf("token is empty"))
 		}
 
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.Token))
@@ -52,8 +53,35 @@ func (provider *AzureProvider) setAzureAuth(ctx context.Context, req *fasthttp.R
 	}
 
 	// API key authentication
-	req.Header.Del("Authorization")
-	req.Header.Set("api-key", key.Value.GetValue())
+	value := key.Value.GetValue()
+	if value != "" {
+		req.Header.Del("Authorization")
+		req.Header.Set("api-key", value)
+		return nil
+	}
+
+	// No explicit credentials - attempt DefaultAzureCredential auto-detection.
+	scopes := getAzureScopes(nil)
+	if key.AzureKeyConfig != nil {
+		scopes = getAzureScopes(key.AzureKeyConfig.Scopes)
+	}
+
+	cred, err := provider.getOrCreateDefaultAzureCredential()
+	if err != nil {
+		return providerUtils.NewBifrostOperationError("no credentials provided and DefaultAzureCredential unavailable", err)
+	}
+
+	token, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: scopes})
+	if err != nil {
+		return providerUtils.NewBifrostOperationError("no credentials provided and DefaultAzureCredential failed to get token", err)
+	}
+
+	if token.Token == "" {
+		return providerUtils.NewBifrostOperationError("no credentials provided and DefaultAzureCredential returned empty token", fmt.Errorf("token is empty"))
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.Token))
+	req.Header.Del("api-key")
 	return nil
 }
 
@@ -82,9 +110,7 @@ func (r *AzureFileResponse) ToBifrostFileUploadResponse(providerName schemas.Mod
 		StatusDetails:  r.StatusDetails,
 		StorageBackend: schemas.FileStorageAPI,
 		ExtraFields: schemas.BifrostResponseExtraFields{
-			RequestType: schemas.FileUploadRequest,
-			Provider:    providerName,
-			Latency:     latency.Milliseconds(),
+			Latency: latency.Milliseconds(),
 		},
 	}
 

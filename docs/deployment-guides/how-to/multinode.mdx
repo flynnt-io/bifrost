@@ -8,6 +8,19 @@ icon: "layer-group"
 
 Running multiple Bifrost nodes provides high availability, load distribution, and fault tolerance for your AI gateway. This guide covers the recommended approach for deploying multiple Bifrost nodes in OSS deployments.
 
+<Warning>
+  Running multiple OSS Bifrost nodes with a Postgres backend is not supported.
+  
+  Here is the short technical explanation:
+  
+  - Bifrost is designed to keep all critical information in memory, including provider configs, API keys, budgets, usage, and traffic distribution.
+  - Once a node is initialized, it does not read this information back from the database.
+  - In the Enterprise version, we use a slightly modified version of RAFT to synchronize this state in real time across nodes, while the database acts only as a dumb store.
+  - Based on our current view, OSS is sufficient for startups and medium-scale teams, and can easily handle around 3,000–5,000 RPS on a single instance.
+  - If you need high availability and enterprise capabilities such as real-time synchronization, the Enterprise plan is the right fit. 
+  - And yes, that is part of how we draw the OSS vs Enterprise line 💰.
+</Warning>
+
 ### OSS vs Enterprise
 
 | Aspect | OSS Approach | Enterprise Approach |
@@ -62,6 +75,10 @@ Bifrost Enterprise includes **P2P clustering** with gossip protocol that automat
 ### Example config.json
 
 Create a `config.json` **without** `config_store` or `logs_store`:
+
+<Note>
+If you use PostgreSQL for `logs_store`, ensure the target database is UTF8 encoded. See [PostgreSQL UTF8 Requirement](../../quickstart/gateway/setting-up#postgresql-utf8-requirement).
+</Note>
 
 ```json
 {
@@ -425,4 +442,3 @@ resources:
 | Multinode Enterprise | Use P2P clustering with `config_store` |
 
 For OSS multinode deployments, the shared `config.json` approach provides a simple, reliable way to keep all nodes in sync without the complexity of database synchronization.
-

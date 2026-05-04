@@ -1,6 +1,3 @@
-"use client";
-
-import { CodeEditor } from "@/app/workspace/logs/views/codeEditor";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -14,21 +11,27 @@ import {
 } from "@/components/ui/alertDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdownMenu";
+import { CodeEditor } from "@/components/ui/codeEditor";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdownMenu";
 import { DottedSeparator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Status, StatusColors, Statuses } from "@/lib/constants/logs";
 import type { MCPToolLogEntry } from "@/lib/types/logs";
-import { MoreVertical, Trash2 } from "lucide-react";
-import moment from "moment";
+import { downloadAsJson } from "@/lib/utils/browser-download";
+import { addMilliseconds, format, isValid } from "date-fns";
+import { ChevronDown, ChevronUp, Download, MoreVertical, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { useHotkeys } from "react-hotkeys-hook";
 import { toast } from "sonner";
 
 interface MCPLogDetailSheetProps {
 	log: MCPToolLogEntry | null;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	handleDelete: (log: MCPToolLogEntry) => Promise<void>;
+	handleDelete?: (log: MCPToolLogEntry) => Promise<void>;
+	onNavigate?: (direction: "prev" | "next") => void;
+	hasPrev?: boolean;
+	hasNext?: boolean;
 }
 
 const LogEntryDetailsView = ({ label, value, className }: { label: string; value: React.ReactNode; className?: string }) => (
@@ -57,14 +60,26 @@ const getValidatedStatus = (status: string): Status => {
 	return "processing";
 };
 
-export function MCPLogDetailSheet({ log, open, onOpenChange, handleDelete }: MCPLogDetailSheetProps) {
+export function MCPLogDetailSheet({
+	log,
+	open,
+	onOpenChange,
+	handleDelete,
+	onNavigate,
+	hasPrev = false,
+	hasNext = false,
+}: MCPLogDetailSheetProps) {
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+
+	// Keyboard navigation: arrow up/down to navigate between logs
+	useHotkeys("up", () => onNavigate?.("prev"), { enabled: open && hasPrev, preventDefault: true });
+	useHotkeys("down", () => onNavigate?.("next"), { enabled: open && hasNext, preventDefault: true });
 
 	if (!log) return null;
 
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
-			<SheetContent className="dark:bg-card flex w-full flex-col gap-4 overflow-x-hidden bg-white p-8 sm:max-w-[60%]">
+			<SheetContent className="flex w-full flex-col gap-4 overflow-x-hidden p-8 sm:max-w-[60%]">
 				<SheetHeader className="flex flex-row items-center px-0">
 					<div className="flex w-full items-center justify-between">
 						<SheetTitle className="flex w-fit items-center gap-2 font-medium">
@@ -74,20 +89,54 @@ export function MCPLogDetailSheet({ log, open, onOpenChange, handleDelete }: MCP
 							</Badge>
 						</SheetTitle>
 					</div>
+					<div className="flex items-center">
+						<Button
+							variant="ghost"
+							className="size-8"
+							disabled={!hasPrev}
+							onClick={() => onNavigate?.("prev")}
+							aria-label="Previous log"
+							data-testid="mcp-log-nav-prev"
+							type="button"
+						>
+							<ChevronUp className="size-4" />
+						</Button>
+						<Button
+							variant="ghost"
+							className="size-8"
+							disabled={!hasNext}
+							onClick={() => onNavigate?.("next")}
+							aria-label="Next log"
+							data-testid="mcp-log-nav-next"
+							type="button"
+						>
+							<ChevronDown className="size-4" />
+						</Button>
+					</div>
 					<AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
 						<DropdownMenu>
 							<DropdownMenuTrigger asChild>
-								<Button variant="ghost" size="icon">
+								<Button variant="ghost" className="size-8" type="button">
 									<MoreVertical className="h-3 w-3" />
 								</Button>
 							</DropdownMenuTrigger>
 							<DropdownMenuContent align="end">
-								<AlertDialogTrigger asChild>
-									<DropdownMenuItem variant="destructive">
-										<Trash2 className="h-4 w-4" />
-										Delete log
-									</DropdownMenuItem>
-								</AlertDialogTrigger>
+								<DropdownMenuItem
+									data-testid="export-log-json"
+									onClick={() => downloadAsJson(log, `mcp-log-${log.id ?? "export"}.json`)}
+								>
+									<Download className="h-4 w-4" />
+									Export as JSON
+								</DropdownMenuItem>
+								{handleDelete ? <>
+									<DropdownMenuSeparator />
+									<AlertDialogTrigger asChild>
+										<DropdownMenuItem variant="destructive">
+											<Trash2 className="h-4 w-4" />
+											Delete log
+										</DropdownMenuItem>
+									</AlertDialogTrigger>
+								</> : null}
 							</DropdownMenuContent>
 						</DropdownMenu>
 						<AlertDialogContent>
@@ -100,6 +149,7 @@ export function MCPLogDetailSheet({ log, open, onOpenChange, handleDelete }: MCP
 								<AlertDialogAction
 									onClick={async (e) => {
 										e.preventDefault();
+										if (!handleDelete) return;
 										try {
 											await handleDelete(log);
 											setDeleteDialogOpen(false);
@@ -124,14 +174,16 @@ export function MCPLogDetailSheet({ log, open, onOpenChange, handleDelete }: MCP
 							<LogEntryDetailsView
 								className="w-full"
 								label="Start Timestamp"
-								value={moment(log.timestamp).format("YYYY-MM-DD HH:mm:ss A")}
+								value={isValid(new Date(log.timestamp)) ? format(new Date(log.timestamp), "yyyy-MM-dd hh:mm:ss aa") : "Invalid date"}
 							/>
 							<LogEntryDetailsView
 								className="w-full"
 								label="End Timestamp"
-								value={moment(log.timestamp)
-									.add(log.latency || 0, "ms")
-									.format("YYYY-MM-DD HH:mm:ss A")}
+								value={
+									isValid(new Date(log.timestamp))
+										? format(addMilliseconds(new Date(log.timestamp), log.latency || 0), "yyyy-MM-dd hh:mm:ss aa")
+										: "Invalid date"
+								}
 							/>
 							<LogEntryDetailsView className="w-full" label="Latency" value={log.latency ? `${log.latency.toFixed(2)}ms` : "NA"} />
 						</div>

@@ -1,5 +1,3 @@
-"use client";
-
 import ClientForm from "@/app/workspace/mcp-registry/views/mcpClientForm";
 import {
 	AlertDialog,
@@ -14,24 +12,41 @@ import {
 } from "@/components/ui/alertDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { MCP_STATUS_COLORS } from "@/lib/constants/config";
 import { getErrorMessage, useDeleteMCPClientMutation, useReconnectMCPClientMutation } from "@/lib/store";
 import { MCPClient } from "@/lib/types/mcp";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
-import { Loader2, Plus, RefreshCcw, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, Plus, RefreshCcw, Search, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { MCPServersEmptyState } from "./mcpServersEmptyState";
 import MCPClientSheet from "./mcpClientSheet";
 
 interface MCPClientsTableProps {
 	mcpClients: MCPClient[];
+	totalCount: number;
 	refetch?: () => void;
+	search: string;
+	debouncedSearch: string;
+	onSearchChange: (value: string) => void;
+	offset: number;
+	limit: number;
+	onOffsetChange: (offset: number) => void;
 }
 
-export default function MCPClientsTable({ mcpClients, refetch }: MCPClientsTableProps) {
+export default function MCPClientsTable({
+	mcpClients,
+	totalCount,
+	refetch,
+	search,
+	debouncedSearch,
+	onSearchChange,
+	offset,
+	limit,
+	onOffsetChange,
+}: MCPClientsTableProps) {
 	const [formOpen, setFormOpen] = useState(false);
 	const hasCreateMCPClientAccess = useRbac(RbacResource.MCPGateway, RbacOperation.Create);
 	const hasUpdateMCPClientAccess = useRbac(RbacResource.MCPGateway, RbacOperation.Update);
@@ -127,8 +142,10 @@ export default function MCPClientsTable({ mcpClients, refetch }: MCPClientsTable
 		}
 	};
 
-	// Empty state when user has no MCP servers (same pattern as Virtual Keys, Plugins)
-	if (mcpClients.length === 0) {
+	const hasActiveFilters = debouncedSearch;
+
+	// True empty state: no servers at all (not just filtered to zero)
+	if (totalCount === 0 && !hasActiveFilters) {
 		return (
 			<>
 				{formOpen && <ClientForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={handleSaved} />}
@@ -143,124 +160,191 @@ export default function MCPClientsTable({ mcpClients, refetch }: MCPClientsTable
 				<MCPClientSheet mcpClient={selectedMCPClient} onClose={handleDetailSheetClose} onSubmitSuccess={handleEditTools} />
 			)}
 
-			<CardHeader className="mb-4 px-0">
-				<CardTitle className="flex items-center justify-between">
-					<h1 className="text-foreground text-lg font-semibold">MCP server catalog</h1>
-					<Button onClick={handleCreate} disabled={!hasCreateMCPClientAccess} data-testid="create-mcp-client-btn">
-						<Plus className="h-4 w-4" /> New MCP Server
-					</Button>
-				</CardTitle>
-				<CardDescription>Manage servers that can connect to the MCP Tools endpoint.</CardDescription>
-			</CardHeader>
-			<div className="rounded-sm border">
+			<div className="flex items-center justify-between gap-4">
+				<div>
+					<h2 className="text-lg font-semibold tracking-tight">MCP Server Catalog</h2>
+					<p className="text-muted-foreground text-sm">Manage servers that can connect to the MCP Tools endpoint.</p>
+				</div>
+				<Button onClick={handleCreate} disabled={!hasCreateMCPClientAccess} data-testid="create-mcp-client-btn" aria-label="New MCP Server" className="gap-2">
+					<Plus className="h-4 w-4" />
+					<span className="hidden sm:inline">New MCP Server</span>
+				</Button>
+			</div>
+
+			{/* Toolbar: Search */}
+			<div className="flex items-center gap-3">
+				<div className="relative max-w-sm flex-1">
+					<Search className="text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2" />
+					<Input
+						aria-label="Search MCP servers by name"
+						placeholder="Search by name..."
+						value={search}
+						onChange={(e) => onSearchChange(e.target.value)}
+						className="pl-9"
+						data-testid="mcp-clients-search-input"
+					/>
+				</div>
+			</div>
+
+			<div className="overflow-hidden rounded-sm border">
 				<Table data-testid="mcp-clients-table">
 					<TableHeader>
-						<TableRow>
-							<TableHead>Name</TableHead>
-							<TableHead>Connection Type</TableHead>
-							<TableHead>Code Mode</TableHead>
-							<TableHead>Connection Info</TableHead>
-							<TableHead>Enabled Tools</TableHead>
-							<TableHead>Auto-execute Tools</TableHead>
-							<TableHead>State</TableHead>
+						<TableRow className="bg-muted/50">
+							<TableHead className="font-semibold">Name</TableHead>
+							<TableHead className="font-semibold">Connection Type</TableHead>
+							<TableHead className="font-semibold">Code Mode</TableHead>
+							<TableHead className="font-semibold">Connection Info</TableHead>
+							<TableHead className="font-semibold">Enabled Tools</TableHead>
+							<TableHead className="font-semibold">Auto-execute Tools</TableHead>
+							<TableHead className="font-semibold">State</TableHead>
 							<TableHead className="w-20 text-right"></TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>
-						{mcpClients.map((c: MCPClient) => {
-							const enabledToolsCount =
-								c.state == "connected"
-									? c.config.tools_to_execute?.includes("*")
-										? c.tools?.length
-										: (c.config.tools_to_execute?.length ?? 0)
-									: 0;
-							const autoExecuteToolsCount =
-								c.state == "connected"
-									? c.config.tools_to_auto_execute?.includes("*")
-										? c.tools?.length
-										: (c.config.tools_to_auto_execute?.length ?? 0)
-									: 0;
-							return (
-								<TableRow
-									key={c.config.client_id}
-									className="hover:bg-muted/50 cursor-pointer transition-colors"
-									onClick={() => handleRowClick(c)}
-								>
-									<TableCell className="font-medium">{c.config.name}</TableCell>
-									<TableCell>{getConnectionTypeDisplay(c.config.connection_type)}</TableCell>
-									<TableCell>
-										<Badge
-											className={
-												c.state == "connected" ? MCP_STATUS_COLORS[c.config.is_code_mode_client ? "connected" : "disconnected"] : ""
-											}
-										>
-											{c.state == "connected" ? <>{c.config.is_code_mode_client ? "Enabled" : "Disabled"}</> : "-"}
-										</Badge>
-									</TableCell>
-									<TableCell className="max-w-72 overflow-hidden text-ellipsis whitespace-nowrap">{getConnectionDisplay(c)}</TableCell>
-									<TableCell>
-										{c.state == "connected" ? (
-											<>
-												{enabledToolsCount}/{c.tools?.length}
-											</>
-										) : (
-											"-"
-										)}
-									</TableCell>
-									<TableCell>
-										{c.state == "connected" ? (
-											<>
-												{autoExecuteToolsCount}/{c.tools?.length}
-											</>
-										) : (
-											"-"
-										)}
-									</TableCell>
-									<TableCell>
-										<Badge className={MCP_STATUS_COLORS[c.state]}>{c.state}</Badge>
-									</TableCell>
-									<TableCell className="space-x-2 text-right" onClick={(e) => e.stopPropagation()}>
-										<Button
-											variant="ghost"
-											size="icon"
-											onClick={() => handleReconnect(c)}
-											disabled={reconnectingClients.includes(c.config.client_id) || !hasUpdateMCPClientAccess}
-											title="Reconnect"
-										>
-											{reconnectingClients.includes(c.config.client_id) ? (
-												<Loader2 className="h-4 w-4 animate-spin" />
+						{mcpClients.length === 0 ? (
+							<TableRow>
+								<TableCell colSpan={8} className="h-24 text-center">
+									<span className="text-muted-foreground text-sm">No matching MCP servers found.</span>
+								</TableCell>
+							</TableRow>
+						) : (
+							mcpClients.map((c: MCPClient) => {
+								const isPerUserOAuth = c.config.auth_type === "per_user_oauth";
+								const enabledToolsCount =
+									c.state == "connected"
+										? c.config.tools_to_execute?.includes("*")
+											? c.tools?.length
+											: (c.config.tools_to_execute?.length ?? 0)
+										: 0;
+								const autoExecuteToolsCount =
+									c.state == "connected"
+										? c.config.tools_to_auto_execute?.includes("*")
+											? c.tools?.length
+											: (c.config.tools_to_auto_execute?.length ?? 0)
+										: 0;
+								return (
+									<TableRow
+										key={c.config.client_id}
+										className="hover:bg-muted/50 cursor-pointer transition-colors"
+										onClick={() => handleRowClick(c)}
+									>
+										<TableCell className="font-medium">{c.config.name}</TableCell>
+										<TableCell data-testid="mcp-client-connection-type">{getConnectionTypeDisplay(c.config.connection_type)}</TableCell>
+										<TableCell>
+											<Badge
+												className={
+													c.state == "connected" ? MCP_STATUS_COLORS[c.config.is_code_mode_client ? "connected" : "disconnected"] : ""
+												}
+											>
+												{c.state == "connected" ? <>{c.config.is_code_mode_client ? "Enabled" : "Disabled"}</> : "-"}
+											</Badge>
+										</TableCell>
+										<TableCell className="max-w-72 overflow-hidden text-ellipsis whitespace-nowrap">{getConnectionDisplay(c)}</TableCell>
+										<TableCell>
+											{c.state == "connected" ? (
+												<>
+													{enabledToolsCount}/{c.tools?.length}
+												</>
 											) : (
-												<RefreshCcw className="h-4 w-4" />
+												"-"
 											)}
-										</Button>
-
-										<AlertDialog>
-											<AlertDialogTrigger asChild>
-												<Button variant="ghost" size="icon" disabled={!hasDeleteMCPClientAccess}>
-													<Trash2 className="h-4 w-4" />
+										</TableCell>
+										<TableCell>
+											{c.state == "connected" ? (
+												<>
+													{autoExecuteToolsCount}/{c.tools?.length}
+												</>
+											) : (
+												"-"
+											)}
+										</TableCell>
+										<TableCell>
+											<Badge className={MCP_STATUS_COLORS[c.state]}>{c.state}</Badge>
+										</TableCell>
+										<TableCell className="space-x-2 text-right" onClick={(e) => e.stopPropagation()}>
+											<span title={isPerUserOAuth ? "Reconnect not supported for per-user OAuth clients" : "Reconnect"}>
+												<Button
+													variant="ghost"
+													size="icon"
+													aria-label={isPerUserOAuth ? "Reconnect not supported for per-user OAuth clients" : "Reconnect"}
+													onClick={() => handleReconnect(c)}
+													disabled={isPerUserOAuth || reconnectingClients.includes(c.config.client_id) || !hasUpdateMCPClientAccess}
+												>
+													{reconnectingClients.includes(c.config.client_id) ? (
+														<Loader2 className="h-4 w-4 animate-spin" />
+													) : (
+														<RefreshCcw className="h-4 w-4" />
+													)}
 												</Button>
-											</AlertDialogTrigger>
-											<AlertDialogContent>
-												<AlertDialogHeader>
-													<AlertDialogTitle>Remove MCP Server</AlertDialogTitle>
-													<AlertDialogDescription>
-														Are you sure you want to remove MCP server {c.config.name}? You will need to reconnect the server to continue
-														using it.
-													</AlertDialogDescription>
-												</AlertDialogHeader>
-												<AlertDialogFooter>
-													<AlertDialogCancel>Cancel</AlertDialogCancel>
-													<AlertDialogAction onClick={() => handleDelete(c)}>Delete</AlertDialogAction>
-												</AlertDialogFooter>
-											</AlertDialogContent>
-										</AlertDialog>
-									</TableCell>
-								</TableRow>
-							);
-						})}
+											</span>
+
+											<AlertDialog>
+												<AlertDialogTrigger asChild>
+													<Button
+														variant="ghost"
+														size="icon"
+														className="text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
+														disabled={!hasDeleteMCPClientAccess}
+													>
+														<Trash2 className="h-4 w-4" />
+													</Button>
+												</AlertDialogTrigger>
+												<AlertDialogContent>
+													<AlertDialogHeader>
+														<AlertDialogTitle>Remove MCP Server</AlertDialogTitle>
+														<AlertDialogDescription>
+															Are you sure you want to remove MCP server {c.config.name}? You will need to reconnect the server to continue
+															using it.
+														</AlertDialogDescription>
+													</AlertDialogHeader>
+													<AlertDialogFooter>
+														<AlertDialogCancel>Cancel</AlertDialogCancel>
+														<AlertDialogAction onClick={() => handleDelete(c)} className="bg-destructive hover:bg-destructive/90">
+															Delete
+														</AlertDialogAction>
+													</AlertDialogFooter>
+												</AlertDialogContent>
+											</AlertDialog>
+										</TableCell>
+									</TableRow>
+								);
+							})
+						)}
 					</TableBody>
 				</Table>
 			</div>
+
+			{/* Pagination */}
+			{totalCount > 0 && (
+				<div className="flex items-center justify-between px-2">
+					<p className="text-muted-foreground text-sm">
+						Showing {offset + 1}-{Math.min(offset + limit, totalCount)} of {totalCount}
+					</p>
+					<div className="flex gap-2">
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={offset === 0}
+							onClick={() => onOffsetChange(Math.max(0, offset - limit))}
+							data-testid="mcp-clients-pagination-prev-btn"
+						>
+							<ChevronLeft className="mr-1 h-4 w-4" />
+							Previous
+						</Button>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={offset + limit >= totalCount}
+							onClick={() => onOffsetChange(offset + limit)}
+							data-testid="mcp-clients-pagination-next-btn"
+						>
+							Next
+							<ChevronRight className="ml-1 h-4 w-4" />
+						</Button>
+					</div>
+				</div>
+			)}
+
 			{formOpen && <ClientForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={handleSaved} />}
 		</div>
 	);

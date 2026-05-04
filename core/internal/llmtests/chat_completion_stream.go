@@ -164,6 +164,15 @@ func RunChatCompletionStreamTest(t *testing.T, client *bifrost.Bifrost, ctx cont
 						t.Logf("⚠️ Warning: Response ID is empty")
 					}
 
+					// Per-chunk Object validation: bifrost normalizes every streaming chunk
+					// to the OpenAI shape with Object="chat.completion.chunk", whether the
+					// upstream provider natively emits it (OpenAI family) or bifrost
+					// synthesizes it during translation (e.g., Anthropic's type-keyed events).
+					// A missing/wrong Object here indicates a provider translation regression.
+					if response.BifrostChatResponse.Object != "chat.completion.chunk" {
+						t.Errorf("Chunk %d: Object field must be 'chat.completion.chunk', got %q", responseCount+1, response.BifrostChatResponse.Object)
+					}
+
 					// Log latency for each chunk (can be 0 for inter-chunks)
 					t.Logf("📊 Chunk %d latency: %d ms", responseCount+1, response.BifrostChatResponse.ExtraFields.Latency)
 
@@ -250,7 +259,7 @@ func RunChatCompletionStreamTest(t *testing.T, client *bifrost.Bifrost, ctx cont
 			if len(lastResponse.BifrostChatResponse.Choices) > 0 && lastResponse.BifrostChatResponse.Choices[0].FinishReason != nil {
 				consolidatedResponse.Choices[0].FinishReason = lastResponse.BifrostChatResponse.Choices[0].FinishReason
 			}
-			consolidatedResponse.ExtraFields.Latency = lastResponse.BifrostChatResponse.ExtraFields.Latency
+			consolidatedResponse.ExtraFields = lastResponse.BifrostChatResponse.ExtraFields
 		}
 
 		// Enhanced validation expectations for streaming
