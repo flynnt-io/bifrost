@@ -15,21 +15,6 @@ import (
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
 
-// Default sync interval and config key
-const (
-	DefaultPricingSyncInterval = 24 * time.Hour
-	ConfigLastPricingSyncKey   = "LastModelPricingSync"
-	DefaultPricingURL          = "http://127.0.0.1:5000/pricing.json"
-	TokenTierAbove128K         = 128000
-	TokenTierAbove200K         = 200000
-)
-
-// Config is the model pricing configuration.
-type Config struct {
-	PricingURL          *string        `json:"pricing_url,omitempty"`
-	PricingSyncInterval *time.Duration `json:"pricing_sync_interval,omitempty"`
-}
-
 type ModelCatalog struct {
 	configStore            configstore.ConfigStore
 	distributedLockManager *configstore.DistributedLockManager

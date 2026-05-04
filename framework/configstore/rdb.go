@@ -692,7 +692,6 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 				BedrockKeyConfig:   key.BedrockKeyConfig,
 				ReplicateKeyConfig: key.ReplicateKeyConfig,
 				VLLMKeyConfig:      key.VLLMKeyConfig,
-				ReplicateKeyConfig: key.ReplicateKeyConfig,
 				OllamaKeyConfig:    key.OllamaKeyConfig,
 				SGLKeyConfig:       key.SGLKeyConfig,
 				ApertusKeyConfig:   key.ApertusKeyConfig,

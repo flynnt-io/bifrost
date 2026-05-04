@@ -2,7 +2,7 @@ import { IS_ENTERPRISE } from "@/lib/constants/config";
 import { BifrostErrorResponse } from "@/lib/types/config";
 import { getApiBaseUrl } from "@/lib/utils/port";
 import { createBaseQueryWithRefresh } from "@enterprise/lib/store/utils/baseQueryWithRefresh";
-import { clearOAuthStorage } from "@enterprise/lib/store/utils/tokenManager";
+import { clearOAuthStorage, getAccessToken } from "@enterprise/lib/store/utils/tokenManager";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { getActiveTempToken, getSuppressGlobal401 } from "./tempToken";
 

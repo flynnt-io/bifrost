@@ -58,9 +58,9 @@ func TestRerankCohereFormat(t *testing.T) {
 	t.Parallel()
 
 	var (
-		capturedPath      string
+		capturedPath       string
 		capturedAuthHeader string
-		capturedModel     string
+		capturedModel      string
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -116,10 +116,8 @@ func TestRerankCohereFormat(t *testing.T) {
 		"authorization header should be set with key value")
 
 	// Verify response fields
-	assert.Equal(t, "user-reranker", resp.ExtraFields.ModelRequested,
-		"ModelRequested should be the original user-facing model name")
-	assert.Equal(t, "backend-reranker", resp.ExtraFields.ModelDeployment,
-		"ModelDeployment should be the mapped backend model name")
+	assert.Equal(t, "user-reranker", resp.ExtraFields.OriginalModelRequested,
+		"OriginalModelRequested should be the original user-facing model name")
 	assert.Equal(t, schemas.RerankRequest, resp.ExtraFields.RequestType)
 
 	// Verify results are present and sorted by relevance score descending
@@ -272,9 +270,8 @@ func TestRerankModelNameMapping(t *testing.T) {
 	// Backend should receive the mapped model name
 	assert.Equal(t, "actual-backend-reranker-v3", capturedModel)
 
-	// Response should track both original and mapped names
-	assert.Equal(t, "my-reranker", resp.ExtraFields.ModelRequested)
-	assert.Equal(t, "actual-backend-reranker-v3", resp.ExtraFields.ModelDeployment)
+	// Response should track the original user-facing model name
+	assert.Equal(t, "my-reranker", resp.ExtraFields.OriginalModelRequested)
 
 	// Model in the bifrost response should be the original user-facing name
 	assert.Equal(t, "my-reranker", resp.Model)

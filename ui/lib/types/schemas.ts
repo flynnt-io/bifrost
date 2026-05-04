@@ -60,11 +60,28 @@ export const modelProviderNameSchema = z.union([knownProviderSchema, customProvi
 export const apertusKeyConfigSchema = z
   .object({
     endpoint: z
-      .union([z.url("Must be a valid URL"), z.string().length(0)])
-      .optional(),
+      .string()
+      .optional()
+      .refine(
+        (val) => {
+          if (!val || val.trim() === "") return true;
+          if (val.startsWith("env.")) return true;
+          try {
+            new URL(val);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            "Must be a valid URL or an environment variable reference (env.VAR_NAME)",
+        },
+      ),
     model_name_mappings: z
       .union([z.record(z.string(), z.string()), z.string()])
       .optional(),
+    rerank_format: z.enum(["cohere", "vllm"]).optional(),
   })
   .refine(
     (data) => {
@@ -99,54 +116,6 @@ export const apertusKeyConfigSchema = z
       path: ["model_name_mappings"],
     },
   );
-	.object({
-		endpoint: z
-			.string()
-			.optional()
-			.refine(
-				(val) => {
-					if (!val || val.trim() === "") return true;
-					if (val.startsWith("env.")) return true;
-					try {
-						new URL(val);
-						return true;
-					} catch {
-						return false;
-					}
-				},
-				{ message: "Must be a valid URL or an environment variable reference (env.VAR_NAME)" },
-			),
-		model_name_mappings: z.union([z.record(z.string(), z.string()), z.string()]).optional(),
-		rerank_format: z.enum(["cohere", "vllm"]).optional(),
-	})
-	.refine(
-		(data) => {
-			// If model_name_mappings is not provided, it's valid
-			if (!data.model_name_mappings) return true;
-			// If it's already an object, it's valid
-			if (typeof data.model_name_mappings === "object") return true;
-			// If it's a string, check if it's valid JSON or an env variable
-			if (typeof data.model_name_mappings === "string") {
-				const trimmed = data.model_name_mappings.trim();
-				// Allow empty string
-				if (trimmed === "") return true;
-				// Allow env variables
-				if (trimmed.startsWith("env.")) return true;
-				// Validate JSON format
-				try {
-					const parsed = JSON.parse(trimmed);
-					return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
-				} catch {
-					return false;
-				}
-			}
-			return false;
-		},
-		{
-			message: "Model name mappings must be a valid JSON object or an environment variable reference",
-			path: ["model_name_mappings"],
-		},
-	);
 
 // EnvVar schema - matches the Go EnvVar type from schemas/env.go
 export const _envVarBase = z.object({

@@ -16,12 +16,10 @@ const (
 
 	ConfigLastPricingSyncKey      = "LastModelPricingSync"
 	ConfigLastParamsSyncKey       = "LastModelParametersSync"
-	DefaultPricingURL             = "http://127.0.0.1:5000/pricing.json"
+	DefaultPricingURL             = "https://getbifrost.ai/datasheet"
 	DefaultModelParametersURL     = "https://getbifrost.ai/datasheet/model-parameters"
 	DefaultPricingTimeout         = 45 * time.Second
 	DefaultModelParametersTimeout = 45 * time.Second
-	TokenTierAbove128K            = 128000
-	TokenTierAbove200K            = 200000
 )
 
 // Config is the model pricing configuration.

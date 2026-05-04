@@ -154,7 +154,8 @@ export interface ModelProviderKey {
 	replicate_key_config?: ReplicateKeyConfig;
 	ollama_key_config?: OllamaKeyConfig;
 	sgl_key_config?: SGLKeyConfig;
-	config_hash?: string; // Present when config is synced from config.json
+	apertus_key_config?: ApertusKeyConfig;
+	config_hash?: string;
 	status?: "unknown" | "success" | "list_models_failed";
 	description?: string;
 }

@@ -124,10 +124,10 @@ func TestGetModelName(t *testing.T) {
 	provider := newTestProvider("https://default.example.com")
 
 	tests := []struct {
-		name       string
-		key        schemas.Key
-		userModel  string
-		wantModel  string
+		name      string
+		key       schemas.Key
+		userModel string
+		wantModel string
 	}{
 		{
 			name:      "nil ApertusKeyConfig returns original model",
@@ -277,9 +277,9 @@ func TestChatCompletionWithMockServer(t *testing.T) {
 	t.Parallel()
 
 	var (
-		capturedPath      string
+		capturedPath       string
 		capturedAuthHeader string
-		capturedModel     string
+		capturedModel      string
 	)
 
 	// Create a mock HTTP server that captures the request details
@@ -337,11 +337,9 @@ func TestChatCompletionWithMockServer(t *testing.T) {
 	assert.Equal(t, "Bearer test-api-key", capturedAuthHeader,
 		"authorization header should be set with key value")
 
-	// Verify response tracks both original and mapped model names
-	assert.Equal(t, "gpt-4o", resp.ExtraFields.ModelRequested,
-		"ModelRequested should be the original user-facing model name")
-	assert.Equal(t, "backend-model-v2", resp.ExtraFields.ModelDeployment,
-		"ModelDeployment should be the mapped backend model name")
+	// Verify response tracks the original user-facing model name
+	assert.Equal(t, "gpt-4o", resp.ExtraFields.OriginalModelRequested,
+		"OriginalModelRequested should be the original user-facing model name")
 }
 
 // TestChatCompletionFallbackToDefaultURL verifies that when a key has no custom

@@ -11,7 +11,6 @@ import (
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
 
-// Default sync interval and config key
 const (
 	TokenTierAbove272K = 272000
 	TokenTierAbove200K = 200000

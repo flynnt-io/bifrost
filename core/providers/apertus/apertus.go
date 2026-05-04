@@ -3,6 +3,7 @@
 package apertus
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -189,17 +190,15 @@ func (provider *ApertusProvider) TextCompletion(ctx *schemas.BifrostContext, key
 		provider.logger,
 	)
 
-	// Set ModelRequested and ModelDeployment for metrics
 	if response != nil {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 	}
 
 	return response, err
 }
 
 // TextCompletionStream performs a streaming text completion request to Apertus API.
-func (provider *ApertusProvider) TextCompletionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostTextCompletionRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) TextCompletionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostTextCompletionRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TextCompletionStreamRequest); err != nil {
 		return nil, err
 	}
@@ -211,10 +210,8 @@ func (provider *ApertusProvider) TextCompletionStream(ctx *schemas.BifrostContex
 	mappedModel := provider.getModelName(key, request.Model)
 	request.Model = mappedModel
 
-	// Create post-response converter to set ModelRequested and ModelDeployment
 	postResponseConverter := func(response *schemas.BifrostTextCompletionResponse) *schemas.BifrostTextCompletionResponse {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 		return response
 	}
 
@@ -238,6 +235,7 @@ func (provider *ApertusProvider) TextCompletionStream(ctx *schemas.BifrostContex
 		nil,
 		postResponseConverter,
 		provider.logger,
+		postHookSpanFinalizer,
 	)
 }
 
@@ -269,17 +267,16 @@ func (provider *ApertusProvider) ChatCompletion(ctx *schemas.BifrostContext, key
 		provider.logger,
 	)
 
-	// Set ModelRequested and ModelDeployment for metrics
+	// Set OriginalModelRequested for metrics
 	if response != nil {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 	}
 
 	return response, err
 }
 
 // ChatCompletionStream handles streaming for Apertus chat completions.
-func (provider *ApertusProvider) ChatCompletionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostChatRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) ChatCompletionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostChatRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ChatCompletionStreamRequest); err != nil {
 		return nil, err
 	}
@@ -291,10 +288,8 @@ func (provider *ApertusProvider) ChatCompletionStream(ctx *schemas.BifrostContex
 	mappedModel := provider.getModelName(key, request.Model)
 	request.Model = mappedModel
 
-	// Create post-response converter to set ModelRequested and ModelDeployment
 	postResponseConverter := func(response *schemas.BifrostChatResponse) *schemas.BifrostChatResponse {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 		return response
 	}
 
@@ -320,6 +315,7 @@ func (provider *ApertusProvider) ChatCompletionStream(ctx *schemas.BifrostContex
 		nil, // postRequestConverter
 		postResponseConverter,
 		provider.logger,
+		postHookSpanFinalizer,
 	)
 }
 
@@ -351,17 +347,16 @@ func (provider *ApertusProvider) Responses(ctx *schemas.BifrostContext, key sche
 		provider.logger,
 	)
 
-	// Set ModelRequested and ModelDeployment for metrics
+	// Set OriginalModelRequested for metrics
 	if response != nil {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 	}
 
 	return response, err
 }
 
 // ResponsesStream performs a streaming responses request to the Apertus API.
-func (provider *ApertusProvider) ResponsesStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostResponsesRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) ResponsesStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostResponsesRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ResponsesStreamRequest); err != nil {
 		return nil, err
 	}
@@ -373,10 +368,8 @@ func (provider *ApertusProvider) ResponsesStream(ctx *schemas.BifrostContext, po
 	mappedModel := provider.getModelName(key, request.Model)
 	request.Model = mappedModel
 
-	// Create post-response converter to set ModelRequested and ModelDeployment
 	postResponseConverter := func(response *schemas.BifrostResponsesStreamResponse) *schemas.BifrostResponsesStreamResponse {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 		return response
 	}
 
@@ -401,6 +394,7 @@ func (provider *ApertusProvider) ResponsesStream(ctx *schemas.BifrostContext, po
 		nil, // postRequestConverter
 		postResponseConverter,
 		provider.logger,
+		postHookSpanFinalizer,
 	)
 }
 
@@ -448,10 +442,9 @@ func (provider *ApertusProvider) Embedding(ctx *schemas.BifrostContext, key sche
 		provider.logger,
 	)
 
-	// Set ModelRequested and ModelDeployment for metrics
+	// Set OriginalModelRequested for metrics
 	if response != nil {
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 	}
 
 	return response, err
@@ -497,7 +490,6 @@ func (provider *ApertusProvider) Rerank(ctx *schemas.BifrostContext, key schemas
 		ctx,
 		request,
 		converter,
-		provider.GetProviderKey(),
 	)
 	if bifrostErr != nil {
 		return nil, bifrostErr
@@ -520,21 +512,22 @@ func (provider *ApertusProvider) Rerank(ctx *schemas.BifrostContext, key schemas
 	}
 	req.SetBody(jsonData)
 
-	latency, bifrostErr := providerUtils.MakeRequestWithContext(ctx, provider.client, req, resp)
+	latency, bifrostErr, wait := providerUtils.MakeRequestWithContext(ctx, provider.client, req, resp)
+	defer wait()
 	if bifrostErr != nil {
 		return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse)
 	}
 
 	// Handle error responses
 	if resp.StatusCode() != fasthttp.StatusOK {
-		apiErr := openai.ParseOpenAIError(resp, schemas.RerankRequest, provider.GetProviderKey(), request.Model)
+		apiErr := openai.ParseOpenAIError(resp)
 		return nil, providerUtils.EnrichError(ctx, apiErr, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse)
 	}
 
 	// Decode response body
 	body, err := providerUtils.CheckAndDecodeBody(resp)
 	if err != nil {
-		return nil, providerUtils.NewBifrostOperationError(schemas.ErrProviderResponseDecode, err, provider.GetProviderKey())
+		return nil, providerUtils.NewBifrostOperationError(schemas.ErrProviderResponseDecode, err)
 	}
 	bodyCopy := append([]byte(nil), body...)
 
@@ -558,7 +551,7 @@ func (provider *ApertusProvider) Rerank(ctx *schemas.BifrostContext, key schemas
 		bifrostResponse, convErr = vllm.ToBifrostRerankResponse(responsePayload, request.Documents, returnDocuments)
 		if convErr != nil {
 			return nil, providerUtils.EnrichError(ctx,
-				providerUtils.NewBifrostOperationError("error converting rerank response", convErr, provider.GetProviderKey()),
+				providerUtils.NewBifrostOperationError("error converting rerank response", convErr),
 				jsonData, bodyCopy, provider.sendBackRawRequest, provider.sendBackRawResponse)
 		}
 	} else {
@@ -574,8 +567,7 @@ func (provider *ApertusProvider) Rerank(ctx *schemas.BifrostContext, key schemas
 	// Set response fields
 	bifrostResponse.Model = originalModel
 	bifrostResponse.ExtraFields.Provider = provider.GetProviderKey()
-	bifrostResponse.ExtraFields.ModelRequested = originalModel
-	bifrostResponse.ExtraFields.ModelDeployment = mappedModel
+	bifrostResponse.ExtraFields.OriginalModelRequested = originalModel
 	bifrostResponse.ExtraFields.RequestType = schemas.RerankRequest
 	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
 
@@ -610,14 +602,13 @@ func (provider *ApertusProvider) Speech(ctx *schemas.BifrostContext, key schemas
 	}
 	if response != nil {
 		response.ExtraFields.Provider = provider.GetProviderKey()
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 	}
 	return response, nil
 }
 
 // SpeechStream handles streaming for speech synthesis.
-func (provider *ApertusProvider) SpeechStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostSpeechRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) SpeechStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostSpeechRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.SpeechStreamRequest); err != nil {
 		return nil, err
 	}
@@ -626,7 +617,7 @@ func (provider *ApertusProvider) SpeechStream(ctx *schemas.BifrostContext, postH
 	request.Model = provider.getModelName(key, request.Model)
 
 	delegate := provider.createDelegateForKey(key)
-	return delegate.SpeechStream(ctx, postHookRunner, key, request)
+	return delegate.SpeechStream(ctx, postHookRunner, postHookSpanFinalizer, key, request)
 }
 
 // Transcription handles non-streaming transcription requests.
@@ -650,14 +641,13 @@ func (provider *ApertusProvider) Transcription(ctx *schemas.BifrostContext, key 
 	}
 	if response != nil {
 		response.ExtraFields.Provider = provider.GetProviderKey()
-		response.ExtraFields.ModelRequested = originalModel
-		response.ExtraFields.ModelDeployment = mappedModel
+		response.ExtraFields.OriginalModelRequested = originalModel
 	}
 	return response, nil
 }
 
 // TranscriptionStream performs a streaming transcription request to the Apertus API.
-func (provider *ApertusProvider) TranscriptionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostTranscriptionRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) TranscriptionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostTranscriptionRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.TranscriptionStreamRequest); err != nil {
 		return nil, err
 	}
@@ -666,7 +656,7 @@ func (provider *ApertusProvider) TranscriptionStream(ctx *schemas.BifrostContext
 	request.Model = provider.getModelName(key, request.Model)
 
 	delegate := provider.createDelegateForKey(key)
-	return delegate.TranscriptionStream(ctx, postHookRunner, key, request)
+	return delegate.TranscriptionStream(ctx, postHookRunner, postHookSpanFinalizer, key, request)
 }
 
 // ImageGeneration performs an image generation request to the Apertus API.
@@ -687,12 +677,12 @@ func (provider *ApertusProvider) ImageGeneration(ctx *schemas.BifrostContext, ke
 }
 
 // ImageGenerationStream performs a streaming image generation request to the Apertus API.
-func (provider *ApertusProvider) ImageGenerationStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostImageGenerationRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) ImageGenerationStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostImageGenerationRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ImageGenerationStreamRequest); err != nil {
 		return nil, err
 	}
 	delegate := provider.createDelegateForKey(key)
-	return delegate.ImageGenerationStream(ctx, postHookRunner, key, request)
+	return delegate.ImageGenerationStream(ctx, postHookRunner, postHookSpanFinalizer, key, request)
 }
 
 // ImageEdit performs an image edit request to the Apertus API.
@@ -713,12 +703,12 @@ func (provider *ApertusProvider) ImageEdit(ctx *schemas.BifrostContext, key sche
 }
 
 // ImageEditStream performs a streaming image edit request to the Apertus API.
-func (provider *ApertusProvider) ImageEditStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, key schemas.Key, request *schemas.BifrostImageEditRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (provider *ApertusProvider) ImageEditStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostImageEditRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.Apertus, provider.customProviderConfig, schemas.ImageEditStreamRequest); err != nil {
 		return nil, err
 	}
 	delegate := provider.createDelegateForKey(key)
-	return delegate.ImageEditStream(ctx, postHookRunner, key, request)
+	return delegate.ImageEditStream(ctx, postHookRunner, postHookSpanFinalizer, key, request)
 }
 
 // ImageVariation performs an image variation request to the Apertus API.
@@ -1221,4 +1211,24 @@ func (provider *ApertusProvider) ContainerFileDelete(ctx *schemas.BifrostContext
 		response.ExtraFields.Provider = provider.GetProviderKey()
 	}
 	return response, nil
+}
+
+// OCR is not supported by the Apertus provider.
+func (provider *ApertusProvider) OCR(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostOCRRequest) (*schemas.BifrostOCRResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.OCRRequest, provider.GetProviderKey())
+}
+
+// BatchDelete is not supported by the Apertus provider.
+func (provider *ApertusProvider) BatchDelete(ctx *schemas.BifrostContext, keys []schemas.Key, request *schemas.BifrostBatchDeleteRequest) (*schemas.BifrostBatchDeleteResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.BatchDeleteRequest, provider.GetProviderKey())
+}
+
+// Passthrough is not supported by the Apertus provider.
+func (provider *ApertusProvider) Passthrough(ctx *schemas.BifrostContext, key schemas.Key, req *schemas.BifrostPassthroughRequest) (*schemas.BifrostPassthroughResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.PassthroughRequest, provider.GetProviderKey())
+}
+
+// PassthroughStream is not supported by the Apertus provider.
+func (provider *ApertusProvider) PassthroughStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, req *schemas.BifrostPassthroughRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.PassthroughStreamRequest, provider.GetProviderKey())
 }
