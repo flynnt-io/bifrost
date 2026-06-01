@@ -192,11 +192,7 @@ func (nc NetworkConfig) MarshalJSON() ([]byte, error) {
 		BetaHeaderOverrides:        nc.BetaHeaderOverrides,
 	}
 	if nc.CACertPEM != nil {
-		if nc.CACertPEM.IsFromEnv() {
-			alias.CACertPEM = nc.CACertPEM.EnvVar
-		} else {
-			alias.CACertPEM = nc.CACertPEM.GetValue()
-		}
+		alias.CACertPEM = EnvVarAsString(nc.CACertPEM)
 	}
 
 	return json.Marshal(alias)
@@ -259,38 +255,53 @@ type ProxyConfig struct {
 	CACertPEM *EnvVar   `json:"ca_cert_pem"` // PEM-encoded CA certificate to trust for TLS connections through the proxy (supports env.*)
 }
 
-
+// MarshalForStorage serializes proxy settings for persistence (e.g. proxy_config_json).
+// EnvVar fields are stored as plain strings (env.* token or literal). For HTTP API responses
+// use json.Marshal on *ProxyConfig so clients receive value/env_var/from_env objects.
+func (pc *ProxyConfig) MarshalForStorage() ([]byte, error) {
+	if pc == nil {
+		return []byte("null"), nil
+	}
+	type proxyConfigStorage struct {
+		Type      ProxyType `json:"type"`
+		URL       string    `json:"url,omitempty"`
+		Username  string    `json:"username,omitempty"`
+		Password  string    `json:"password,omitempty"`
+		CACertPEM string    `json:"ca_cert_pem,omitempty"`
+	}
+	alias := proxyConfigStorage{Type: pc.Type}
+	if pc.URL != nil {
+		alias.URL = EnvVarAsString(pc.URL)
+	}
+	if pc.Username != nil {
+		alias.Username = EnvVarAsString(pc.Username)
+	}
+	if pc.Password != nil {
+		alias.Password = EnvVarAsString(pc.Password)
+	}
+	if pc.CACertPEM != nil {
+		alias.CACertPEM = EnvVarAsString(pc.CACertPEM)
+	}
+	return json.Marshal(alias)
+}
 
 // Redacted returns a redacted copy of the proxy configuration.
 func (pc *ProxyConfig) Redacted() *ProxyConfig {
-	redactedConfig := ProxyConfig{Type: pc.Type}
-	if pc.URL != nil {
-		if pc.URL.IsFromEnv() {
-			redactedConfig.URL = pc.URL.Redacted()
-		} else {
-			redactedConfig.URL = pc.URL
-		}
+	if pc == nil {
+		return nil
 	}
-	if pc.Username != nil {
-		if pc.Username.IsFromEnv() {
-			redactedConfig.Username = pc.Username.Redacted()
-		} else {
-			redactedConfig.Username = pc.Username
-		}
+	redactedConfig := ProxyConfig{Type: pc.Type}
+	if pc.CACertPEM != nil && pc.CACertPEM.IsSet() {
+		redactedConfig.CACertPEM = pc.CACertPEM.FullyRedacted()
+	}
+	if pc.URL != nil && pc.URL.IsSet() {
+		redactedConfig.URL = pc.URL.Redacted()
+	}
+	if pc.Username != nil && pc.Username.IsSet() {
+		redactedConfig.Username = pc.Username.Redacted()
 	}
 	if pc.Password != nil && pc.Password.IsSet() {
-		if pc.Password.IsFromEnv() {
-			redactedConfig.Password = pc.Password.Redacted()
-		} else {
-			redactedConfig.Password = NewEnvVar("<REDACTED>")
-		}
-	}
-	if pc.CACertPEM != nil && pc.CACertPEM.IsSet() {
-		if pc.CACertPEM.IsFromEnv() {
-			redactedConfig.CACertPEM = pc.CACertPEM.Redacted()
-		} else {
-			redactedConfig.CACertPEM = NewEnvVar("<REDACTED>")
-		}
+		redactedConfig.Password = pc.Password.FullyRedacted()
 	}
 	return &redactedConfig
 }
@@ -349,6 +360,11 @@ type AllowedRequests struct {
 	PassthroughStream     bool `json:"passthrough_stream"`
 	WebSocketResponses    bool `json:"websocket_responses"`
 	Realtime              bool `json:"realtime"`
+	CachedContentCreate   bool `json:"cached_content_create"`
+	CachedContentList     bool `json:"cached_content_list"`
+	CachedContentRetrieve bool `json:"cached_content_retrieve"`
+	CachedContentUpdate   bool `json:"cached_content_update"`
+	CachedContentDelete   bool `json:"cached_content_delete"`
 }
 
 // IsOperationAllowed checks if a specific operation is allowed
@@ -458,6 +474,16 @@ func (ar *AllowedRequests) IsOperationAllowed(operation RequestType) bool {
 		return ar.WebSocketResponses
 	case RealtimeRequest:
 		return ar.Realtime
+	case CachedContentCreateRequest:
+		return ar.CachedContentCreate
+	case CachedContentListRequest:
+		return ar.CachedContentList
+	case CachedContentRetrieveRequest:
+		return ar.CachedContentRetrieve
+	case CachedContentUpdateRequest:
+		return ar.CachedContentUpdate
+	case CachedContentDeleteRequest:
+		return ar.CachedContentDelete
 	default:
 		return false // Default to not allowed for unknown operations
 	}
@@ -636,6 +662,16 @@ type Provider interface {
 	FileDelete(ctx *BifrostContext, keys []Key, request *BifrostFileDeleteRequest) (*BifrostFileDeleteResponse, *BifrostError)
 	// FileContent downloads file content from the provider
 	FileContent(ctx *BifrostContext, keys []Key, request *BifrostFileContentRequest) (*BifrostFileContentResponse, *BifrostError)
+	// CachedContentCreate creates a new cached content (Gemini / Vertex AI named cache lifecycle)
+	CachedContentCreate(ctx *BifrostContext, key Key, request *BifrostCachedContentCreateRequest) (*BifrostCachedContentCreateResponse, *BifrostError)
+	// CachedContentList lists cached contents
+	CachedContentList(ctx *BifrostContext, keys []Key, request *BifrostCachedContentListRequest) (*BifrostCachedContentListResponse, *BifrostError)
+	// CachedContentRetrieve retrieves a single cached content by name
+	CachedContentRetrieve(ctx *BifrostContext, keys []Key, request *BifrostCachedContentRetrieveRequest) (*BifrostCachedContentRetrieveResponse, *BifrostError)
+	// CachedContentUpdate updates a cached content's expiration (TTL or expireTime)
+	CachedContentUpdate(ctx *BifrostContext, keys []Key, request *BifrostCachedContentUpdateRequest) (*BifrostCachedContentUpdateResponse, *BifrostError)
+	// CachedContentDelete deletes a cached content by name
+	CachedContentDelete(ctx *BifrostContext, keys []Key, request *BifrostCachedContentDeleteRequest) (*BifrostCachedContentDeleteResponse, *BifrostError)
 	// ContainerCreate creates a new container
 	ContainerCreate(ctx *BifrostContext, key Key, request *BifrostContainerCreateRequest) (*BifrostContainerCreateResponse, *BifrostError)
 	// ContainerList lists containers

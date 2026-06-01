@@ -1,3 +1,14 @@
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@/components/ui/alertDialog";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Fragment } from "react";
@@ -5,12 +16,14 @@ import { Fragment } from "react";
 import { CodeEditor } from "@/components/ui/codeEditor";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { HeadersTable } from "@/components/ui/headersTable";
+import { EnvVarInput } from "@/components/ui/envVarInput";
 import { Input } from "@/components/ui/input";
 import { MultiSelect } from "@/components/ui/multiSelect";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { TriStateCheckbox } from "@/components/ui/tristateCheckbox";
 import { useToast } from "@/hooks/use-toast";
@@ -19,16 +32,23 @@ import { MCP_STATUS_COLORS } from "@/lib/constants/config";
 import { getErrorMessage, useGetCoreConfigQuery, useGetVirtualKeysQuery, useUpdateMCPClientMutation } from "@/lib/store";
 import { MCPClient, MCPVKConfig } from "@/lib/types/mcp";
 import { mcpClientUpdateSchema, type MCPClientUpdateSchema } from "@/lib/types/schemas";
+import { parseArrayFromText } from "@/lib/utils/array";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
+import { SheetNavigationButtons } from "@/components/sheetNavigationButtons";
+import { useSheetNavigation } from "@/hooks/useSheetNavigation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { ChevronDown, ChevronRight, Info, Plus, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
+import { OAuth2Authorizer } from "./oauth2Authorizer";
 
 interface MCPClientSheetProps {
 	mcpClient: MCPClient;
 	onClose: () => void;
 	onSubmitSuccess: () => void;
+	onNavigate?: (direction: "prev" | "next") => void;
+	hasPrev?: boolean;
+	hasNext?: boolean;
 }
 
 /** API sends tool_sync_interval as nanoseconds (Go time.Duration). Normalize to minutes for form/store. */
@@ -40,9 +60,12 @@ function toolSyncIntervalToMinutes(v: number | undefined | null): number {
 	return n;
 }
 
-export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: MCPClientSheetProps) {
+export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, onNavigate, hasPrev = false, hasNext = false }: MCPClientSheetProps) {
 	const hasUpdateMCPClientAccess = useRbac(RbacResource.MCPGateway, RbacOperation.Update);
 	const [updateMCPClient, { isLoading: isUpdating }] = useUpdateMCPClientMutation();
+
+	const [pendingNavDirection, setPendingNavDirection] = useState<"prev" | "next" | null>(null);
+
 	const { data: bifrostConfig } = useGetCoreConfigQuery({ fromDB: true });
 	const globalToolSyncInterval = bifrostConfig?.client_config?.mcp_tool_sync_interval ?? 10;
 	const { toast } = useToast();
@@ -64,6 +87,13 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 	const [vkConfigs, setVKConfigs] = useState<MCPVKConfig[]>([]);
 	const [vkConfigsDirty, setVKConfigsDirty] = useState(false);
 	const [allowedExtraHeadersRaw, setAllowedExtraHeadersRaw] = useState<string>((mcpClient.config.allowed_extra_headers || []).join(", "));
+	const [perUserHeaderKeysRaw, setPerUserHeaderKeysRaw] = useState<string>((mcpClient.config.per_user_header_keys || []).join(", "));
+	const [oauthFlow, setOauthFlow] = useState<{
+		authorizeUrl: string;
+		oauthConfigId: string;
+		mcpClientId: string;
+		isPerUserOauth?: boolean;
+	} | null>(null);
 	// Persists names for newly added VKs so they survive search result changes
 	const [localVKNames, setLocalVKNames] = useState<Record<string, string>>({});
 
@@ -78,6 +108,10 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 	useEffect(() => {
 		setAllowedExtraHeadersRaw((mcpClient.config.allowed_extra_headers || []).join(", "));
 	}, [mcpClient.config.allowed_extra_headers]);
+
+	useEffect(() => {
+		setPerUserHeaderKeysRaw((mcpClient.config.per_user_header_keys || []).join(", "));
+	}, [mcpClient.config.per_user_header_keys]);
 
 	// Name lookup: server response names → search results → locally cached names (highest priority)
 	const vkNameByID = useMemo<Record<string, string>>(() => {
@@ -103,6 +137,8 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 		],
 		[allToolNames],
 	);
+	const supportsOAuthCredentialUpdate = false;
+	// mcpClient.config.auth_type === "oauth" || mcpClient.config.auth_type === "per_user_oauth";
 
 	const addVKConfig = (vkId: string) => {
 		const name = vksData?.virtual_keys?.find((vk) => vk.id === vkId)?.name;
@@ -141,14 +177,26 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 			is_code_mode_client: mcpClient.config.is_code_mode_client || false,
 			is_ping_available: mcpClient.config.is_ping_available === true || mcpClient.config.is_ping_available === undefined,
 			allow_on_all_virtual_keys: mcpClient.config.allow_on_all_virtual_keys || false,
+			disabled: mcpClient.config.disabled || false,
 			headers: mcpClient.config.headers,
+			per_user_header_keys: mcpClient.config.auth_type === "per_user_headers" ? mcpClient.config.per_user_header_keys || [] : undefined,
 			tools_to_execute: mcpClient.config.tools_to_execute || [],
 			tools_to_auto_execute: mcpClient.config.tools_to_auto_execute || [],
 			tool_pricing: mcpClient.config.tool_pricing || {},
 			tool_sync_interval: toolSyncIntervalToMinutes(mcpClient.config.tool_sync_interval),
 			allowed_extra_headers: mcpClient.config.allowed_extra_headers || [],
+			oauth_config: supportsOAuthCredentialUpdate
+				? { client_id: mcpClient.config.oauth_client_id, client_secret: mcpClient.config.oauth_client_secret }
+				: undefined,
+			tls_config: mcpClient.config.tls_config
+				? {
+						insecure_skip_verify: mcpClient.config.tls_config.insecure_skip_verify,
+						ca_cert_pem: mcpClient.config.tls_config.ca_cert_pem,
+					}
+				: undefined,
 		},
 	});
+	const isDisabled = form.watch("disabled");
 
 	// Reset form when mcpClient changes
 	useEffect(() => {
@@ -157,33 +205,102 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 			is_code_mode_client: mcpClient.config.is_code_mode_client || false,
 			is_ping_available: mcpClient.config.is_ping_available === true || mcpClient.config.is_ping_available === undefined,
 			allow_on_all_virtual_keys: mcpClient.config.allow_on_all_virtual_keys || false,
+			disabled: mcpClient.config.disabled || false,
 			headers: mcpClient.config.headers,
+			per_user_header_keys: mcpClient.config.auth_type === "per_user_headers" ? mcpClient.config.per_user_header_keys || [] : undefined,
 			tools_to_execute: mcpClient.config.tools_to_execute || [],
 			tools_to_auto_execute: mcpClient.config.tools_to_auto_execute || [],
 			tool_pricing: mcpClient.config.tool_pricing || {},
 			tool_sync_interval: toolSyncIntervalToMinutes(mcpClient.config.tool_sync_interval),
 			allowed_extra_headers: mcpClient.config.allowed_extra_headers || [],
+			oauth_config: supportsOAuthCredentialUpdate
+				? { client_id: mcpClient.config.oauth_client_id, client_secret: mcpClient.config.oauth_client_secret }
+				: undefined,
+			tls_config: mcpClient.config.tls_config
+				? {
+						insecure_skip_verify: mcpClient.config.tls_config.insecure_skip_verify,
+						ca_cert_pem: mcpClient.config.tls_config.ca_cert_pem,
+					}
+				: undefined,
 		});
 	}, [form, mcpClient]);
 
+	const isDirty = form.formState.isDirty || vkConfigsDirty;
+
+	const handleNavigate = useCallback(
+		(direction: "prev" | "next") => {
+			if (isDirty) {
+				setPendingNavDirection(direction);
+			} else {
+				onNavigate?.(direction);
+			}
+		},
+		[isDirty, onNavigate],
+	);
+
+	const { prev: prevKeys, next: nextKeys } = useSheetNavigation({
+		enabled: !pendingNavDirection,
+		hasPrev,
+		hasNext,
+		onNavigate: handleNavigate,
+	});
+
 	const onSubmit = async (data: MCPClientUpdateSchema) => {
 		try {
-			await updateMCPClient({
+			if (mcpClient.config.auth_type === "per_user_headers" && (!data.per_user_header_keys || data.per_user_header_keys.length === 0)) {
+				toast({
+					title: "Header keys required",
+					description: "Declare at least one header name users must supply.",
+					variant: "destructive",
+				});
+				return;
+			}
+			const oauthClientID = data.oauth_config?.client_id;
+			const oauthClientSecret = data.oauth_config?.client_secret;
+			// Only rotate when the user actually changed a credential field.
+			// dirtyFields tracks deep changes vs. the pre-populated default values.
+			const oauthDirty = !!(form.formState.dirtyFields.oauth_config?.client_id || form.formState.dirtyFields.oauth_config?.client_secret);
+			const shouldRotateOAuthCredentials = supportsOAuthCredentialUpdate && oauthDirty;
+			const response = await updateMCPClient({
 				id: mcpClient.config.client_id,
 				data: {
 					name: data.name,
 					is_code_mode_client: data.is_code_mode_client,
 					is_ping_available: data.is_ping_available,
 					allow_on_all_virtual_keys: data.allow_on_all_virtual_keys,
+					disabled: data.disabled,
 					headers: data.headers ?? {},
+					per_user_header_keys: mcpClient.config.auth_type === "per_user_headers" ? data.per_user_header_keys : undefined,
 					tools_to_execute: data.tools_to_execute,
 					tools_to_auto_execute: data.tools_to_auto_execute,
 					tool_pricing: data.tool_pricing,
 					tool_sync_interval: data.tool_sync_interval ?? 0,
 					allowed_extra_headers: data.allowed_extra_headers,
+					oauth_config: shouldRotateOAuthCredentials
+						? {
+							client_id: oauthClientID,
+							client_secret: oauthClientSecret,
+						}
+						: undefined,
+					tls_config: data.tls_config !== undefined
+						? {
+								insecure_skip_verify: data.tls_config.insecure_skip_verify ?? false,
+								ca_cert_pem: data.tls_config.ca_cert_pem,
+							}
+						: undefined,
 					vk_configs: vkConfigsDirty ? vkConfigs : undefined,
 				},
 			}).unwrap();
+
+			if (response.status === "pending_oauth" && response.authorize_url) {
+				setOauthFlow({
+					authorizeUrl: response.authorize_url,
+					oauthConfigId: response.oauth_config_id,
+					mcpClientId: response.mcp_client_id,
+					isPerUserOauth: mcpClient.config.auth_type === "per_user_oauth",
+				});
+				return;
+			}
 
 			toast({
 				title: "Success",
@@ -304,7 +421,8 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 	};
 
 	return (
-		<Sheet open onOpenChange={onClose}>
+		<>
+			<Sheet open onOpenChange={(open) => !open && !oauthFlow && onClose()}>
 			<SheetContent className="flex w-full flex-col overflow-x-hidden pt-4 sm:max-w-[60%]">
 				<SheetHeader className="w-full p-0 px-8 py-4" showCloseButton={false} headerClassName="mb-0 sticky -top-4 bg-card z-10">
 					<div className="flex w-full items-center justify-between">
@@ -315,6 +433,14 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 							</SheetTitle>
 							<SheetDescription>MCP server configuration and available tools</SheetDescription>
 						</div>
+						<SheetNavigationButtons
+							hasPrev={hasPrev}
+							hasNext={hasNext}
+							onNavigate={handleNavigate}
+							prevKeys={prevKeys}
+							nextKeys={nextKeys}
+							entityLabel="server"
+						/>
 					</div>
 				</SheetHeader>
 				<Form {...form}>
@@ -354,12 +480,58 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 										</FormItem>
 									)}
 								/>
+								{/* Read-only connection summary. Connection type and target
+								    can't be changed after create — surface them here for
+								    visibility without exposing edit controls. */}
+								<div className="flex flex-col gap-2">
+									<div className="text-sm font-medium">Connection</div>
+									<div className="bg-muted/40 text-muted-foreground rounded-md border px-3 py-2 text-sm">
+										<span className="text-foreground font-mono text-xs uppercase">
+											{mcpClient.config.connection_type === "stdio"
+												? "STDIO"
+												: mcpClient.config.connection_type === "sse"
+													? "SSE"
+													: "HTTP"}
+										</span>
+										<span className="mx-2">·</span>
+										<span className="font-mono break-all">
+											{mcpClient.config.connection_type === "stdio"
+												? `${mcpClient.config.stdio_config?.command ?? ""} ${(mcpClient.config.stdio_config?.args ?? []).join(" ")}`.trim() ||
+													"-"
+												: mcpClient.config.connection_string?.from_env
+													? `env.${mcpClient.config.connection_string.env_var}`
+													: mcpClient.config.connection_string?.value || "-"}
+										</span>
+									</div>
+								</div>
 								<FormField
 									control={form.control}
 									name="is_code_mode_client"
 									render={({ field }) => (
 										<FormItem className="flex items-center justify-between rounded-lg border p-4">
-											<FormLabel>Code Mode Client</FormLabel>
+											<div className="flex items-center gap-2">
+												<FormLabel>Code Mode Server</FormLabel>
+												<TooltipProvider>
+													<Tooltip>
+														<TooltipTrigger asChild>
+															<a
+																href="https://docs.getbifrost.ai/mcp/code-mode"
+																target="_blank"
+																rel="noopener noreferrer"
+																data-testid="code-mode-link-help"
+																className="text-muted-foreground hover:text-foreground focus-visible:ring-ring rounded focus-visible:ring-2 focus-visible:outline-none"
+																aria-label="Learn more about Code Mode"
+															>
+																<Info className="h-4 w-4 cursor-help" />
+															</a>
+														</TooltipTrigger>
+														<TooltipContent>
+															<p>Click to learn more about Code Mode</p>
+														</TooltipContent>
+													</Tooltip>
+												</TooltipProvider>
+											</div>
+
 											<FormControl>
 												<Switch checked={field.value || false} onCheckedChange={field.onChange} />
 											</FormControl>
@@ -427,6 +599,103 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 								/>
 								<FormField
 									control={form.control}
+									name="disabled"
+									render={({ field }) => (
+										<FormItem className="flex items-center justify-between rounded-lg border p-4">
+											<div className="flex items-center gap-2">
+												<FormLabel>Disable Client</FormLabel>
+												<TooltipProvider>
+													<Tooltip>
+														<TooltipTrigger asChild>
+															<Info className="text-muted-foreground h-4 w-4 cursor-help" />
+														</TooltipTrigger>
+														<TooltipContent className="max-w-xs">
+															<p>
+																When enabled, the client's connection, health monitor, and tool syncer are shut down. Tools from this client
+																will not be available for inference until it is re-enabled.
+															</p>
+														</TooltipContent>
+													</Tooltip>
+												</TooltipProvider>
+											</div>
+											<FormControl>
+												<Switch
+													checked={field.value === true}
+													onCheckedChange={(checked) => {
+														field.onChange(checked);
+														if (checked) {
+															form.setValue("oauth_config", undefined);
+														}
+													}}
+													data-testid="mcpclient-disabled-switch"
+												/>
+											</FormControl>
+										</FormItem>
+									)}
+								/>
+								{(mcpClient.config.connection_type === "http" || mcpClient.config.connection_type === "sse") && (
+									<Accordion type="single" collapsible className="w-full">
+										<AccordionItem value="tls-config" className="border-b-0">
+											<AccordionTrigger className="py-0" data-testid="tls-config-trigger">
+												<span className="text-sm font-medium">TLS / Certificate</span>
+											</AccordionTrigger>
+											<AccordionContent className="space-y-4 pt-4 pb-0">
+												<FormField
+													control={form.control}
+													name="tls_config.insecure_skip_verify"
+													render={({ field }) => (
+														<FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+															<div className="space-y-0.5">
+																<FormLabel>Skip TLS verification</FormLabel>
+																<p className="text-muted-foreground text-sm">
+																	Disable TLS certificate verification. Use only in trusted isolated environments. Takes priority over CA
+																	certificate.
+																</p>
+															</div>
+															<FormControl>
+																<Switch
+																	checked={field.value ?? false}
+																	onCheckedChange={field.onChange}
+																	disabled={!hasUpdateMCPClientAccess}
+																	data-testid="mcp-tls-insecure-skip-verify"
+																/>
+															</FormControl>
+														</FormItem>
+													)}
+												/>
+												<FormField
+													control={form.control}
+													name="tls_config.ca_cert_pem"
+													render={({ field }) => (
+														<FormItem>
+															<FormLabel>CA Certificate (PEM) (Optional)</FormLabel>
+															<FormControl>
+																<EnvVarInput
+																	variant="textarea"
+																	placeholder={`-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE----- or env.MCP_CA_CERT_PEM`}
+																	className="font-mono text-xs"
+																	rows={6}
+																	hideValueWhenEnv
+																	redactNonEnvValue
+																	{...field}
+																	value={field.value}
+																	disabled={!hasUpdateMCPClientAccess}
+																	data-testid="mcp-tls-ca-cert-pem"
+																/>
+															</FormControl>
+															<p className="text-muted-foreground text-sm">
+																PEM-encoded CA certificate to trust for MCP server connections (e.g. self-signed or private CA).
+															</p>
+															<FormMessage />
+														</FormItem>
+													)}
+												/>
+											</AccordionContent>
+										</AccordionItem>
+									</Accordion>
+								)}
+								<FormField
+									control={form.control}
 									name="tool_sync_interval"
 									render={({ field }) => {
 										const isUsingGlobal = field.value === undefined || field.value === null || field.value === 0;
@@ -489,6 +758,59 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 										</FormItem>
 									)}
 								/>
+								{mcpClient.config.auth_type === "per_user_headers" && (
+									<FormField
+										control={form.control}
+										name="per_user_header_keys"
+										render={({ field }) => (
+											<FormItem className="space-y-1">
+												<div className="space-y-0.5">
+													<div className="flex items-center gap-2">
+														<FormLabel>Required Headers</FormLabel>
+														<TooltipProvider>
+															<Tooltip>
+																<TooltipTrigger asChild>
+																	<Info className="text-muted-foreground h-4 w-4 cursor-help" />
+																</TooltipTrigger>
+																<TooltipContent className="max-w-xs">
+																	<p>
+																		Changing this list marks existing per-user header submissions as needing an update, so callers resubmit
+																		values on next use.
+																	</p>
+																</TooltipContent>
+															</Tooltip>
+														</TooltipProvider>
+													</div>
+													<p className="text-muted-foreground text-sm">
+														Comma-separated list of header names each caller must supply when they first use this server (e.g.{" "}
+														<code>X-API-Key, X-Tenant-ID</code>). Values are submitted per user, not stored on this server config.
+													</p>
+												</div>
+												<FormControl>
+													<Textarea
+														id="mcpclient-per-user-header-keys"
+														data-testid="mcpclient-per-user-header-keys-textarea"
+														className="h-24"
+														placeholder="X-API-Key, X-Tenant-ID"
+														name={field.name}
+														ref={field.ref}
+														value={perUserHeaderKeysRaw}
+														onChange={(e) => {
+															const value = e.target.value;
+															setPerUserHeaderKeysRaw(value);
+															form.setValue("per_user_header_keys", parseArrayFromText(value), {
+																shouldDirty: true,
+																shouldValidate: true,
+															});
+														}}
+														onBlur={field.onBlur}
+													/>
+												</FormControl>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+								)}
 								<FormField
 									control={form.control}
 									name="allowed_extra_headers"
@@ -537,41 +859,66 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 									)}
 								/>
 							</div>
-							{/* Client Configuration */}
-							<div className="space-y-4">
-								<h3 className="font-semibold">Configuration</h3>
-								<div className="rounded-sm border">
-									<div className="bg-muted/50 text-muted-foreground border-b px-6 py-2 text-xs font-medium">Client ConnectionConfig</div>
-									<CodeEditor
-										className="z-0 w-full"
-										shouldAdjustInitialHeight={true}
-										maxHeight={300}
-										wrap={true}
-										code={JSON.stringify(
-											(() => {
-												const {
-													client_id: _client_id,
-													name: _name,
-													tools_to_execute: _tools_to_execute,
-													headers: _headers,
-													...rest
-												} = mcpClient.config;
-												return rest;
-											})(),
-											null,
-											2,
-										)}
-										lang="json"
-										readonly={true}
-										options={{
-											scrollBeyondLastLine: false,
-											collapsibleBlocks: true,
-											lineNumbers: "off",
-											alwaysConsumeMouseWheel: false,
-										}}
-									/>
+							{supportsOAuthCredentialUpdate ? (
+								<div className="space-y-4">
+									<h3 className="font-semibold">OAuth Credentials</h3>
+									{isDisabled ? (
+										<div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+											<Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+											<p>OAuth credentials cannot be rotated while the client is disabled. Re-enable the client to update credentials.</p>
+										</div>
+									) : (
+										<p className="text-muted-foreground text-sm">
+											Update OAuth client credentials only. Connection type, auth type, and connection URL cannot be changed.
+										</p>
+									)}
+									<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+										<FormField
+											control={form.control}
+											name="oauth_config.client_id"
+											render={({ field }) => (
+												<FormItem className="flex flex-col gap-2">
+													<FormLabel>Client ID</FormLabel>
+													<FormControl>
+														<EnvVarInput
+															data-testid="mcpclient-input-oauth-client-id"
+															placeholder="Enter new OAuth client ID"
+															disabled={isDisabled}
+															value={field.value}
+															onChange={field.onChange}
+														/>
+													</FormControl>
+													{!isDisabled && (
+														<p className="text-muted-foreground text-xs">Leave empty to keep existing credentials unchanged.</p>
+													)}
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+										<FormField
+											control={form.control}
+											name="oauth_config.client_secret"
+											render={({ field }) => (
+												<FormItem className="flex flex-col gap-2">
+													<FormLabel>Client Secret</FormLabel>
+													<FormControl>
+														<EnvVarInput
+															data-testid="mcpclient-input-oauth-client-secret"
+															placeholder="Enter new OAuth client secret"
+															disabled={isDisabled}
+															hideValueWhenEnv
+															maskNonEnvValue
+															value={field.value}
+															onChange={field.onChange}
+														/>
+													</FormControl>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									</div>
 								</div>
-							</div>
+							) : null}
 							{/* Tools Section */}
 							<div className="space-y-4 pb-10">
 								<div className="flex items-center justify-between">
@@ -681,7 +1028,33 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 													<TableHead className="w-10"></TableHead>
 													<TableHead className="max-w-[300px]">Tool Name</TableHead>
 													<TableHead className="w-24 text-center">Enabled</TableHead>
-													<TableHead className="w-28 text-center">Auto-execute</TableHead>
+													<TableHead className="w-28 text-center">
+														<div className="flex items-center justify-center gap-1.5">
+															<span>Auto-execute</span>
+															<TooltipProvider>
+																<Tooltip>
+																	<TooltipTrigger asChild>
+																		<a
+																			href="https://docs.getbifrost.ai/mcp/agent-mode"
+																			target="_blank"
+																			rel="noopener noreferrer"
+																			aria-label="Learn more about Auto-execute and Agent Mode"
+																			className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex rounded focus-visible:ring-2 focus-visible:outline-none"
+																		>
+																			<Info className="h-3.5 w-3.5 cursor-help" />
+																		</a>
+																	</TooltipTrigger>
+																	<TooltipContent className="max-w-xs">
+																		<p>
+																			Applies only when Bifrost runs the LLM loop in Agent Mode. In MCP Gateway mode, the connected
+																			client (Claude Desktop, Cursor, etc.) controls tool approval and this setting is ignored. Click
+																			to learn more.
+																		</p>
+																	</TooltipContent>
+																</Tooltip>
+															</TooltipProvider>
+														</div>
+													</TableHead>
 													<TableHead className="w-32 text-center">Cost (USD)</TableHead>
 												</TableRow>
 											</TableHeader>
@@ -823,7 +1196,7 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 								)}
 
 								{mcpClient.tools && mcpClient.tools.length > 0 && (
-									<div className="mt-6 space-y-4 pb-10">
+									<div className="mt-6 space-y-4">
 										<div className="flex flex-col gap-2">
 											<div className="flex items-center justify-between">
 												<div className="flex items-center gap-2">
@@ -996,6 +1369,45 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 					</form>
 				</Form>
 			</SheetContent>
-		</Sheet>
+			{oauthFlow && (
+				<OAuth2Authorizer
+					open={!!oauthFlow}
+					onClose={() => setOauthFlow(null)}
+					onSuccess={() => {
+						toast({ title: "Success", description: "MCP client OAuth credentials updated successfully" });
+						onSubmitSuccess();
+						onClose();
+					}}
+					onError={(error) => {
+						toast({ title: "Error", description: error, variant: "destructive" });
+					}}
+					authorizeUrl={oauthFlow.authorizeUrl}
+					oauthConfigId={oauthFlow.oauthConfigId}
+					mcpClientId={oauthFlow.mcpClientId}
+					isPerUserOauth={oauthFlow.isPerUserOauth}
+				/>
+			)}
+			</Sheet>
+			<AlertDialog open={!!pendingNavDirection} onOpenChange={(open) => !open && setPendingNavDirection(null)}>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>Unsaved Changes</AlertDialogTitle>
+						<AlertDialogDescription>You have unsaved changes. Are you sure you want to navigate away? Your changes will be lost.</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel onClick={() => setPendingNavDirection(null)}>Cancel</AlertDialogCancel>
+						<AlertDialogAction
+							onClick={() => {
+								const dir = pendingNavDirection;
+								setPendingNavDirection(null);
+								if (dir) onNavigate?.(dir);
+							}}
+						>
+							Discard Changes
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</>
 	);
 }

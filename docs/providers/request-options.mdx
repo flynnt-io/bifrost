@@ -22,7 +22,6 @@ Bifrost provides request options that control behavior, enable features, and pas
 | `BifrostContextKeyDisableContentLogging`   | `x-bf-disable-content-logging`                       | `bool`                | Per-request override for content logging; only honored when `allow_per_request_content_storage_override` is enabled in logging config |
 | `BifrostContextKeyPassthroughExtraParams`  | `x-bf-passthrough-extra-params`                      | `bool`                | Enable passthrough for extra parameters                                                                                               |
 | `BifrostContextKeyExtraHeaders`            | `x-bf-eh-*`                                          | `map[string][]string` | Custom headers forwarded to provider                                                                                                  |
-| `BifrostContextKeyDirectKey`               | `-`                                                  | `schemas.Key`         | Direct key credentials (Go SDK only)                                                                                                  |
 | `BifrostContextKeySkipKeySelection`        | `-`                                                  | `bool`                | Skip key selection process (Go SDK only)                                                                                              |
 | `BifrostContextKeyURLPath`                 | `-`                                                  | `string`              | Custom URL path appended to provider base URL (Go SDK only)                                                                           |
 | `BifrostContextKeyUseRawRequestBody`       | `-`                                                  | `bool`                | Use raw request body (Go SDK only, requires RawRequestBody field)                                                                     |
@@ -570,31 +569,6 @@ ExtraParams: map[string]interface{}{
 - Nested parameters are merged recursively with existing structures
 </Note>
 
-### Direct Key (Go SDK Only)
-
-**Context Key:** `BifrostContextKeyDirectKey`
-**Header:** `-` (not available via HTTP)
-**Type:** `schemas.Key`
-**Required:** No
-
-Bypass key selection and provide credentials directly. Useful for dynamic key scenarios.
-
-```go
-directKey := schemas.Key{
-    Value:  "sk-direct-api-key",
-    Models: []string{"gpt-4o"},
-    Weight: 1.0,
-}
-ctx := context.Background()
-ctx = context.WithValue(ctx, schemas.BifrostContextKeyDirectKey, directKey)
-
-response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostChatRequest{
-    Provider: schemas.OpenAI,
-    Model:    "gpt-4o",
-    Input:    messages,
-})
-````
-
 ### Skip Key Selection (Go SDK Only)
 
 **Context Key:** `BifrostContextKeySkipKeySelection`  
@@ -713,11 +687,31 @@ Input: messages,
 
 The headers `x-bf-eh-user-id` and `x-bf-eh-tracking-id` are forwarded to the provider as `user-id` and `tracking-id` respectively.
 
+When the OTel plugin is enabled, each forwarded header is also attached to the `llm.call` span as a `gen_ai.request.extra_header.<name>` attribute, so the same metadata you send to the provider is searchable in your observability backend without extra wiring.
+
 **Example use cases:**
 - User identification: `x-bf-eh-user-id`, `x-bf-eh-tenant-id`
 - Request tracking: `x-bf-eh-correlation-id`, `x-bf-eh-trace-id`
 - Custom metadata: `x-bf-eh-department`, `x-bf-eh-cost-center`
 - A/B testing: `x-bf-eh-experiment-id`, `x-bf-eh-variant`
+
+**Example: forwarding a session ID**
+
+Send a stable `session-id` for each user session so every LLM call shares the same value on both the provider request and the OTel span:
+
+```bash
+curl --location 'http://localhost:8080/v1/chat/completions' \
+--header 'x-bf-eh-session-id: sess-abc-123' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello!"}]
+}'
+```
+
+Result:
+- Provider receives `session-id: sess-abc-123` in the request headers.
+- OTel `llm.call` span gets attribute `gen_ai.request.extra_header.session-id = "sess-abc-123"` so you can filter or group traces by session in Grafana, Datadog, Honeycomb, Langfuse, etc.
 
 ## Semantic Cache Options
 
