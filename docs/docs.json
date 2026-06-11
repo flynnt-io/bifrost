@@ -60,9 +60,7 @@
           {
             "group": "Overview",
             "icon": "book-open-cover",
-            "pages": [
-              "overview"
-            ]
+            "pages": ["overview"]
           },
           {
             "group": "Quick Start",
@@ -102,23 +100,17 @@
           {
             "group": "Release Cadence",
             "icon": "calendar",
-            "pages": [
-              "release-cadence"
-            ]
+            "pages": ["release-cadence"]
           },
           {
             "group": "Migration Guides",
             "icon": "arrow-up-right-dots",
-            "pages": [
-              "migration-guides/v1.5.0"
-            ]
+            "pages": ["migration-guides/v1.5.0"]
           },
           {
             "group": "SDK Integrations",
             "icon": "plug",
-            "pages": [
-              "integrations/what-is-an-integration"
-            ]
+            "pages": ["integrations/what-is-an-integration"]
           },
           {
             "group": "Providers & Guides",
@@ -203,10 +195,7 @@
               {
                 "group": "Writing Plugins",
                 "icon": "code",
-                "pages": [
-                  "plugins/writing-go-plugin",
-                  "plugins/writing-wasm-plugin"
-                ]
+                "pages": ["plugins/writing-go-plugin", "plugins/writing-wasm-plugin"]
               },
               "plugins/migration-guide"
             ]
@@ -227,8 +216,10 @@
                   "features/governance/virtual-keys",
                   "features/governance/routing",
                   "features/governance/budget-and-limits",
+                  "features/governance/model-limits",
                   "features/governance/mcp-tools",
-                  "features/governance/required-headers"
+                  "features/governance/required-headers",
+                  "features/governance/complexity-router"
                 ]
               },
               "features/telemetry",
@@ -245,10 +236,7 @@
               {
                 "group": "Plugins",
                 "icon": "puzzle-piece",
-                "pages": [
-                  "features/plugins/mocker",
-                  "features/plugins/jsonparser"
-                ]
+                "pages": ["features/plugins/mocker", "features/plugins/jsonparser"]
               }
             ]
           }
@@ -261,9 +249,7 @@
           {
             "group": "Getting Started",
             "icon": "rocket",
-            "pages": [
-              "enterprise/overview"
-            ]
+            "pages": ["enterprise/overview"]
           },
           {
             "group": "Moving from OSS",
@@ -279,16 +265,12 @@
           {
             "group": "Release Cadence",
             "icon": "calendar",
-            "pages": [
-              "enterprise/release-cadence"
-            ]
+            "pages": ["enterprise/release-cadence"]
           },
           {
             "group": "Migration Guides",
             "icon": "arrow-up-right-dots",
-            "pages": [
-              "enterprise/migration-guides/v1.4.0"
-            ]
+            "pages": ["enterprise/migration-guides/v1.4.0"]
           },
           {
             "group": "Features",
@@ -325,9 +307,37 @@
           {
             "group": "Security",
             "icon": "shield",
-            "pages": [
-              "security"
-            ]
+            "pages": ["security"]
+          }
+        ]
+      },
+      {
+        "tab": "Edge",
+        "icon": "globe",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": ["edge/overview", "edge/how-it-works"]
+          },
+          {
+            "group": "Governance & Control",
+            "icon": "shield-halved",
+            "pages": ["edge/app-governance", "edge/mcp-governance", "edge/security"]
+          },
+          {
+            "group": "Admin controls",
+            "icon": "sliders",
+            "pages": ["edge/admin-devices", "edge/admin-approvals", "edge/admin-configurations"]
+          },
+          {
+            "group": "Deployment",
+            "icon": "cloud-arrow-up",
+            "pages": ["edge/deployment-mdm"]
+          },
+          {
+            "group": "Reference",
+            "icon": "list",
+            "pages": ["edge/supported-applications"]
           }
         ]
       },
@@ -384,9 +394,7 @@
               {
                 "group": "GenAI SDK",
                 "icon": "diamond",
-                "pages": [
-                  "integrations/genai-sdk/overview"
-                ]
+                "pages": ["integrations/genai-sdk/overview"]
               },
               "integrations/litellm-sdk",
               "integrations/langchain-sdk",
@@ -448,11 +456,7 @@
           {
             "group": "Platform specific guides",
             "icon": "swatchbook",
-            "pages": [
-              "deployment-guides/k8s",
-              "deployment-guides/ecs",
-              "deployment-guides/fly"
-            ]
+            "pages": ["deployment-guides/k8s", "deployment-guides/ecs", "deployment-guides/fly"]
           },
           {
             "group": "Config as Code",
@@ -509,6 +513,7 @@
               "deployment-guides/how-to/install-make",
               "deployment-guides/how-to/multinode",
               "deployment-guides/how-to/nginx-reverse-proxy",
+              "deployment-guides/how-to/airgapped",
               "deployment-guides/docker-tuning"
             ]
           }
@@ -583,14 +588,24 @@
             "item": "Open Source",
             "icon": "rocket",
             "pages": [
-              "changelogs/v1.5.6",
-              "changelogs/v1.5.5",
-              "changelogs/v1.5.4",
-              "changelogs/v1.5.3",
-              "changelogs/v1.5.2",
-              "changelogs/v1.5.1",
-              "changelogs/v1.5.0",
-              "changelogs/v1.5.0-prerelease8",
+              "changelogs/v1.5.11",
+              "changelogs/v1.5.10",
+              "changelogs/v1.5.9",
+              "changelogs/v1.5.8",
+              {
+                "group": "May 2026",
+                "pages": [
+                  "changelogs/v1.5.7",
+                  "changelogs/v1.5.6",
+                  "changelogs/v1.5.5",
+                  "changelogs/v1.5.4",
+                  "changelogs/v1.5.3",
+                  "changelogs/v1.5.2",
+                  "changelogs/v1.5.1",
+                  "changelogs/v1.5.0",
+                  "changelogs/v1.5.0-prerelease8"
+                ]
+              },
               {
                 "group": "April 2026",
                 "pages": [
@@ -741,10 +756,7 @@
               },
               {
                 "group": "September 2025",
-                "pages": [
-                  "changelogs/v1.2.22",
-                  "changelogs/v1.2.21"
-                ]
+                "pages": ["changelogs/v1.2.22", "changelogs/v1.2.21"]
               }
             ]
           },
@@ -752,6 +764,10 @@
             "item": "Enterprise",
             "icon": "building",
             "pages": [
+              "changelogs/ent-v1.4.8",
+              "changelogs/ent-v1.4.7",
+              "changelogs/ent-v1.4.7-rc1",
+              "changelogs/ent-v1.4.6",
               "changelogs/ent-v1.4.5",
               "changelogs/ent-v1.4.4",
               "changelogs/ent-v1.4.3",
@@ -795,6 +811,7 @@
             "item": "Bifrost CLI",
             "icon": "laptop-code",
             "pages": [
+              "changelogs/cli-v0.10.5",
               "changelogs/cli-v0.10.4",
               {
                 "group": "March 2026",
@@ -811,6 +828,7 @@
             "item": "Helm",
             "icon": "box",
             "pages": [
+              "changelogs/helm-v2.1.21",
               "changelogs/helm-v2.1.20",
               "changelogs/helm-v2.1.19",
               "changelogs/helm-v2.1.18",
